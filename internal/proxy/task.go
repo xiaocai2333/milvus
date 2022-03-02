@@ -4649,7 +4649,6 @@ func (dt *deleteTask) getChannels() ([]pChan, error) {
 	if err != nil {
 		return nil, err
 	}
-	dt.collectionID = collID
 	var channels []pChan
 	channels, err = dt.chMgr.getChannels(collID)
 	if err != nil {
@@ -4711,6 +4710,7 @@ func (dt *deleteTask) PreExecute(ctx context.Context) error {
 		return err
 	}
 	dt.DeleteRequest.CollectionID = collID
+	dt.collectionID = collID
 
 	// If partitionName is not empty, partitionID will be set.
 	if len(dt.req.PartitionName) > 0 {
