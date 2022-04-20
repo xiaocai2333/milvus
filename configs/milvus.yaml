@@ -136,7 +136,7 @@ queryNode:
   segcore:
     chunkRows: 32768 # The number of vectors in a chunk.
   merge:
-    mergeSearchReqs: false # enable query merging
+    mergeSearchReqs: true # enable query merging
 
 
 indexCoord:
@@ -171,7 +171,7 @@ dataCoord:
   enableGarbageCollection: false
 
   segment:
-    maxSize: 512 # Maximum size of a segment in MB
+    maxSize: 3072 # Maximum size of a segment in MB
     sealProportion: 0.75 # It's the minimum proportion for a segment which can be sealed
     assignmentExpiration: 2000 # The time of the assignment expiration in ms
 
@@ -209,7 +209,7 @@ localStorage:
 
 # Configures the system log output.
 log:
-  level: debug # Only supports debug, info, warn, error, panic, or fatal. Default 'info'.
+  level: info # Only supports debug, info, warn, error, panic, or fatal. Default 'info'.
   file:
     rootPath: "" # default to stdout, stderr
     maxSize: 300 # MB

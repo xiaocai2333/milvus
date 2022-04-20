@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 
@@ -2401,6 +2402,10 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 			Status: unhealthyStatus(),
 		}, nil
 	}
+	log.Info("Proxy receive a search request", zap.Int64("time", time.Now().UnixMicro()))
+	defer func() {
+		log.Info("Proxy search request end", zap.Int64("time", time.Now().UnixMicro()))
+	}()
 	metrics.ProxyReceiveReqsNum.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
 		request.CollectionName).Inc()
 	method := "Search"
