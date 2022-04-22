@@ -146,7 +146,7 @@ func newQueryCollection(ctx context.Context,
 		localCacheEnabled:    localCacheEnabled,
 		globalSegmentManager: newGlobalSealedSegmentManager(collectionID),
 
-		executeChan:     make(chan queryMsg, 1024),
+		executeChan:     make(chan queryMsg, 1),
 		publishChan:     make(chan *pubResult, 1024),
 		notifyChan:      make(chan bool, 1),
 		receiveMsgChan:  make(chan bool, 1),
@@ -301,11 +301,13 @@ func (q *queryCollection) addToUnsolvedMsg(msg queryMsg) {
 }
 
 func (q *queryCollection) popAllUnsolvedMsg() []queryMsg {
+	log.Info("popAllUnsolvedMsg", zap.Int64("time", time.Now().UnixMicro()))
 	q.unsolvedMsgMu.Lock()
 	defer q.unsolvedMsgMu.Unlock()
 	ret := make([]queryMsg, 0, len(q.unsolvedMsg))
 	ret = append(ret, q.unsolvedMsg...)
 	q.unsolvedMsg = q.unsolvedMsg[:0]
+	log.Info("popAllUnsolvedMsg", zap.Int64("time", time.Now().UnixMicro()))
 	return ret
 }
 
@@ -439,16 +441,30 @@ func (q *queryCollection) publishResultLoop() {
 					switch msg.Type() {
 					case commonpb.MsgType_Search:
 						var el errorutil.ErrorList
+						tr := timerecord.NewTimeRecorder("pubResult")
+						var wg sync.WaitGroup
 						for _, ret := range msg.SearchRet.results {
-							publishErr := q.publishSearchResult(ret, ret.Base.SourceID)
-							if publishErr != nil {
-								el = append(el, publishErr)
-							}
-							publishResultDuration := msg.Msg.GetTimeRecorder().Record(fmt.Sprintf("publish search result, msgID = %d", msg.Msg.ID()))
-							log.Debug(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "PublishSearchResult"),
-								zap.Int64(log.BenchmarkCollectionID, msg.Msg.GetCollectionID()),
-								zap.Int64(log.BenchmarkMsgID, msg.Msg.ID()), zap.Int64(log.BenchmarkDuration, publishResultDuration.Microseconds()))
+							wg.Add(1)
+							ret := ret
+							go func() {
+								defer wg.Done()
+								tr.RecordSpan()
+								publishErr := q.publishSearchResult(ret, ret.Base.SourceID)
+								if publishErr != nil {
+									el = append(el, publishErr)
+								}
+								//publishResultDuration := msg.Msg.GetTimeRecorder().Record(fmt.Sprintf("publish search result, msgID = %d", msg.Msg.ID()))
+								publishResultDuration := tr.RecordSpan()
+								log.Info(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "PublishSearchResult"),
+									zap.Int64(log.BenchmarkCollectionID, msg.Msg.GetCollectionID()),
+									zap.Int64(log.BenchmarkMsgID, msg.Msg.ID()), zap.Int64(log.BenchmarkDuration, publishResultDuration.Microseconds()))
+								//metrics.QueryNodePublishSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(publishResultDuration.Microseconds()))
+							}()
 						}
+						wg.Wait()
+						log.Info("publish search results", zap.Int64("msgID", msg.Msg.ID()), zap.Int64("duration", tr.ElapseSpan().Microseconds()))
+						pubMergedResultsDur := msg.Msg.GetTimeRecorder().ElapseSpan()
+						metrics.QueryNodePublishMergedSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(pubMergedResultsDur.Microseconds()))
 						msg.SearchRet.Close()
 						if el != nil {
 							log.Warn("publishSearchResult failed", zap.Error(el))
@@ -493,13 +509,16 @@ func (q *queryCollection) executeSearchMsgs() {
 				log.Debug("receive a query msg", zap.Int64("msgID", msg.ID()), zap.Any("msg type", msg.Type()))
 				switch msg.Type() {
 				case commonpb.MsgType_Search:
+					log.Info("execute chan receive request", zap.Int64("msgID", msg.ID()), zap.Int64("time", time.Now().UnixMicro()))
 					ret, err := q.search(msg)
 					pubRet := &pubResult{
 						Msg:       msg,
 						Err:       err,
 						SearchRet: ret,
 					}
+					pubRet.Msg.GetTimeRecorder().RecordSpan()
 					q.addToPublishChan(pubRet)
+					metrics.QueryNodePublishSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(msg.GetTimeRecorder().ElapseSpan().Microseconds()))
 					q.executeNQNum.Store(q.executeNQNum.Load().(int64) - msg.(*searchMsg).NQ)
 					metrics.QueryNodeExecuteReqs.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Add(float64(len(msg.(*searchMsg).ReqIDs)))
 					if len(q.notifyChan) == 0 {
@@ -643,15 +662,18 @@ func (q *queryCollection) checkSearchCanDo(msg queryMsg) (bool, error) {
 }
 
 func (q *queryCollection) popAndAddToQuery() {
+	tr := timerecord.NewTimeRecorder("popMsgAndSet")
 	if len(q.executeChan) < maxExecuteReqs && q.executeNQNum.Load().(int64) < maxExecuteNQ {
 		if len(q.mergedMsgs) > 0 {
 			msg := q.mergedMsgs[0]
+			log.Info("send search request to execute chan", zap.Int64("msgID", msg.ID()), zap.Int64("time", time.Now().UnixMicro()))
 			q.executeChan <- msg
 			q.mergedMsgs = q.mergedMsgs[1:]
 			sMsg, ok := msg.(*searchMsg)
 			if ok {
 				q.executeNQNum.Store(q.executeNQNum.Load().(int64) + sMsg.NQ)
 			}
+			metrics.QueryNodePopAndSetMsg.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(tr.ElapseSpan().Microseconds()))
 		}
 	}
 }
@@ -667,9 +689,9 @@ func (q *queryCollection) schedulerSearchMsgs() {
 			return
 		case <-q.notifyChan:
 			q.needWaitNewTsafeMsgs = append(q.needWaitNewTsafeMsgs, q.popAllUnsolvedMsg()...)
-			if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
-				continue
-			}
+			//if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
+			//	continue
+			//}
 			q.mergedMsgs, q.needWaitNewTsafeMsgs = q.mergeSearchReqsByMaxNQ(q.mergedMsgs, q.needWaitNewTsafeMsgs)
 			q.popAndAddToQuery()
 
@@ -680,9 +702,9 @@ func (q *queryCollection) schedulerSearchMsgs() {
 
 		case <-q.tsafeUpdateChan:
 			q.needWaitNewTsafeMsgs = append(q.needWaitNewTsafeMsgs, q.popAllUnsolvedMsg()...)
-			if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
-				continue
-			}
+			//if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
+			//	continue
+			//}
 			q.mergedMsgs, q.needWaitNewTsafeMsgs = q.mergeSearchReqsByMaxNQ(q.mergedMsgs, q.needWaitNewTsafeMsgs)
 			q.popAndAddToQuery()
 			//runtime.GC()
@@ -911,6 +933,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 		panic("Unexpected error: qMsg is not of type searchMsg")
 	}
 	searchMsg.CombinePlaceHolderGroups()
+	log.Info(log.BenchmarkRoot, zap.Int64("msgID", searchMsg.ID()), zap.Int64("querynode-search", searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()))
 	q.streaming.replica.queryRLock()
 	q.historical.replica.queryRLock()
 	defer q.historical.replica.queryRUnlock()
@@ -918,7 +941,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 
 	collectionID := searchMsg.CollectionID
 
-	searchTime := searchMsg.tr.ElapseSpan().Microseconds()
+	searchTime := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
 	metrics.QueryNodeSearchNQ.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(searchMsg.NQ))
 	//time.Sleep(200 * time.Millisecond)
 	for _, msgID := range searchMsg.ReqIDs {
@@ -984,7 +1007,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 			oplog.Object("dsl", searchMsg.Dsl))
 	}
 
-	tr := timerecord.NewTimeRecorder(fmt.Sprintf("search %d(nq=%d, k=%d), msgID = %d", searchMsg.CollectionID, nq, topK, searchMsg.ID()))
+	//tr := timerecord.NewTimeRecorder(fmt.Sprintf("search %d(nq=%d, k=%d), msgID = %d", searchMsg.CollectionID, nq, topK, searchMsg.ID()))
 
 	// get global sealed segments
 	var globalSealedSegments []UniqueID
@@ -999,17 +1022,18 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 		deleteSearchResults(searchResults)
 	}()
 	// historical search
-	trHis := timerecord.NewTimeRecorder("hisRecorder")
+	//trHis := timerecord.NewTimeRecorder("hisRecorder")
 	log.Debug("historical search start", zap.Int64("msgID", searchMsg.ID()))
 	hisSearchResults, sealedSegmentSearched, sealedPartitionSearched, err := q.historical.search(searchReq, collection.id, searchMsg.PartitionIDs, plan, travelTimestamp)
 	if err != nil {
 		return nil, err
 	}
-	metrics.QueryNodeSearchHistorical.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(trHis.ElapseSpan().Microseconds()))
+	hisSearchDur := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
+	metrics.QueryNodeSearchHistorical.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(hisSearchDur))
 	searchResults = append(searchResults, hisSearchResults...)
 
 	log.Debug("historical search", zap.Int64("msgID", searchMsg.ID()), zap.Int64("collectionID", collectionID), zap.Int64s("searched partitionIDs", sealedPartitionSearched), zap.Int64s("searched segmentIDs", sealedSegmentSearched))
-	hisSearchDur := tr.Record(fmt.Sprintf("historical search done, msgID = %d", searchMsg.ID())).Microseconds()
+	//hisSearchDur := tr.Record(fmt.Sprintf("historical search done, msgID = %d", searchMsg.ID())).Microseconds()
 	for _, msgID := range searchMsg.ReqIDs {
 		log.Info(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "HistoricalSearch"),
 			zap.Int64(log.BenchmarkCollectionID, collectionID),
@@ -1024,7 +1048,8 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 		searchResults = append(searchResults, strSearchResults...)
 		log.Debug("streaming search", zap.Int64("msgID", searchMsg.ID()), zap.Int64("collectionID", collectionID), zap.String("searched dmChannel", channel), zap.Int64s("searched partitionIDs", growingPartitionSearched), zap.Int64s("searched segmentIDs", growingSegmentSearched))
 	}
-	streamingSearchDuration := tr.Record(fmt.Sprintf("streaming search done, msgID = %d", searchMsg.ID())).Microseconds()
+	streamingSearchDuration := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
+	//streamingSearchDuration := tr.Record(fmt.Sprintf("streaming search done, msgID = %d", searchMsg.ID())).Microseconds()
 	for _, msgID := range searchMsg.ReqIDs {
 		log.Info(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "StreamingSearch"),
 			zap.Int64(log.BenchmarkCollectionID, collectionID),
@@ -1067,7 +1092,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 	numSegment := int64(len(searchResults))
 
 	log.Debug("QueryNode reduce data", zap.Int64("msgID", searchMsg.ID()), zap.Int64("numSegment", numSegment))
-	tr.RecordSpan()
+	//tr.RecordSpan()
 	err = reduceSearchResultsAndFillData(plan, searchResults, numSegment)
 	log.Debug("QueryNode reduce data finished", zap.Int64("msgID", searchMsg.ID()))
 	sp.LogFields(oplog.String("statistical time", "reduceSearchResults end"))
@@ -1091,6 +1116,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 	}
 
 	pubRet := &pubSearchResults{}
+	reduceTime := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
 
 	for i, reqID := range sInfo.reqIDs {
 		blob, err := getSearchResultDataBlob(blobs, i)
@@ -1099,12 +1125,11 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 			return nil, err
 		}
 
-		reduceTime := tr.RecordSpan()
 		log.Debug(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "QNReduceSearchResults"),
 			zap.Int64(log.BenchmarkCollectionID, collectionID),
-			zap.Int64(log.BenchmarkMsgID, reqID), zap.Int64(log.BenchmarkDuration, reduceTime.Microseconds()))
-		metrics.QueryNodeReduceLatency.WithLabelValues(metrics.SearchLabel, fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Observe(float64(reduceTime.Milliseconds()))
-		metrics.QueryNodeSearchReduce.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(reduceTime.Microseconds()))
+			zap.Int64(log.BenchmarkMsgID, reqID), zap.Int64(log.BenchmarkDuration, reduceTime))
+		metrics.QueryNodeReduceLatency.WithLabelValues(metrics.SearchLabel, fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Observe(float64(reduceTime))
+		metrics.QueryNodeSearchReduce.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(reduceTime))
 
 		ret := &internalpb.SearchResults{
 			Base: &commonpb.MsgBase{
@@ -1144,7 +1169,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 		//	zap.Int64(log.BenchmarkMsgID, searchMsg.ID()), zap.Int64(log.BenchmarkDuration, publishResultDuration.Microseconds()))
 	}
 	sp.LogFields(oplog.String("statistical time", "stats done"))
-	tr.Elapse(fmt.Sprintf("all done, msgID = %d", searchMsg.ID()))
+	//tr.Elapse(fmt.Sprintf("all done, msgID = %d", searchMsg.ID()))
 	pubRet.Blobs = blobs
 	return pubRet, nil
 }
@@ -1222,6 +1247,7 @@ func (q *queryCollection) mergeSearchReqsByMaxNQ(mergedMsgs []queryMsg, queryMsg
 		} else {
 			canNotDoMsg = append(canNotDoMsg, msg)
 		}
+		metrics.QueryNodeWaitForMerge.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(msg.GetTimeRecorder().ElapseSpan().Microseconds()))
 	}
 	metrics.QueryNodeWaitForExecuteReqs.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(len(mergedMsgs)))
 	return mergedMsgs, canNotDoMsg

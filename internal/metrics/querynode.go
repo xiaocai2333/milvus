@@ -284,6 +284,34 @@ var (
 			Subsystem: typeutil.QueryNodeRole,
 			Name:      "query_node_search_reduce",
 		}, []string{nodeIDLabelName})
+
+	QueryNodeWaitForMerge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.QueryNodeRole,
+			Name:      "query_node_wait_for_merge",
+		}, []string{nodeIDLabelName})
+
+	QueryNodePublishSearchResult = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.QueryNodeRole,
+			Name:      "query_node_publish_search_result",
+		}, []string{nodeIDLabelName})
+
+	QueryNodePublishMergedSearchResult = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.QueryNodeRole,
+			Name:      "query_node_publish_merged_search_result",
+		}, []string{nodeIDLabelName})
+
+	QueryNodePopAndSetMsg = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.QueryNodeRole,
+			Name:      "query_node_pop_and_set_msg",
+		}, []string{nodeIDLabelName})
 )
 
 //RegisterQueryNode registers QueryNode metrics
@@ -314,4 +342,8 @@ func RegisterQueryNode() {
 	prometheus.MustRegister(QueryNodeSearch)
 	prometheus.MustRegister(QueryNodeSearchHistorical)
 	prometheus.MustRegister(QueryNodeSearchReduce)
+	prometheus.MustRegister(QueryNodeWaitForMerge)
+	prometheus.MustRegister(QueryNodePublishSearchResult)
+	prometheus.MustRegister(QueryNodePublishMergedSearchResult)
+	prometheus.MustRegister(QueryNodePopAndSetMsg)
 }
