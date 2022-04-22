@@ -301,13 +301,11 @@ func (q *queryCollection) addToUnsolvedMsg(msg queryMsg) {
 }
 
 func (q *queryCollection) popAllUnsolvedMsg() []queryMsg {
-	log.Info("popAllUnsolvedMsg", zap.Int64("time", time.Now().UnixMicro()))
 	q.unsolvedMsgMu.Lock()
 	defer q.unsolvedMsgMu.Unlock()
 	ret := make([]queryMsg, 0, len(q.unsolvedMsg))
 	ret = append(ret, q.unsolvedMsg...)
 	q.unsolvedMsg = q.unsolvedMsg[:0]
-	log.Info("popAllUnsolvedMsg", zap.Int64("time", time.Now().UnixMicro()))
 	return ret
 }
 
