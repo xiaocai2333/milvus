@@ -463,8 +463,7 @@ func (q *queryCollection) publishResultLoop() {
 						}
 						wg.Wait()
 						log.Info("publish search results", zap.Int64("msgID", msg.Msg.ID()), zap.Int64("duration", tr.ElapseSpan().Microseconds()))
-						pubMergedResultsDur := msg.Msg.GetTimeRecorder().ElapseSpan()
-						metrics.QueryNodePublishMergedSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(pubMergedResultsDur.Microseconds()))
+						metrics.QueryNodePublishMergedSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(msg.Msg.GetTimeRecorder().RecordSpan().Microseconds()))
 						msg.SearchRet.Close()
 						if el != nil {
 							log.Warn("publishSearchResult failed", zap.Error(el))
@@ -518,7 +517,7 @@ func (q *queryCollection) executeSearchMsgs() {
 					}
 					pubRet.Msg.GetTimeRecorder().RecordSpan()
 					q.addToPublishChan(pubRet)
-					metrics.QueryNodePublishSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(msg.GetTimeRecorder().ElapseSpan().Microseconds()))
+					metrics.QueryNodePublishSearchResult.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(msg.GetTimeRecorder().RecordSpan().Microseconds()))
 					q.executeNQNum.Store(q.executeNQNum.Load().(int64) - msg.(*searchMsg).NQ)
 					metrics.QueryNodeExecuteReqs.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Add(float64(len(msg.(*searchMsg).ReqIDs)))
 					if len(q.notifyChan) == 0 {
@@ -662,7 +661,6 @@ func (q *queryCollection) checkSearchCanDo(msg queryMsg) (bool, error) {
 }
 
 func (q *queryCollection) popAndAddToQuery() {
-	tr := timerecord.NewTimeRecorder("popMsgAndSet")
 	if len(q.executeChan) < maxExecuteReqs && q.executeNQNum.Load().(int64) < maxExecuteNQ {
 		if len(q.mergedMsgs) > 0 {
 			msg := q.mergedMsgs[0]
@@ -673,7 +671,6 @@ func (q *queryCollection) popAndAddToQuery() {
 			if ok {
 				q.executeNQNum.Store(q.executeNQNum.Load().(int64) + sMsg.NQ)
 			}
-			metrics.QueryNodePopAndSetMsg.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(tr.ElapseSpan().Microseconds()))
 		}
 	}
 }
@@ -1028,7 +1025,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 	if err != nil {
 		return nil, err
 	}
-	hisSearchDur := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
+	hisSearchDur := searchMsg.GetTimeRecorder().RecordSpan().Microseconds()
 	metrics.QueryNodeSearchHistorical.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(hisSearchDur))
 	searchResults = append(searchResults, hisSearchResults...)
 
@@ -1048,7 +1045,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 		searchResults = append(searchResults, strSearchResults...)
 		log.Debug("streaming search", zap.Int64("msgID", searchMsg.ID()), zap.Int64("collectionID", collectionID), zap.String("searched dmChannel", channel), zap.Int64s("searched partitionIDs", growingPartitionSearched), zap.Int64s("searched segmentIDs", growingSegmentSearched))
 	}
-	streamingSearchDuration := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
+	streamingSearchDuration := searchMsg.GetTimeRecorder().RecordSpan().Microseconds()
 	//streamingSearchDuration := tr.Record(fmt.Sprintf("streaming search done, msgID = %d", searchMsg.ID())).Microseconds()
 	for _, msgID := range searchMsg.ReqIDs {
 		log.Info(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "StreamingSearch"),
@@ -1116,7 +1113,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 	}
 
 	pubRet := &pubSearchResults{}
-	reduceTime := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
+	reduceTime := searchMsg.GetTimeRecorder().RecordSpan().Microseconds()
 
 	for i, reqID := range sInfo.reqIDs {
 		blob, err := getSearchResultDataBlob(blobs, i)
@@ -1159,7 +1156,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 			zap.Any("sealedSegmentSearched", sealedSegmentSearched),
 		)
 		metrics.QueryNodeSQReqLatency.WithLabelValues(metrics.SearchLabel,
-			fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Observe(float64(searchMsg.tr.ElapseSpan().Milliseconds()))
+			fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Observe(float64(searchMsg.GetTimeRecorder().RecordSpan().Milliseconds()))
 		metrics.QueryNodeSQCount.WithLabelValues(metrics.SuccessLabel,
 			metrics.SearchLabel,
 			fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Inc()
