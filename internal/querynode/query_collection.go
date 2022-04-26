@@ -93,10 +93,11 @@ type queryCollection struct {
 	executeNQNum    atomic.Value
 	wg              sync.WaitGroup
 	mergeMsgs       bool
+	searchReq          atomic.Value
 }
 
 const (
-	maxExecuteReqs = 1
+	maxExecuteReqs = 5
 	maxExecuteNQ   = 5000
 )
 
@@ -146,15 +147,17 @@ func newQueryCollection(ctx context.Context,
 		localCacheEnabled:    localCacheEnabled,
 		globalSegmentManager: newGlobalSealedSegmentManager(collectionID),
 
-		executeChan:     make(chan queryMsg, 1),
+		executeChan:     make(chan queryMsg, maxExecuteReqs),
 		publishChan:     make(chan *pubResult, 1024),
-		notifyChan:      make(chan bool, 1),
-		receiveMsgChan:  make(chan bool, 1),
-		tsafeUpdateChan: make(chan bool, 1),
+		notifyChan:      make(chan bool, 1024),
+		receiveMsgChan:  make(chan bool, 1024),
+		tsafeUpdateChan: make(chan bool, 1024),
 		executeNQNum:    atomic.Value{},
 		mergeMsgs:       Params.QueryNodeCfg.MergeSearchReqs,
+		searchReq:          atomic.Value{},
 	}
 	qc.executeNQNum.Store(int64(0))
+	qc.searchReq.Store(false)
 
 	for _, opt := range opts {
 		opt(qc)
@@ -659,11 +662,13 @@ func (q *queryCollection) checkSearchCanDo(msg queryMsg) (bool, error) {
 }
 
 func (q *queryCollection) popAndAddToQuery() {
-	if len(q.executeChan) < maxExecuteReqs && q.executeNQNum.Load().(int64) < maxExecuteNQ {
+	//if len(q.executeChan) < maxExecuteReqs && q.executeNQNum.Load().(int64) < maxExecuteNQ {
+	if len(q.executeChan) < maxExecuteReqs && q.executeNQNum.Load().(int64) < maxExecuteNQ && !q.searchReq.Load().(bool) {
 		if len(q.mergedMsgs) > 0 {
 			msg := q.mergedMsgs[0]
 			log.Info("send search request to execute chan", zap.Int64("msgID", msg.ID()), zap.Int64("time", time.Now().UnixMicro()))
 			q.executeChan <- msg
+			q.searchReq.Store(true)
 			q.mergedMsgs = q.mergedMsgs[1:]
 			sMsg, ok := msg.(*searchMsg)
 			if ok {
@@ -684,25 +689,27 @@ func (q *queryCollection) schedulerSearchMsgs() {
 			return
 		case <-q.notifyChan:
 			q.needWaitNewTsafeMsgs = append(q.needWaitNewTsafeMsgs, q.popAllUnsolvedMsg()...)
-			//if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
-			//	continue
-			//}
+			if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
+				continue
+			}
 			q.mergedMsgs, q.needWaitNewTsafeMsgs = q.mergeSearchReqsByMaxNQ(q.mergedMsgs, q.needWaitNewTsafeMsgs)
 			q.popAndAddToQuery()
 
 		case <-q.receiveMsgChan:
 			q.needWaitNewTsafeMsgs = append(q.needWaitNewTsafeMsgs, q.popAllUnsolvedMsg()...)
+			if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
+				continue
+			}
 			q.mergedMsgs, q.needWaitNewTsafeMsgs = q.mergeSearchReqsByMaxNQ(q.mergedMsgs, q.needWaitNewTsafeMsgs)
 			q.popAndAddToQuery()
 
 		case <-q.tsafeUpdateChan:
 			q.needWaitNewTsafeMsgs = append(q.needWaitNewTsafeMsgs, q.popAllUnsolvedMsg()...)
-			//if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
-			//	continue
-			//}
+			if len(q.needWaitNewTsafeMsgs) == 0 && len(q.mergedMsgs) == 0 {
+				continue
+			}
 			q.mergedMsgs, q.needWaitNewTsafeMsgs = q.mergeSearchReqsByMaxNQ(q.mergedMsgs, q.needWaitNewTsafeMsgs)
 			q.popAndAddToQuery()
-			//runtime.GC()
 		}
 	}
 }
@@ -938,7 +945,6 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 
 	searchTime := searchMsg.GetTimeRecorder().ElapseSpan().Microseconds()
 	metrics.QueryNodeSearchNQ.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Set(float64(searchMsg.NQ))
-	//time.Sleep(200 * time.Millisecond)
 	for _, msgID := range searchMsg.ReqIDs {
 		log.Info(log.BenchmarkRoot, zap.String(log.BenchmarkRole, typeutil.QueryNodeRole), zap.String(log.BenchmarkStep, "start search"),
 			zap.Int64(log.BenchmarkCollectionID, collectionID),
@@ -1051,6 +1057,7 @@ func (q *queryCollection) search(qMsg queryMsg) (*pubSearchResults, error) {
 			zap.Int64(log.BenchmarkMsgID, msgID), zap.Int64(log.BenchmarkDuration, streamingSearchDuration))
 	}
 	sp.LogFields(oplog.String("statistical time", "segment search end"))
+	q.searchReq.Store(false)
 	if len(searchResults) <= 0 {
 		pubRet := &pubSearchResults{}
 		for i, reqID := range searchMsg.ReqIDs {

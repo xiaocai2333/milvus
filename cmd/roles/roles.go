@@ -403,7 +403,7 @@ func (mr *MilvusRoles) Run(local bool, alias string) {
 
 	var qn *components.QueryNode
 	if mr.EnableQueryNode {
-		//metrics.ServeHTTP()
+		metrics.ServeHTTP()
 		qn = mr.runQueryNode(ctx, local, alias)
 		if qn != nil {
 			defer qn.Stop()
@@ -487,7 +487,7 @@ func (mr *MilvusRoles) Run(local bool, alias string) {
 		http.HandleFunc(healthz.HealthzRouterPath, standaloneHealthzHandler)
 	}
 
-	 metrics.ServeHTTP()
+	//metrics.ServeHTTP()
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc,
 		syscall.SIGHUP,

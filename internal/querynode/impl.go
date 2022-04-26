@@ -575,7 +575,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 }
 
 func (node *QueryNode) Search(ctx context.Context, req *queryPb.SearchRequest) (*commonpb.Status, error) {
-	log.Info("QueryNode receive a search request")
+	log.Info("QueryNode receive a search request", zap.Int64("reqID", req.Request.ReqID))
 	tsMsg := &msgstream.SearchMsg{
 		SearchRequest: *req.Request,
 		BaseMsg: msgstream.BaseMsg{

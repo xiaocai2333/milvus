@@ -773,3 +773,36 @@ func TestQueryCollection_search_while_release(t *testing.T) {
 	})
 	wgAll.Wait()
 }
+
+//func genSimpleQueryMsg(req *internalpb.SearchRequest) queryMsg {
+//	tsMsg := &msgstream.SearchMsg{
+//		SearchRequest: *req,
+//		BaseMsg: msgstream.BaseMsg{
+//			Ctx:            context.Background(),
+//			HashValues:     []uint32{uint32(Params.ProxyCfg.ProxyID)},
+//			BeginTimestamp: 0,
+//			EndTimestamp:   0,
+//		},
+//	}
+//	return convertSearchMsg(tsMsg)
+//}
+
+//func TestQueryCollection_mergeSearchReqsByMaxNQ(t *testing.T) {
+//	queryMsgs := make([]queryMsg, 10000)
+//	mergedMsgs := make([]queryMsg, 0)
+//	for i := range queryMsgs {
+//		req, _ := genSimpleSearchRequest()
+//		queryMsgs[i] = genSimpleQueryMsg(req)
+//	}
+//	qc := queryCollection{
+//		mergeMsgs: true,
+//
+//	}
+//	start := time.Now().UnixMicro()
+//	mergedMsgs, undoMsgs := qc.mergeSearchReqsByMaxNQ(mergedMsgs, queryMsgs)
+//	end := time.Now().UnixMicro()
+//	fmt.Printf("merge nq = %d, merge time = %d", len(queryMsgs), end-start)
+//	assert.Equal(t, 0, len(undoMsgs))
+//	assert.Equal(t, 10, len(mergedMsgs))
+//	assert.Equal(t, len(queryMsgs)/10, mergedMsgs[0].GetNumMerged())
+//}
