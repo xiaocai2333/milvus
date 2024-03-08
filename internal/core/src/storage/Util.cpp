@@ -443,6 +443,24 @@ GenFieldRawDataPathPrefix(ChunkManagerPtr cm,
 }
 
 std::string
+GenCompactionRawDataPathPrefix(ChunkManagerPtr cm,
+                               int64_t partition_id,
+                               int64_t field_id) {
+    return cm->GetRootPath() + "/" + std::string(COMPACTION_RAWDATA_ROOT_PATH) +
+           "/" + std::to_string(partition_id) + "/" + std::to_string(field_id) +
+           "/";
+}
+
+std::string
+GenCompactionResultPathPrefix(ChunkManagerPtr cm,
+                              int64_t build_id,
+                              int64_t index_version) {
+    return cm->GetRootPath() + "/" + std::string(COMPACTION_RESULT_ROOT_PATH) +
+           "/" + std::to_string(build_id) + "/" +
+           std::to_string(index_version) + "/";
+}
+
+std::string
 GetSegmentRawDataPathPrefix(ChunkManagerPtr cm, int64_t segment_id) {
     return cm->GetRootPath() + "/" + std::string(RAWDATA_ROOT_PATH) + "/" +
            std::to_string(segment_id);

@@ -83,6 +83,15 @@ GenFieldRawDataPathPrefix(ChunkManagerPtr cm,
                           int64_t field_id);
 
 std::string
+GenCompactionRawDataPathPrefix(ChunkManagerPtr cm,
+                               int64_t partition_id,
+                               int64_t field_id);
+std::string
+GenCompactionResultPathPrefix(ChunkManagerPtr cm,
+                              int64_t index_version,
+                              int64_t build_id);
+
+std::string
 GetSegmentRawDataPathPrefix(ChunkManagerPtr cm, int64_t segment_id);
 
 std::unique_ptr<DataCodec>

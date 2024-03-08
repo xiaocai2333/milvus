@@ -14,21 +14,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package datacoord
+#pragma once
 
-const (
-	MetaPrefix                = "datacoord-meta"
-	SegmentPrefix             = MetaPrefix + "/s"
-	SegmentBinlogPathPrefix   = MetaPrefix + "/binlog"
-	SegmentDeltalogPathPrefix = MetaPrefix + "/deltalog"
-	SegmentStatslogPathPrefix = MetaPrefix + "/statslog"
-	ChannelRemovePrefix       = MetaPrefix + "/channel-removal"
-	ChannelCheckpointPrefix   = MetaPrefix + "/channel-cp"
-	ImportJobPrefix           = MetaPrefix + "/import-job"
-	ImportTaskPrefix          = MetaPrefix + "/import-task"
-	PreImportTaskPrefix       = MetaPrefix + "/preimport-task"
-	AnalysisTaskPrefix        = MetaPrefix + "/analysis-task"
+#include <memory>
+#include <vector>
 
-	NonRemoveFlagTomestone = "non-removed"
-	RemoveFlagTomestone    = "removed"
-)
+#include "storage/DiskFileManagerImpl.h"
+#include "storage/space.h"
+
+namespace milvus::indexbuilder {
+
+class MajorCompaction {
+ public:
+    virtual ~MajorCompaction() = default;
+
+    virtual void
+    Train() = 0;
+};
+
+using MajorCompactionBasePtr = std::unique_ptr<MajorCompaction>;
+}  // namespace milvus::indexbuilder

@@ -64,6 +64,12 @@ class DiskFileManagerImpl : public FileManagerImpl {
     std::string
     GetLocalRawDataObjectPrefix();
 
+    std::string
+    GetCompactionRawDataObjectPrefix();
+
+    std::string
+    GetCompactionResultObjectPrefix();
+
     std::map<std::string, int64_t>
     GetRemotePathsToFileSize() const {
         return remote_paths_to_size_;
@@ -101,6 +107,13 @@ class DiskFileManagerImpl : public FileManagerImpl {
 
     std::string
     CacheRawDataToDisk(std::shared_ptr<milvus_storage::Space> space);
+
+    uint64_t
+    CacheCompactionRawDataToDisk(
+        const std::map<int64_t, std::vector<std::string>>& insert_files,
+        std::vector<std::string>& output_files,
+        std::vector<uint64_t>& offsets,
+        uint32_t& dim);
 
     std::string
     CacheOptFieldToDisk(OptFieldT& fields_map);

@@ -442,6 +442,93 @@ SortByPath(std::vector<std::string>& paths) {
               });
 }
 
+uint64_t
+FetchRawDataAndWriteFile(ChunkManagerPtr rcm,
+                         std::string& local_data_path,
+                         std::vector<std::string>& batch_files,
+                         int64_t& write_offset,
+                         uint32_t& num_rows,
+                         uint32_t& dim) {
+    auto local_chunk_manager =
+        LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    auto field_datas = GetObjectData(rcm.get(), batch_files);
+    int batch_size = batch_files.size();
+    uint64_t batch_data_size = 0;
+    for (int i = 0; i < batch_size; ++i) {
+        auto field_data = field_datas[i].get()->GetFieldData();
+        num_rows += uint32_t(field_data->get_num_rows());
+        AssertInfo(dim == 0 || dim == field_data->get_dim(),
+                   "inconsistent dim value in multi binlogs!");
+        dim = field_data->get_dim();
+
+        auto data_size = field_data->get_num_rows() * dim * sizeof(float);
+        local_chunk_manager->Write(local_data_path,
+                                   write_offset,
+                                   const_cast<void*>(field_data->Data()),
+                                   data_size);
+        write_offset += data_size;
+        batch_data_size += data_size;
+    }
+    return batch_data_size;
+}
+
+// cache raw data for major compaction
+uint64_t
+DiskFileManagerImpl::CacheCompactionRawDataToDisk(
+    const std::map<int64_t, std::vector<std::string>>& remote_files,
+    std::vector<std::string>& output_files,
+    std::vector<uint64_t>& offsets,
+    uint32_t& dim) {
+    auto partition_id = GetFieldDataMeta().partition_id;
+    auto field_id = GetFieldDataMeta().field_id;
+
+    auto local_chunk_manager =
+        LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    auto local_data_path_prefix =
+        storage::GenCompactionRawDataPathPrefix(
+            local_chunk_manager, partition_id, field_id) +
+        "raw_data";
+    auto next_file_id = 0;
+
+    std::vector<std::string> batch_files;
+
+    int64_t write_offset = 0;
+    uint32_t num_rows = 0;
+    uint64_t whole_size = 0;
+
+    auto parallel_degree =
+        uint64_t(DEFAULT_FIELD_MAX_MEMORY_LIMIT / FILE_SLICE_SIZE);
+
+    for (auto& [segment_id, filess] : remote_files) {
+        std::vector<std::string> files = filess;
+        SortByPath(files);
+
+        auto local_data_path =
+            local_data_path_prefix + std::to_string(next_file_id);
+        next_file_id++;
+        local_chunk_manager->CreateFile(local_data_path);
+        output_files.emplace_back(local_data_path);
+        batch_files.clear();
+
+        write_offset = 0;
+        for (auto& file : files) {
+            if (batch_files.size() >= parallel_degree) {
+                whole_size += FetchRawDataAndWriteFile(
+                    rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
+                batch_files.clear();
+            }
+            batch_files.emplace_back(file);
+        }
+        if (batch_files.size() > 0) {
+            whole_size += FetchRawDataAndWriteFile(
+                rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
+        }
+        offsets.emplace_back(write_offset);
+    }
+
+    return whole_size;
+}
+
 std::string
 DiskFileManagerImpl::CacheRawDataToDisk(std::vector<std::string> remote_files) {
     SortByPath(remote_files);
@@ -466,30 +553,12 @@ DiskFileManagerImpl::CacheRawDataToDisk(std::vector<std::string> remote_files) {
     uint32_t dim = 0;
     int64_t write_offset = sizeof(num_rows) + sizeof(dim);
 
-    auto FetchRawData = [&]() {
-        auto field_datas = GetObjectData(rcm_.get(), batch_files);
-        int batch_size = batch_files.size();
-        for (int i = 0; i < batch_size; ++i) {
-            auto field_data = field_datas[i].get()->GetFieldData();
-            num_rows += uint32_t(field_data->get_num_rows());
-            AssertInfo(dim == 0 || dim == field_data->get_dim(),
-                       "inconsistent dim value in multi binlogs!");
-            dim = field_data->get_dim();
-
-            auto data_size = field_data->get_num_rows() * dim * sizeof(float);
-            local_chunk_manager->Write(local_data_path,
-                                       write_offset,
-                                       const_cast<void*>(field_data->Data()),
-                                       data_size);
-            write_offset += data_size;
-        }
-    };
-
     auto parallel_degree =
         uint64_t(DEFAULT_FIELD_MAX_MEMORY_LIMIT / FILE_SLICE_SIZE);
     for (auto& file : remote_files) {
         if (batch_files.size() >= parallel_degree) {
-            FetchRawData();
+            FetchRawDataAndWriteFile(
+                rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
             batch_files.clear();
         }
 
@@ -497,7 +566,8 @@ DiskFileManagerImpl::CacheRawDataToDisk(std::vector<std::string> remote_files) {
     }
 
     if (batch_files.size() > 0) {
-        FetchRawData();
+        FetchRawDataAndWriteFile(
+            rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
     }
 
     // write num_rows and dim value to file header
@@ -803,6 +873,24 @@ DiskFileManagerImpl::GetLocalRawDataObjectPrefix() {
         LocalChunkManagerSingleton::GetInstance().GetChunkManager();
     return GenFieldRawDataPathPrefix(
         local_chunk_manager, field_meta_.segment_id, field_meta_.field_id);
+}
+
+// need to confirm the raw data path, used for train
+std::string
+DiskFileManagerImpl::GetCompactionRawDataObjectPrefix() {
+    auto local_chunk_manager =
+        LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    return GenCompactionRawDataPathPrefix(
+        local_chunk_manager, field_meta_.partition_id, field_meta_.field_id);
+}
+
+// need to confirm the result path, used for data partition and search
+std::string
+DiskFileManagerImpl::GetCompactionResultObjectPrefix() {
+    auto local_chunk_manager =
+        LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    return GenCompactionResultPathPrefix(
+        local_chunk_manager, index_meta_.build_id, index_meta_.index_version);
 }
 
 bool
