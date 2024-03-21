@@ -68,10 +68,11 @@ KmeansMajorCompaction<T>::Sample(const std::vector<std::string>& file_paths,
         auto buf = std::unique_ptr<T[]>(new T[total_size / sizeof(T)]);
         int64_t offset = 0;
         for (int i = 0; i < file_paths.size(); i++) {
-            LOG_INFO("file size: {}", file_sizes[i]);
-            LOG_INFO("file path: {}", file_paths[i]);
             local_chunk_manager->Read(
-                file_paths[i], 0, buf.get() + offset, file_sizes[i]);
+                file_paths[i],
+                0,
+                reinterpret_cast<char*>(buf.get()) + offset,
+                file_sizes[i]);
             offset += file_sizes[i];
         }
         return buf;
@@ -88,24 +89,44 @@ KmeansMajorCompaction<T>::Sample(const std::vector<std::string>& file_paths,
         if (selected_size < train_size &&
             selected_size + file_sizes[idx[i]] >= train_size) {
             auto cur_size = train_size - selected_size;
-            local_chunk_manager->Read(file_paths[idx[i]], 0, buf.get() + offset, cur_size);
+            local_chunk_manager->Read(
+                file_paths[idx[i]],
+                0,
+                reinterpret_cast<char*>(buf.get()) + offset,
+                cur_size);
             break;
         } else {
             selected_size += file_sizes[idx[i]];
             local_chunk_manager->Read(
-                file_paths[idx[i]], 0, buf.get() + offset, file_sizes[idx[i]]);
+                file_paths[idx[i]],
+                0,
+                reinterpret_cast<char*>(buf.get()) + offset,
+                file_sizes[idx[i]]);
             offset += file_sizes[idx[i]];
         }
     }
     return buf;
 }
 
+template <typename T>
+BinarySet
+KmeansMajorCompaction<T>::Upload() {
+    BinarySet ret;
+
+    std::unordered_map<std::string, int64_t> remote_paths_to_size;
+    file_manager_->AddCompactionResultFiles(result_files_,
+                                            remote_paths_to_size);
+    for (auto& file : remote_paths_to_size) {
+        ret.Append(file.first, nullptr, file.second);
+    }
+
+    return ret;
+}
+
 void
 WritePBFile(google::protobuf::Message& message, std::string& file_path) {
     std::ofstream outfile;
-    outfile.open(
-        file_path.data(),
-        std::ios_base::out | std::ios_base::binary);
+    outfile.open(file_path.data(), std::ios_base::out | std::ios_base::binary);
     if (outfile.fail()) {
         std::stringstream err_msg;
         err_msg << "Error: open local file '" << file_path << " failed, "
@@ -148,7 +169,10 @@ KmeansMajorCompaction<T>::Train() {
     uint32_t dim = 0;
     auto data_size = file_manager_->CacheCompactionRawDataToDisk(
         insert_files.value(), data_files, offsets, dim);
-    LOG_INFO("data size: {}", data_size);
+    AssertInfo(data_files.size() == offsets.size(),
+               fmt::format("file path num {} and file size {} not equal",
+                           data_files.size(),
+                           offsets.size()));
     auto data_num = data_size / sizeof(T) / dim;
 
     auto train_num = train_size.value() * 1024 * 1024 * 1024 / sizeof(T) / dim;
@@ -160,8 +184,10 @@ KmeansMajorCompaction<T>::Train() {
     auto train_size_new = train_num * dim * sizeof(T);
     auto buf = Sample(data_files, offsets, train_size_new, data_size);
     auto dataset = GenDataset(train_num, dim, buf.release());
-    // get total
-    int num_clusters = DIV_ROUND_UP(train_size_new, (segment_size.value() * 1024 * 1024));
+
+    // get num of clusters by whole data size / segment size
+    int num_clusters =
+        DIV_ROUND_UP(data_size, (segment_size.value() * 1024 * 1024));
     auto res =
         knowhere::kmeans::ClusteringMajorCompaction<T>(*dataset, num_clusters);
     if (!res.has_value()) {
@@ -171,12 +197,9 @@ KmeansMajorCompaction<T>::Train() {
                               res.what()));
     }
     dataset.reset();  // release train data
-    auto tensor = reinterpret_cast<const T*>(res.value()->GetTensor());
+    auto centroids = reinterpret_cast<const T*>(res.value()->GetTensor());
     auto centroid_id_mapping =
         reinterpret_cast<const uint32_t*>(res.value()->GetCentroidIdMapping());
-    LOG_INFO("dddd {}", centroid_id_mapping[0]);
-    LOG_INFO("ddd1d {}", centroid_id_mapping[10000]);
-
 
     auto total_num = res.value()->GetRows();
 
@@ -190,11 +213,11 @@ KmeansMajorCompaction<T>::Train() {
         milvus::proto::schema::FloatArray* float_array =
             vector_field->mutable_float_vector();
         for (int j = 0; j < dim; j++) {
-            float_array->add_data(float(tensor[i * dim + j]));
+            float_array->add_data(float(centroids[i * dim + j]));
         }
     }
     auto output_path = file_manager_->GetCompactionResultObjectPrefix();
- 
+
     auto local_chunk_manager =
         storage::LocalChunkManagerSingleton::GetInstance().GetChunkManager();
     if (local_chunk_manager->Exist(output_path)) {
@@ -203,47 +226,114 @@ KmeansMajorCompaction<T>::Train() {
     }
     local_chunk_manager->CreateDir(output_path);
     std::string centroid_stats_path = output_path + "centroids";
+    result_files_.emplace_back(centroid_stats_path);
     WritePBFile(stats, centroid_stats_path);
 
-    int i = 0;
-    uint64_t cur_offset = 0;
-    for (auto it = insert_files.value().begin();
-         it != insert_files.value().end();
-         it++) {
-        milvus::proto::segcore::ClusteringCentroidIdMappingStats stats2;
-        // write centroid_id_mapping by file sizes
+    auto compute_num_in_centroid = [&](const uint32_t* centroid_id_mapping,
+                                       uint64_t start,
+                                       uint64_t end) -> std::vector<int64_t> {
+        std::vector<int64_t> num_vectors(num_clusters, 0);
+        for (uint64_t i = start; i < end; ++i) {
+            num_vectors[centroid_id_mapping[i]]++;
+        }
+        return num_vectors;
+    };
 
-        uint64_t num_offset = offsets[i] / sizeof(T) / dim;
-
-        if (train_num >= data_num) {
-            for (int j = 0; j < num_offset; j++) {
-                stats2.add_centroid_id_mapping(
+    if (train_num >= data_num) {  // do not compute id_mapping again
+        uint64_t i = 0;
+        uint64_t cur_offset = 0;
+        for (auto it = insert_files.value().begin();
+             it != insert_files.value().end();
+             it++) {
+            milvus::proto::segcore::ClusteringCentroidIdMappingStats stats;
+            // write centroid_id_mapping by file sizes
+            uint64_t num_offset = offsets[i] / sizeof(T) / dim;
+            for (uint64_t j = 0; j < num_offset; j++) {
+                stats.add_centroid_id_mapping(
                     centroid_id_mapping[cur_offset + j]);
             }
             cur_offset += num_offset;
-        } else {
-            // read segment file and generate centroid_id_mapping
-            auto buf = std::unique_ptr<T[]>(new T[num_offset]);
-            local_chunk_manager->Read(data_files[i], 0, buf.get(), offsets[i]);
-            auto dataset = GenDataset(num_offset, dim, buf.release());
-            auto res = knowhere::kmeans::ClusteringDataAssign<T>(
-                *dataset, (const T*)tensor, num_clusters);
-            if (!res.has_value()) {
-                PanicInfo(ErrorCode::UnexpectedError,
-                          fmt::format("failed to kmeans train: {}: {}",
-                                      KnowhereStatusString(res.error()),
-                                      res.what()));
+            auto num_vectors =
+                compute_num_in_centroid(centroid_id_mapping, 0, total_num);
+            for (uint64_t j = 0; j < num_clusters; j++) {
+                stats.add_num_in_centroid(num_vectors[j]);
             }
-            auto centroid_id_mapping = reinterpret_cast<const uint32_t*>(
-                res.value()->GetCentroidIdMapping());
-            for (int j = 0; j < num_offset; j++) {
-                stats2.add_centroid_id_mapping(centroid_id_mapping[j]);
-            }
+            std::string id_mapping_path =
+                output_path + std::to_string(it->first);
+            result_files_.emplace_back(id_mapping_path);
+            WritePBFile(stats, id_mapping_path);
+            i++;
         }
-        std::string id_mapping_path = output_path + std::to_string(it->first) + "_centroid_id_mapping";
-        WritePBFile(stats2, id_mapping_path);
-        i++;
+    } else {
+        uint64_t i = 0;
+        uint64_t start = 0;
+        uint64_t gather_size = 0;
+        // choose half of train size as a group to compute centroids
+        uint64_t group_size = train_size_new / 2;
+        std::vector<int64_t> gather_segment_id;
+        for (auto it = insert_files.value().begin();
+             it != insert_files.value().end();
+             it++) {
+            gather_segment_id.emplace_back(it->first);
+            gather_size += offsets[i];
+
+            if (gather_size > group_size) {
+                auto buf = std::unique_ptr<T[]>(new T[gather_size / sizeof(T)]);
+                uint64_t cur_offset = 0;
+                for (uint64_t j = start; j <= i; ++j) {
+                    local_chunk_manager->Read(
+                        data_files[j],
+                        0,
+                        reinterpret_cast<char*>(buf.get()) + cur_offset,
+                        offsets[j]);
+                    cur_offset += offsets[j];
+                }
+                auto dataset = GenDataset(
+                    gather_size / sizeof(T) / dim, dim, buf.release());
+                auto res = knowhere::kmeans::ClusteringDataAssign<T>(
+                    *dataset, centroids, num_clusters);
+                if (!res.has_value()) {
+                    PanicInfo(ErrorCode::UnexpectedError,
+                              fmt::format("failed to kmeans train: {}: {}",
+                                          KnowhereStatusString(res.error()),
+                                          res.what()));
+                }
+                dataset.reset();
+                auto centroid_id_mapping = reinterpret_cast<const uint32_t*>(
+                    res.value()->GetCentroidIdMapping());
+
+                cur_offset = 0;
+
+                for (uint64_t j = start; j <= i; ++j) {
+                    uint64_t num_offset = offsets[j] / sizeof(T) / dim;
+
+                    milvus::proto::segcore::ClusteringCentroidIdMappingStats
+                        stats;
+                    for (uint64_t k = 0; k < num_offset; k++) {
+                        stats.add_centroid_id_mapping(
+                            centroid_id_mapping[cur_offset + k]);
+                    }
+                    auto num_vectors =
+                        compute_num_in_centroid(centroid_id_mapping,
+                                                cur_offset,
+                                                cur_offset + num_offset);
+                    cur_offset += num_offset;
+                    for (uint64_t k = 0; k < num_clusters; k++) {
+                        stats.add_num_in_centroid(num_vectors[k]);
+                    }
+                    std::string id_mapping_path =
+                        output_path + std::to_string(gather_segment_id[j]);
+                    result_files_.emplace_back(id_mapping_path);
+                    WritePBFile(stats, id_mapping_path);
+                }
+                start = i + 1;
+                gather_size = 0;
+            }
+            gather_size += offsets[i];
+            i++;
+        }
     }
+
     // remove raw data since it is not used anymore
     // keep the result file and leave the ownership to golang side
     auto local_compaction_raw_data_path_prefix =

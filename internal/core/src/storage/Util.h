@@ -141,6 +141,13 @@ PutIndexData(ChunkManager* remote_chunk_manager,
              FieldDataMeta& field_meta,
              IndexMeta& index_meta);
 
+void
+PutCompactionResultData(ChunkManager* remote_chunk_manager,
+                        const std::vector<const uint8_t*>& data_slices,
+                        const std::vector<int64_t>& slice_sizes,
+                        const std::vector<std::string>& slice_names,
+                        std::unordered_map<std::string, int64_t>& map);
+
 std::map<std::string, int64_t>
 PutIndexData(std::shared_ptr<milvus_storage::Space> space,
              const std::vector<const uint8_t*>& data_slices,

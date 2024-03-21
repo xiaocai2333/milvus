@@ -163,6 +163,89 @@ DiskFileManagerImpl::AddFile(const std::string& file) noexcept {
 }  // namespace knowhere
 
 void
+DiskFileManagerImpl::AddCompactionResultFiles(
+    const std::vector<std::string>& files,
+    std::unordered_map<std::string, int64_t>& map) {
+    auto local_chunk_manager =
+        LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    std::vector<std::string> local_files;
+    std::vector<std::string> batch_remote_files;
+    std::vector<int64_t> remote_file_sizes;
+    for (auto i = 0; i < files.size(); ++i) {
+        auto file = files[i];
+        if (!local_chunk_manager->Exist(file)) {
+            LOG_ERROR("local file {} not exists", file);
+            std::stringstream err_msg;
+            err_msg << "Error: open local file '" << file << " failed, "
+                    << strerror(errno);
+            throw SegcoreError(FileOpenFailed, err_msg.str());
+        }
+        auto fileName = GetFileName(file);
+        auto fileSize = local_chunk_manager->Size(file);
+
+        auto parallel_degree = 16;
+
+        if (batch_remote_files.size() >= parallel_degree) {
+            AddBatchCompactionResultFiles(
+                local_files, batch_remote_files, remote_file_sizes, map);
+            batch_remote_files.clear();
+            remote_file_sizes.clear();
+            local_files.clear();
+        }
+        if (i == 0) {  // centroids file
+            batch_remote_files.emplace_back(GetRemoteCentroidsObjectPrefix() +
+                                            "/centroids");
+        } else {
+            batch_remote_files.emplace_back(
+                GetRemoteCentroidIdMappingObjectPrefix(fileName) +
+                "/offsets_mapping");
+        }
+        remote_file_sizes.emplace_back(fileSize);
+        local_files.emplace_back(file);
+    }
+    if (batch_remote_files.size() > 0) {
+        AddBatchCompactionResultFiles(
+            local_files, batch_remote_files, remote_file_sizes, map);
+    }
+}
+
+void
+DiskFileManagerImpl::AddBatchCompactionResultFiles(
+    const std::vector<std::string>& local_files,
+    const std::vector<std::string>& remote_files,
+    const std::vector<int64_t>& remote_file_sizes,
+    std::unordered_map<std::string, int64_t>& map) {
+    auto local_chunk_manager =
+        LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    auto& pool = ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::HIGH);
+
+    std::vector<std::future<std::shared_ptr<uint8_t[]>>> futures;
+    futures.reserve(remote_file_sizes.size());
+
+    for (int64_t i = 0; i < remote_files.size(); ++i) {
+        futures.push_back(pool.Submit(
+            [&](const std::string& file,
+                const int64_t data_size) -> std::shared_ptr<uint8_t[]> {
+                auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[data_size]);
+                local_chunk_manager->Read(file, 0, buf.get(), data_size);
+                return buf;
+            },
+            local_files[i],
+            remote_file_sizes[i]));
+    }
+
+    std::vector<std::shared_ptr<uint8_t[]>> index_datas;
+    std::vector<const uint8_t*> data_slices;
+    for (auto& future : futures) {
+        auto res = future.get();
+        index_datas.emplace_back(res);
+        data_slices.emplace_back(res.get());
+    }
+    PutCompactionResultData(
+        rcm_.get(), data_slices, remote_file_sizes, remote_files, map);
+}
+
+void
 DiskFileManagerImpl::AddBatchIndexFiles(
     const std::string& local_file_name,
     const std::vector<int64_t>& local_file_offsets,
@@ -513,15 +596,23 @@ DiskFileManagerImpl::CacheCompactionRawDataToDisk(
         write_offset = 0;
         for (auto& file : files) {
             if (batch_files.size() >= parallel_degree) {
-                whole_size += FetchRawDataAndWriteFile(
-                    rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
+                whole_size += FetchRawDataAndWriteFile(rcm_,
+                                                       local_data_path,
+                                                       batch_files,
+                                                       write_offset,
+                                                       num_rows,
+                                                       dim);
                 batch_files.clear();
             }
             batch_files.emplace_back(file);
         }
         if (batch_files.size() > 0) {
-            whole_size += FetchRawDataAndWriteFile(
-                rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
+            whole_size += FetchRawDataAndWriteFile(rcm_,
+                                                   local_data_path,
+                                                   batch_files,
+                                                   write_offset,
+                                                   num_rows,
+                                                   dim);
         }
         offsets.emplace_back(write_offset);
     }
@@ -557,8 +648,12 @@ DiskFileManagerImpl::CacheRawDataToDisk(std::vector<std::string> remote_files) {
         uint64_t(DEFAULT_FIELD_MAX_MEMORY_LIMIT / FILE_SLICE_SIZE);
     for (auto& file : remote_files) {
         if (batch_files.size() >= parallel_degree) {
-            FetchRawDataAndWriteFile(
-                rcm_, local_data_path, batch_files, write_offset, num_rows, dim);
+            FetchRawDataAndWriteFile(rcm_,
+                                     local_data_path,
+                                     batch_files,
+                                     write_offset,
+                                     num_rows,
+                                     dim);
             batch_files.clear();
         }
 

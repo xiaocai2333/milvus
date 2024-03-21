@@ -25,7 +25,6 @@
 #include "storage/ThreadPools.h"
 #include <boost/filesystem.hpp>
 
-
 using milvus::DataType;
 using milvus::FieldDataPtr;
 using milvus::FieldId;

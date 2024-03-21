@@ -293,7 +293,7 @@ SerializeAnalysisAndUpLoad(CAnalysis analysis) {
                    "failed to serialize analysis to binary set, passed index "
                    "was null");
         auto real_analysis =
-            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(analysis);
+            reinterpret_cast<milvus::indexbuilder::MajorCompaction*>(analysis);
         auto binary =
             std::make_unique<knowhere::BinarySet>(real_analysis->Upload());
         //        *c_binary_set = binary.release();
