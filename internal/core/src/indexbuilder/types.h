@@ -62,4 +62,6 @@ struct AnalysisInfo {
     std::string index_store_path;
     int64_t dim;
     int32_t index_engine_version;
+    int64_t segment_size;
+    int64_t train_size;
 };

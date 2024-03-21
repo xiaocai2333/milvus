@@ -117,3 +117,17 @@ func (ai *AnalysisInfo) AppendSegmentInsertFile(segID int64, filePath string) er
 	status := C.AppendSegmentInsertFile(ai.cAnalysisInfo, cSegID, cInsertFilePath)
 	return HandleCStatus(&status, "appendInsertFile failed")
 }
+
+func (ai *AnalysisInfo) AppendSegmentSize(size int64) error {
+	cSize := C.int64_t(size)
+
+	status := C.AppendSegmentSize(ai.cAnalysisInfo, cSize)
+	return HandleCStatus(&status, "appendSegmentSize failed")
+}
+
+func (ai *AnalysisInfo) AppendTrainSize(size int64) error {
+	cSize := C.int64_t(size)
+
+	status := C.AppendTrainSize(ai.cAnalysisInfo, cSize)
+	return HandleCStatus(&status, "appendTrainSize failed")
+}

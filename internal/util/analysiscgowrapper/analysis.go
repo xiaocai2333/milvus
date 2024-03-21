@@ -42,7 +42,7 @@ type CodecAnalysis interface {
 func Analysis(ctx context.Context, analysisInfo *AnalysisInfo) (CodecAnalysis, error) {
 	var analysisPtr C.CAnalysis
 	status := C.Analysis(&analysisPtr, analysisInfo.cAnalysisInfo)
-	if err := HandleCStatus(&status, "failed to create index"); err != nil {
+	if err := HandleCStatus(&status, "failed to analysis task"); err != nil {
 		return nil, err
 	}
 

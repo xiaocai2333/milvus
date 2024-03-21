@@ -37,26 +37,28 @@ Analysis(CAnalysis* res_analysis, CAnalysisInfo c_analysis_info) {
 
         auto& config = analysis_info->config;
         config["insert_files"] = analysis_info->insert_files;
+        config["segment_size"] = analysis_info->segment_size;
+        config["train_size"] = analysis_info->train_size;
 
         // get index type
-        auto index_type = milvus::index::GetValueFromConfig<std::string>(
-            config, "index_type");
-        AssertInfo(index_type.has_value(), "index type is empty");
-        index_info.index_type = index_type.value();
+        //        auto index_type = milvus::index::GetValueFromConfig<std::string>(
+        //            config, "index_type");
+        //        AssertInfo(index_type.has_value(), "index type is empty");
+        //        index_info.index_type = index_type.value();
 
         auto engine_version = analysis_info->index_engine_version;
 
-        index_info.index_engine_version = engine_version;
+        //        index_info.index_engine_version = engine_version;
         config[milvus::index::INDEX_ENGINE_VERSION] =
             std::to_string(engine_version);
 
         // get metric type
-        if (milvus::datatype_is_vector(field_type)) {
-            auto metric_type = milvus::index::GetValueFromConfig<std::string>(
-                config, "metric_type");
-            AssertInfo(metric_type.has_value(), "metric type is empty");
-            index_info.metric_type = metric_type.value();
-        }
+        //        if (milvus::datatype_is_vector(field_type)) {
+        //            auto metric_type = milvus::index::GetValueFromConfig<std::string>(
+        //                config, "metric_type");
+        //            AssertInfo(metric_type.has_value(), "metric type is empty");
+        //            index_info.metric_type = metric_type.value();
+        //        }
 
         // init file manager
         milvus::storage::FieldDataMeta field_meta{analysis_info->collection_id,
@@ -243,6 +245,36 @@ AppendSegmentInsertFile(CAnalysisInfo c_analysis_info,
         std::string insert_file_path(c_file_path);
         analysis_info->insert_files[segID].emplace_back(insert_file_path);
         //        analysis_info->insert_files.emplace_back(insert_file_path);
+
+        auto status = CStatus();
+        status.error_code = Success;
+        status.error_msg = "";
+        return status;
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+AppendSegmentSize(CAnalysisInfo c_analysis_info, int64_t size) {
+    try {
+        auto analysis_info = (AnalysisInfo*)c_analysis_info;
+        analysis_info->segment_size = size;
+
+        auto status = CStatus();
+        status.error_code = Success;
+        status.error_msg = "";
+        return status;
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+AppendTrainSize(CAnalysisInfo c_analysis_info, int64_t size) {
+    try {
+        auto analysis_info = (AnalysisInfo*)c_analysis_info;
+        analysis_info->train_size = size;
 
         auto status = CStatus();
         status.error_code = Success;

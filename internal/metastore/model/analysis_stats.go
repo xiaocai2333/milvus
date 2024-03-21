@@ -18,6 +18,7 @@ package model
 
 import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 )
 
@@ -26,6 +27,8 @@ type AnalysisTask struct {
 	CollectionID              int64
 	PartitionID               int64
 	FieldID                   int64
+	FieldName                 string
+	FieldType                 schemapb.DataType
 	SegmentIDs                []int64
 	TaskID                    int64
 	Version                   int64
@@ -34,6 +37,7 @@ type AnalysisTask struct {
 	FailReason                string
 	CentroidsFile             string
 	SegmentOffsetMappingFiles map[int64]string
+	Dim                       int64
 }
 
 func UnmarshalAnalysisTask(info *indexpb.AnalysisTask) *AnalysisTask {
@@ -45,6 +49,8 @@ func UnmarshalAnalysisTask(info *indexpb.AnalysisTask) *AnalysisTask {
 		CollectionID:              info.GetCollectionID(),
 		PartitionID:               info.GetPartitionID(),
 		FieldID:                   info.GetFieldID(),
+		FieldName:                 info.GetFieldName(),
+		FieldType:                 info.GetFieldType(),
 		SegmentIDs:                info.GetSegmentIDs(),
 		TaskID:                    info.GetTaskID(),
 		Version:                   info.GetVersion(),
@@ -53,6 +59,7 @@ func UnmarshalAnalysisTask(info *indexpb.AnalysisTask) *AnalysisTask {
 		FailReason:                info.GetFailReason(),
 		CentroidsFile:             info.GetCentroidsFile(),
 		SegmentOffsetMappingFiles: info.GetSegmentOffsetMappingFiles(),
+		Dim:                       info.GetDim(),
 	}
 }
 
@@ -65,6 +72,8 @@ func MarshalAnalysisTask(t *AnalysisTask) *indexpb.AnalysisTask {
 		CollectionID:              t.CollectionID,
 		PartitionID:               t.PartitionID,
 		FieldID:                   t.FieldID,
+		FieldName:                 t.FieldName,
+		FieldType:                 t.FieldType,
 		TaskID:                    t.TaskID,
 		Version:                   t.Version,
 		SegmentIDs:                t.SegmentIDs,
@@ -73,6 +82,7 @@ func MarshalAnalysisTask(t *AnalysisTask) *indexpb.AnalysisTask {
 		FailReason:                t.FailReason,
 		CentroidsFile:             t.CentroidsFile,
 		SegmentOffsetMappingFiles: t.SegmentOffsetMappingFiles,
+		Dim:                       t.Dim,
 	}
 }
 
@@ -85,6 +95,8 @@ func CloneAnalysisTask(t *AnalysisTask) *AnalysisTask {
 		CollectionID:              t.CollectionID,
 		PartitionID:               t.PartitionID,
 		FieldID:                   t.FieldID,
+		FieldName:                 t.FieldName,
+		FieldType:                 t.FieldType,
 		SegmentIDs:                t.SegmentIDs,
 		TaskID:                    t.TaskID,
 		Version:                   t.Version,
@@ -93,5 +105,6 @@ func CloneAnalysisTask(t *AnalysisTask) *AnalysisTask {
 		FailReason:                t.FailReason,
 		CentroidsFile:             t.CentroidsFile,
 		SegmentOffsetMappingFiles: t.SegmentOffsetMappingFiles,
+		Dim:                       t.Dim,
 	}
 }

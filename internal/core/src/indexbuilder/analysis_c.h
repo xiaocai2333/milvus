@@ -64,6 +64,12 @@ AppendSegmentInsertFile(CAnalysisInfo c_analysis_info,
                         const char* file_path);
 
 CStatus
+AppendSegmentSize(CAnalysisInfo c_analysis_info, int64_t size);
+
+CStatus
+AppendTrainSize(CAnalysisInfo c_analysis_info, int64_t size);
+
+CStatus
 SerializeAnalysisAndUpLoad(CAnalysis analysis);
 
 CStatus

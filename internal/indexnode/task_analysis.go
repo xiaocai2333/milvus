@@ -25,7 +25,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/metautil"
@@ -98,7 +97,7 @@ func (at *analysisTask) BuildIndex(ctx context.Context) error {
 		return err
 	}
 	err = analysisInfo.AppendAnalysisFieldMetaInfo(at.req.GetCollectionID(), at.req.GetPartitionID(),
-		at.req.GetFieldID(), schemapb.DataType_FloatVector, "", 128)
+		at.req.GetFieldID(), at.req.GetFieldType(), at.req.GetFieldName(), at.req.GetDim())
 	if err != nil {
 		log.Warn("append field meta failed", zap.Error(err))
 		return err
@@ -121,6 +120,18 @@ func (at *analysisTask) BuildIndex(ctx context.Context) error {
 
 	}
 
+	err = analysisInfo.AppendSegmentSize(Params.DataCoordCfg.MajorCompactionSegmentSize.GetAsInt64())
+	if err != nil {
+		log.Warn("append segment size failed", zap.Error(err))
+		return err
+	}
+
+	err = analysisInfo.AppendTrainSize(Params.DataCoordCfg.MajorCompactionTrainSize.GetAsInt64())
+	if err != nil {
+		log.Warn("append train size failed", zap.Error(err))
+		return err
+	}
+
 	at.analysis, err = analysiscgowrapper.Analysis(ctx, analysisInfo)
 	if err != nil {
 		if at.analysis != nil && at.analysis.CleanLocalData() != nil {
@@ -128,7 +139,7 @@ func (at *analysisTask) BuildIndex(ctx context.Context) error {
 				zap.Int64("buildID", at.req.GetTaskID()),
 				zap.Int64("index version", at.req.GetVersion()))
 		}
-		log.Error("failed to build index", zap.Error(err))
+		log.Error("failed to analysis data", zap.Error(err))
 		return err
 	}
 

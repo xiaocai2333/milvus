@@ -386,7 +386,7 @@ func (suite *AnalysisTaskSuite) serializeData() ([]*storage.Blob, error) {
 	})
 }
 
-func (suite *AnalysisTaskSuite) TestBuildMemoryIndex() {
+func (suite *AnalysisTaskSuite) TestAnalysis() {
 	ctx, cancel := context.WithCancel(context.Background())
 	req := &indexpb.AnalysisRequest{
 		ClusterID:    "test",
@@ -394,6 +394,8 @@ func (suite *AnalysisTaskSuite) TestBuildMemoryIndex() {
 		CollectionID: suite.collectionID,
 		PartitionID:  suite.partitionID,
 		FieldID:      suite.fieldID,
+		FieldName:    "vec",
+		FieldType:    schemapb.DataType_FloatVector,
 		SegmentStats: map[int64]*indexpb.SegmentStats{
 			suite.segmentID: {
 				ID:      suite.segmentID,
@@ -401,11 +403,12 @@ func (suite *AnalysisTaskSuite) TestBuildMemoryIndex() {
 				LogIDs:  []int64{1},
 			},
 		},
-		Version: 0,
+		Version: 1,
 		StorageConfig: &indexpb.StorageConfig{
 			RootPath:    "/tmp/milvus/data",
 			StorageType: "local",
 		},
+		Dim: 0,
 	}
 
 	cm, err := NewChunkMgrFactory().NewChunkManager(ctx, req.GetStorageConfig())
@@ -428,10 +431,10 @@ func (suite *AnalysisTaskSuite) TestBuildMemoryIndex() {
 	err = t.Prepare(context.Background())
 	suite.NoError(err)
 	// TODO: implement in segcore
-	//err = t.BuildIndex(context.Background())
-	//suite.NoError(err)
-	//err = t.SaveIndexFiles(context.Background())
-	//suite.NoError(err)
+	err = t.BuildIndex(context.Background())
+	suite.NoError(err)
+	err = t.SaveIndexFiles(context.Background())
+	suite.NoError(err)
 }
 
 func TestAnalysisTaskSuite(t *testing.T) {

@@ -177,14 +177,41 @@ func (ats *analysisTaskScheduler) process(taskID int64) bool {
 
 	switch state {
 	case taskInit:
+		var storageConfig *indexpb.StorageConfig
+		if Params.CommonCfg.StorageType.GetValue() == "local" {
+			storageConfig = &indexpb.StorageConfig{
+				RootPath:    Params.LocalStorageCfg.Path.GetValue(),
+				StorageType: Params.CommonCfg.StorageType.GetValue(),
+			}
+		} else {
+			storageConfig = &indexpb.StorageConfig{
+				Address:          Params.MinioCfg.Address.GetValue(),
+				AccessKeyID:      Params.MinioCfg.AccessKeyID.GetValue(),
+				SecretAccessKey:  Params.MinioCfg.SecretAccessKey.GetValue(),
+				UseSSL:           Params.MinioCfg.UseSSL.GetAsBool(),
+				BucketName:       Params.MinioCfg.BucketName.GetValue(),
+				RootPath:         Params.MinioCfg.RootPath.GetValue(),
+				UseIAM:           Params.MinioCfg.UseIAM.GetAsBool(),
+				IAMEndpoint:      Params.MinioCfg.IAMEndpoint.GetValue(),
+				StorageType:      Params.CommonCfg.StorageType.GetValue(),
+				Region:           Params.MinioCfg.Region.GetValue(),
+				UseVirtualHost:   Params.MinioCfg.UseVirtualHost.GetAsBool(),
+				CloudProvider:    Params.MinioCfg.CloudProvider.GetValue(),
+				RequestTimeoutMs: Params.MinioCfg.RequestTimeoutMs.GetAsInt64(),
+			}
+		}
 		req := &indexpb.AnalysisRequest{
-			ClusterID:    Params.CommonCfg.ClusterPrefix.GetValue(),
-			TaskID:       taskID,
-			CollectionID: t.CollectionID,
-			PartitionID:  t.PartitionID,
-			FieldID:      t.FieldID,
-			SegmentStats: make(map[int64]*indexpb.SegmentStats),
-			Version:      t.Version,
+			ClusterID:     Params.CommonCfg.ClusterPrefix.GetValue(),
+			TaskID:        taskID,
+			CollectionID:  t.CollectionID,
+			PartitionID:   t.PartitionID,
+			FieldID:       t.FieldID,
+			FieldName:     t.FieldName,
+			FieldType:     t.FieldType,
+			Dim:           t.Dim,
+			SegmentStats:  make(map[int64]*indexpb.SegmentStats),
+			Version:       t.Version,
+			StorageConfig: storageConfig,
 		}
 
 		// When data analysis occurs, segments must not be discarded. Such as compaction, GC, etc.
