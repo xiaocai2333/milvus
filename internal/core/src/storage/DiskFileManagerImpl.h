@@ -97,6 +97,17 @@ class DiskFileManagerImpl : public FileManagerImpl {
                                  uint64_t local_file_init_offfset);
 
     void
+    AddCompactionResultFiles(const std::vector<std::string>& files,
+                             std::unordered_map<std::string, int64_t>& map);
+
+    void
+    AddBatchCompactionResultFiles(
+        const std::vector<std::string>& local_files,
+        const std::vector<std::string>& remote_files,
+        const std::vector<int64_t>& remote_file_sizes,
+        std::unordered_map<std::string, int64_t>& map);
+
+    void
     AddBatchIndexFiles(const std::string& local_file_name,
                        const std::vector<int64_t>& local_file_offsets,
                        const std::vector<std::string>& remote_files,
@@ -139,6 +150,13 @@ class DiskFileManagerImpl : public FileManagerImpl {
 
     std::string
     GetRemoteIndexPath(const std::string& file_name, int64_t slice_num) const;
+
+    std::string
+    GetCentroidsPath(const std::string& file_name, int64_t slice_num) const;
+
+    std::string
+    GetCentroidIdMappingPath(const std::string& file_name,
+                             int64_t slice_num) const;
 
  private:
     // local file path (abs path)

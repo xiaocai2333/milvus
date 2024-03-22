@@ -30,6 +30,9 @@ class MajorCompaction {
 
     virtual void
     Train() = 0;
+
+    virtual BinarySet
+    Upload() = 0;
 };
 
 using MajorCompactionBasePtr = std::unique_ptr<MajorCompaction>;

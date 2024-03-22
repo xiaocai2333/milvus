@@ -13,6 +13,7 @@
 #include <functional>
 #include <fstream>
 #include <boost/filesystem.hpp>
+#include <numeric>
 #include <unordered_set>
 
 #include "common/Tracer.h"
@@ -63,8 +64,8 @@ test_run() {
 
     auto field_meta =
         gen_field_meta(collection_id, partition_id, segment_id, field_id);
-    auto index_meta = gen_index_meta(
-        segment_id, field_id, index_build_id, index_version);
+    auto index_meta =
+        gen_index_meta(segment_id, field_id, index_build_id, index_version);
 
     std::string root_path = "/tmp/test-major-compaction/";
     auto storage_config = gen_local_storage_config(root_path);
@@ -91,7 +92,6 @@ test_run() {
     };
 
     auto log_path = get_binlog_path(0);
-    LOG_INFO("log_path: {}", log_path);
     auto cm_w = ChunkManagerWrapper(cm);
     cm_w.Write(log_path, serialized_bytes.data(), serialized_bytes.size());
     storage::FileManagerContext ctx(field_meta, index_meta, cm);
@@ -104,12 +104,15 @@ test_run() {
     config["insert_files"] = remote_files;
     config["segment_size"] = 1;  // 1MB
     config["train_size"] = 26;   // 26GB
-    auto compaction = indexbuilder::IndexFactory::GetInstance().CreateCompactionJob(
-        dtype, config, ctx);
+    auto compaction =
+        indexbuilder::IndexFactory::GetInstance().CreateCompactionJob(
+            dtype, config, ctx);
     compaction->Train();
 
-    auto lcm = storage::LocalChunkManagerSingleton::GetInstance().GetChunkManager();
-    std::string path_prefix = storage::GenCompactionResultPathPrefix(lcm, index_meta.build_id, index_meta.index_version);
+    auto lcm =
+        storage::LocalChunkManagerSingleton::GetInstance().GetChunkManager();
+    std::string path_prefix = storage::GenCompactionResultPathPrefix(
+        lcm, index_meta.build_id, index_meta.index_version);
     std::string centroid_path = path_prefix + "centroids";
     milvus::proto::segcore::ClusteringCentroidsStats stats;
     ReadPBFile(centroid_path, stats);
@@ -122,29 +125,39 @@ test_run() {
     }
     int expected_num_clusters = 8;
     ASSERT_EQ(centroids.size(), 8 * dim);
-    std::string centroid_id_mapping_path = path_prefix + std::to_string(segment_id) + "_centroid_id_mapping";
+    std::string centroid_id_mapping_path =
+        path_prefix + std::to_string(segment_id);
     milvus::proto::segcore::ClusteringCentroidIdMappingStats mapping_stats;
-    std::string centroid_id_mapping_path2 = path_prefix + std::to_string(segment_id2) + "_centroid_id_mapping";
+    std::string centroid_id_mapping_path2 =
+        path_prefix + std::to_string(segment_id2);
     milvus::proto::segcore::ClusteringCentroidIdMappingStats mapping_stats2;
     ReadPBFile(centroid_id_mapping_path, mapping_stats);
     ReadPBFile(centroid_id_mapping_path2, mapping_stats2);
 
     std::vector<uint32_t> centroid_id_mapping;
+    std::vector<int64_t> num_in_centroid;
     for (const auto id : mapping_stats.centroid_id_mapping()) {
         centroid_id_mapping.emplace_back(id);
         ASSERT_TRUE(id < expected_num_clusters);
     }
     ASSERT_EQ(centroid_id_mapping.size(), nb);
-    int i = 0;
-    for (const auto id : mapping_stats2.centroid_id_mapping()) {
-        ASSERT_EQ(id, centroid_id_mapping[i]);
-        i++;
+    for (const auto num : mapping_stats.num_in_centroid()) {
+        num_in_centroid.emplace_back(num);
+    }
+    ASSERT_EQ(
+        std::accumulate(num_in_centroid.begin(), num_in_centroid.end(), 0),
+        nb * 2);
+    // second id mapping should be the same with the first one since the segment data is the same
+    for (int64_t i = 0; i < mapping_stats2.centroid_id_mapping_size(); i++) {
+        ASSERT_EQ(mapping_stats2.centroid_id_mapping(i),
+                  centroid_id_mapping[i]);
+    }
+    for (int64_t i = 0; i < mapping_stats2.num_in_centroid_size(); i++) {
+        ASSERT_EQ(mapping_stats2.num_in_centroid(i), num_in_centroid[i]);
     }
     lcm->RemoveDir(path_prefix);
 }
 
 TEST(MajorCompaction, Naive) {
     test_run<float, DataType::VECTOR_FLOAT>();
-    // EXPECT_THROW(test_run<bfloat16, DataType::VECTOR_BFLOAT16>(), std::runtime_error);
-    // EXPECT_THROW(test_run<float16, DataType::VECTOR_FLOAT16>(), std::runtime_error);
 }

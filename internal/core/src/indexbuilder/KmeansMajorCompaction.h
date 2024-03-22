@@ -36,6 +36,9 @@ class KmeansMajorCompaction : public MajorCompaction {
     void
     Train() override;
 
+    BinarySet
+    Upload() override;
+
  private:
     std::unique_ptr<T[]>
     Sample(const std::vector<std::string>& file_paths,
@@ -45,6 +48,7 @@ class KmeansMajorCompaction : public MajorCompaction {
 
     std::shared_ptr<storage::DiskFileManagerImpl> file_manager_;
     Config config_;
+    std::vector<std::string> result_files_;
 };
 
 template <typename T>
