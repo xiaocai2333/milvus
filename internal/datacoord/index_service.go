@@ -22,8 +22,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 
@@ -187,6 +185,7 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	}
 	metrics.IndexRequestCounter.WithLabelValues(metrics.TotalLabel).Inc()
 
+	/* just for test analysis task
 	taskID, err := s.allocator.allocID(ctx)
 	if err != nil {
 		log.Error("analysis failed", zap.Error(err))
@@ -225,86 +224,88 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	}
 	s.analysisScheduler.enqueue(taskID)
 	return merr.Success(), nil
-	//if req.GetIndexName() == "" {
-	//	indexes := s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
-	//	if len(indexes) == 0 {
-	//		fieldName, err := s.getFieldNameByID(ctx, req.GetCollectionID(), req.GetFieldID())
-	//		if err != nil {
-	//			log.Warn("get field name from schema failed", zap.Int64("fieldID", req.GetFieldID()))
-	//			return merr.Status(err), nil
-	//		}
-	//		req.IndexName = fieldName
-	//	} else if len(indexes) == 1 {
-	//		req.IndexName = indexes[0].IndexName
-	//	}
-	//}
-	//
-	//indexID, err := s.meta.indexMeta.CanCreateIndex(req)
-	//if err != nil {
-	//	metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-	//	return merr.Status(err), nil
-	//}
-	//
-	//// merge with previous params because create index would not pass mmap params
-	//indexes := s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
-	//if len(indexes) == 1 {
-	//	req.UserIndexParams, err = UpdateParams(indexes[0], indexes[0].UserIndexParams, req.GetUserIndexParams())
-	//	if err != nil {
-	//		return merr.Status(err), nil
-	//	}
-	//	req.IndexParams, err = UpdateParams(indexes[0], indexes[0].IndexParams, req.GetIndexParams())
-	//	if err != nil {
-	//		return merr.Status(err), nil
-	//	}
-	//}
-	//
-	//if indexID == 0 {
-	//	indexID, err = s.allocator.allocID(ctx)
-	//	if err != nil {
-	//		log.Warn("failed to alloc indexID", zap.Error(err))
-	//		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-	//		return merr.Status(err), nil
-	//	}
-	//	if GetIndexType(req.GetIndexParams()) == indexparamcheck.IndexDISKANN && !s.indexNodeManager.ClientSupportDisk() {
-	//		errMsg := "all IndexNodes do not support disk indexes, please verify"
-	//		log.Warn(errMsg)
-	//		err = merr.WrapErrIndexNotSupported(indexparamcheck.IndexDISKANN)
-	//		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-	//		return merr.Status(err), nil
-	//	}
-	//}
-	//
-	//index := &model.Index{
-	//	CollectionID:    req.GetCollectionID(),
-	//	FieldID:         req.GetFieldID(),
-	//	IndexID:         indexID,
-	//	IndexName:       req.GetIndexName(),
-	//	TypeParams:      req.GetTypeParams(),
-	//	IndexParams:     req.GetIndexParams(),
-	//	CreateTime:      req.GetTimestamp(),
-	//	IsAutoIndex:     req.GetIsAutoIndex(),
-	//	UserIndexParams: req.GetUserIndexParams(),
-	//}
-	//
-	//// Get flushed segments and create index
-	//err = s.meta.indexMeta.CreateIndex(index)
-	//if err != nil {
-	//	log.Error("CreateIndex fail",
-	//		zap.Int64("fieldID", req.GetFieldID()), zap.String("indexName", req.GetIndexName()), zap.Error(err))
-	//	metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-	//	return merr.Status(err), nil
-	//}
-	//
-	//select {
-	//case s.notifyIndexChan <- req.GetCollectionID():
-	//default:
-	//}
-	//
-	//log.Info("CreateIndex successfully",
-	//	zap.String("IndexName", req.GetIndexName()), zap.Int64("fieldID", req.GetFieldID()),
-	//	zap.Int64("IndexID", indexID))
-	//metrics.IndexRequestCounter.WithLabelValues(metrics.SuccessLabel).Inc()
-	//return merr.Success(), nil
+	*/
+
+	if req.GetIndexName() == "" {
+		indexes := s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
+		if len(indexes) == 0 {
+			fieldName, err := s.getFieldNameByID(ctx, req.GetCollectionID(), req.GetFieldID())
+			if err != nil {
+				log.Warn("get field name from schema failed", zap.Int64("fieldID", req.GetFieldID()))
+				return merr.Status(err), nil
+			}
+			req.IndexName = fieldName
+		} else if len(indexes) == 1 {
+			req.IndexName = indexes[0].IndexName
+		}
+	}
+
+	indexID, err := s.meta.indexMeta.CanCreateIndex(req)
+	if err != nil {
+		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+		return merr.Status(err), nil
+	}
+
+	// merge with previous params because create index would not pass mmap params
+	indexes := s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
+	if len(indexes) == 1 {
+		req.UserIndexParams, err = UpdateParams(indexes[0], indexes[0].UserIndexParams, req.GetUserIndexParams())
+		if err != nil {
+			return merr.Status(err), nil
+		}
+		req.IndexParams, err = UpdateParams(indexes[0], indexes[0].IndexParams, req.GetIndexParams())
+		if err != nil {
+			return merr.Status(err), nil
+		}
+	}
+
+	if indexID == 0 {
+		indexID, err = s.allocator.allocID(ctx)
+		if err != nil {
+			log.Warn("failed to alloc indexID", zap.Error(err))
+			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+			return merr.Status(err), nil
+		}
+		if GetIndexType(req.GetIndexParams()) == indexparamcheck.IndexDISKANN && !s.indexNodeManager.ClientSupportDisk() {
+			errMsg := "all IndexNodes do not support disk indexes, please verify"
+			log.Warn(errMsg)
+			err = merr.WrapErrIndexNotSupported(indexparamcheck.IndexDISKANN)
+			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+			return merr.Status(err), nil
+		}
+	}
+
+	index := &model.Index{
+		CollectionID:    req.GetCollectionID(),
+		FieldID:         req.GetFieldID(),
+		IndexID:         indexID,
+		IndexName:       req.GetIndexName(),
+		TypeParams:      req.GetTypeParams(),
+		IndexParams:     req.GetIndexParams(),
+		CreateTime:      req.GetTimestamp(),
+		IsAutoIndex:     req.GetIsAutoIndex(),
+		UserIndexParams: req.GetUserIndexParams(),
+	}
+
+	// Get flushed segments and create index
+	err = s.meta.indexMeta.CreateIndex(index)
+	if err != nil {
+		log.Error("CreateIndex fail",
+			zap.Int64("fieldID", req.GetFieldID()), zap.String("indexName", req.GetIndexName()), zap.Error(err))
+		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+		return merr.Status(err), nil
+	}
+
+	select {
+	case s.notifyIndexChan <- req.GetCollectionID():
+	default:
+	}
+
+	log.Info("CreateIndex successfully",
+		zap.String("IndexName", req.GetIndexName()), zap.Int64("fieldID", req.GetFieldID()),
+		zap.Int64("IndexID", indexID))
+	metrics.IndexRequestCounter.WithLabelValues(metrics.SuccessLabel).Inc()
+	return merr.Success(), nil
 }
 
 func ValidateIndexParams(index *model.Index, key, value string) error {

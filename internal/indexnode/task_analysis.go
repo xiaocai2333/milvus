@@ -117,7 +117,6 @@ func (at *analysisTask) BuildIndex(ctx context.Context) error {
 				return err
 			}
 		}
-
 	}
 
 	err = analysisInfo.AppendSegmentSize(Params.DataCoordCfg.MajorCompactionSegmentSize.GetAsInt64())

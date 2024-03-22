@@ -176,7 +176,7 @@ func (i *IndexNode) storeAnalysisTaskState(clusterID string, taskID UniqueID, st
 	key := taskKey{ClusterID: clusterID, BuildID: taskID}
 	i.stateLock.Lock()
 	defer i.stateLock.Unlock()
-	if task, ok := i.indexTasks[key]; ok {
+	if task, ok := i.analysisTasks[key]; ok {
 		log.Info("IndexNode store analysis task state", zap.String("clusterID", clusterID), zap.Int64("taskID", taskID),
 			zap.String("state", state.String()), zap.String("fail reason", failReason))
 		task.state = state
