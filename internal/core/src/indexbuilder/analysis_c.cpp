@@ -81,7 +81,7 @@ Analysis(CAnalysis* res_analysis, CAnalysisInfo c_analysis_info) {
                 .CreateCompactionJob(
                     analysis_info->field_type, config, fileManagerContext);
         compactionJob->Train();
-        // *res_index = index.release();
+        *res_analysis = compactionJob.release();
         auto status = CStatus();
         status.error_code = Success;
         status.error_msg = "";
@@ -100,9 +100,9 @@ DeleteAnalysis(CAnalysis analysis) {
     try {
         AssertInfo(analysis,
                    "failed to delete analysis, passed index was null");
-        auto cAnalysis =
-            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(analysis);
-        delete cAnalysis;
+        auto real_analysis =
+            reinterpret_cast<milvus::indexbuilder::MajorCompaction*>(analysis);
+        delete real_analysis;
         status.error_code = Success;
         status.error_msg = "";
     } catch (std::exception& e) {
