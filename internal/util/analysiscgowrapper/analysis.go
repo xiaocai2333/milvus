@@ -63,9 +63,11 @@ func (ca *CgoAnalysis) Delete() error {
 	if ca.close {
 		return nil
 	}
-	status := C.DeleteAnalysis(ca.analysisPtr)
+	// Todo: delete in segcore
+	//status := C.DeleteAnalysis(ca.analysisPtr)
 	ca.close = true
-	return HandleCStatus(&status, "failed to delete analysis")
+	//return HandleCStatus(&status, "failed to delete analysis")
+	return nil
 }
 
 func (ca *CgoAnalysis) CleanLocalData() error {
@@ -74,10 +76,10 @@ func (ca *CgoAnalysis) CleanLocalData() error {
 }
 
 func (ca *CgoAnalysis) UpLoad(segmentIDs []int64) (string, map[int64]string, error) {
-	status := C.SerializeAnalysisAndUpLoad(ca.analysisPtr)
-	if err := HandleCStatus(&status, "failed to serialize index and upload index"); err != nil {
-		return "", nil, err
-	}
+	//status := C.SerializeAnalysisAndUpLoad(ca.analysisPtr)
+	//if err := HandleCStatus(&status, "failed to serialize index and upload index"); err != nil {
+	//	return "", nil, err
+	//}
 
 	centroidsFile, err := GetCentroidsFile()
 	if err != nil {

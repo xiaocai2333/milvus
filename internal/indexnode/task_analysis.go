@@ -157,7 +157,7 @@ func (at *analysisTask) SaveIndexFiles(ctx context.Context) error {
 			log.Error("IndexNode indexBuildTask Execute CIndexDelete failed", zap.Error(err))
 		}
 	}
-	centroidsFile, segmetsOffsetMapping, err := at.analysis.UpLoad(at.segmentIDs)
+	centroidsFile, segmentsOffsetMapping, err := at.analysis.UpLoad(at.segmentIDs)
 	if err != nil {
 		log.Error("failed to upload index", zap.Error(err))
 		gc()
@@ -170,7 +170,7 @@ func (at *analysisTask) SaveIndexFiles(ctx context.Context) error {
 	gc()
 
 	at.endTime = time.Now().UnixMicro()
-	at.node.storeAnalysisStatistic(at.req.GetClusterID(), at.req.GetTaskID(), centroidsFile, segmetsOffsetMapping)
+	at.node.storeAnalysisStatistic(at.req.GetClusterID(), at.req.GetTaskID(), centroidsFile, segmentsOffsetMapping)
 	//saveIndexFileDur := at.tr.RecordSpan()
 	//metrics.IndexNodeSaveIndexFileLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(saveIndexFileDur.Seconds())
 	at.tr.Elapse("index building all done")

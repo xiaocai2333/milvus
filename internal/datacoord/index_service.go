@@ -203,7 +203,7 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	task := &model.AnalysisTask{
 		TenantID:                  "",
 		CollectionID:              req.GetCollectionID(),
-		PartitionID:               11111,
+		PartitionID:               segments[0].GetPartitionID(),
 		FieldID:                   req.GetFieldID(),
 		FieldName:                 "",
 		FieldType:                 schemapb.DataType_FloatVector,

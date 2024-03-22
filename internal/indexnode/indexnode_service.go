@@ -323,7 +323,7 @@ func (i *IndexNode) Analysis(ctx context.Context, req *indexpb.AnalysisRequest) 
 	//metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.TotalLabel).Inc()
 
 	taskCtx, taskCancel := context.WithCancel(i.loopCtx)
-	if oldInfo := i.loadOrStoreIndexTask(req.GetClusterID(), req.GetTaskID(), &indexTaskInfo{
+	if oldInfo := i.loadOrStoreAnalysisTask(req.GetClusterID(), req.GetTaskID(), &analysisTaskInfo{
 		cancel: taskCancel,
 		state:  commonpb.IndexState_InProgress,
 	}); oldInfo != nil {
