@@ -43,7 +43,17 @@ echo "Starting querycoord..."
 nohup ./bin/milvus run querycoord  --run-with-subprocess > /tmp/querycoord.log 2>&1 &
 
 echo "Starting querynode..."
-nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode1.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode2.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode3.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode4.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode5.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode6.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode7.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode8.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode9.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode10.log 2>&1 &
+nohup ./bin/milvus run querynode  --run-with-subprocess > /tmp/querynode11.log 2>&1 &
 
 echo "Starting indexcoord..."
 nohup ./bin/milvus run indexcoord  --run-with-subprocess  > /tmp/indexcoord.log 2>&1 &

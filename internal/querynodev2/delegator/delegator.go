@@ -199,6 +199,12 @@ func (sd *shardDelegator) modifyQueryRequest(req *querypb.QueryRequest, scope qu
 	return nodeReq
 }
 
+type partialSearchOption struct {
+	enable             bool
+	checkTime          time.Duration
+	minResultThreshold float64
+}
+
 // Search preforms search operation on shard.
 func (sd *shardDelegator) search(ctx context.Context, req *querypb.SearchRequest, sealed []SnapshotItem, growing []SegmentEntry) ([]*internalpb.SearchResults, error) {
 	log := sd.getLogger(ctx)
@@ -233,7 +239,7 @@ func (sd *shardDelegator) search(ctx context.Context, req *querypb.SearchRequest
 	}
 	results, err := executeSubTasks(ctx, tasks, func(ctx context.Context, req *querypb.SearchRequest, worker cluster.Worker) (*internalpb.SearchResults, error) {
 		return worker.SearchSegments(ctx, req)
-	}, "Search", log)
+	}, "Search", log, &partialSearchOption{enable: req.GetReq().GetEnablePartialSearch(), checkTime: time.Duration(req.GetReq().GetCheckTime()) * time.Millisecond, minResultThreshold: req.GetReq().GetMinResultThreshold()})
 	if err != nil {
 		log.Warn("Delegator search failed", zap.Error(err))
 		return nil, err
@@ -421,7 +427,7 @@ func (sd *shardDelegator) QueryStream(ctx context.Context, req *querypb.QueryReq
 
 	_, err = executeSubTasks(ctx, tasks, func(ctx context.Context, req *querypb.QueryRequest, worker cluster.Worker) (*internalpb.RetrieveResults, error) {
 		return nil, worker.QueryStreamSegments(ctx, req, srv)
-	}, "Query", log)
+	}, "Query", log, nil)
 	if err != nil {
 		log.Warn("Delegator query failed", zap.Error(err))
 		return err
@@ -502,7 +508,7 @@ func (sd *shardDelegator) Query(ctx context.Context, req *querypb.QueryRequest) 
 
 	results, err := executeSubTasks(ctx, tasks, func(ctx context.Context, req *querypb.QueryRequest, worker cluster.Worker) (*internalpb.RetrieveResults, error) {
 		return worker.QuerySegments(ctx, req)
-	}, "Query", log)
+	}, "Query", log, nil)
 	if err != nil {
 		log.Warn("Delegator query failed", zap.Error(err))
 		return nil, err
@@ -557,7 +563,7 @@ func (sd *shardDelegator) GetStatistics(ctx context.Context, req *querypb.GetSta
 
 	results, err := executeSubTasks(ctx, tasks, func(ctx context.Context, req *querypb.GetStatisticsRequest, worker cluster.Worker) (*internalpb.GetStatisticsResponse, error) {
 		return worker.GetStatistics(ctx, req)
-	}, "GetStatistics", log)
+	}, "GetStatistics", log, nil)
 	if err != nil {
 		log.Warn("Delegator get statistics failed", zap.Error(err))
 		return nil, err
@@ -567,9 +573,10 @@ func (sd *shardDelegator) GetStatistics(ctx context.Context, req *querypb.GetSta
 }
 
 type subTask[T any] struct {
-	req      T
-	targetID int64
-	worker   cluster.Worker
+	req        T
+	targetID   int64
+	worker     cluster.Worker
+	segmentNum int
 }
 
 func organizeSubTask[T any](ctx context.Context, req T, sealed []SnapshotItem, growing []SegmentEntry, sd *shardDelegator, modify func(T, querypb.DataScope, []int64, int64) T) ([]subTask[T], error) {
@@ -596,9 +603,10 @@ func organizeSubTask[T any](ctx context.Context, req T, sealed []SnapshotItem, g
 		}
 
 		result = append(result, subTask[T]{
-			req:      req,
-			targetID: workerID,
-			worker:   worker,
+			req:        req,
+			targetID:   workerID,
+			worker:     worker,
+			segmentNum: len(segmentIDs),
 		})
 		return nil
 	}
@@ -615,19 +623,29 @@ func organizeSubTask[T any](ctx context.Context, req T, sealed []SnapshotItem, g
 	return result, nil
 }
 
+type resultS[R any] struct {
+	segNum int
+	result R
+}
+
 func executeSubTasks[T any, R interface {
 	GetStatus() *commonpb.Status
 }](ctx context.Context, tasks []subTask[T], execute func(context.Context, T, cluster.Worker) (R, error), taskType string, log *log.MLogger,
+	partialSearchOpt *partialSearchOption,
 ) ([]R, error) {
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var wg sync.WaitGroup
 	wg.Add(len(tasks))
 
-	resultCh := make(chan R, len(tasks))
+	resultCh := make(chan *resultS[R], len(tasks))
 	errCh := make(chan error, 1)
+	allSegNum := 0
+
 	for _, task := range tasks {
+		allSegNum += task.segmentNum
 		go func(task subTask[T]) {
 			defer wg.Done()
 			result, err := execute(ctx, task.req, task.worker)
@@ -647,8 +665,61 @@ func executeSubTasks[T any, R interface {
 				cancel()
 				return
 			}
-			resultCh <- result
+			resultCh <- &resultS[R]{
+				segNum: task.segmentNum,
+				result: result,
+			}
 		}(task)
+	}
+
+	if partialSearchOpt != nil && partialSearchOpt.enable {
+		// 1. return results if you can get all results before waitTime.
+		// 2. return results if you can get all*percent results when waitTime is coming.
+		// 3. wait for results util get all*percent results or timeout.
+		go func() {
+			wg.Wait()
+			close(resultCh)
+		}()
+
+		partialResults := make([]R, 0)
+		atLeastCheckOnce := false
+		resultSegmentCount := 0
+		defer func() {
+			log.Info("enable partial search",
+				zap.Int("partial results num", len(partialResults)),
+				zap.Int("task num", len(tasks)),
+				zap.Int("all seg num", allSegNum),
+				zap.Int("resultSegmentCount", resultSegmentCount),
+			)
+		}()
+
+		timer := time.NewTimer(partialSearchOpt.checkTime)
+		defer timer.Stop()
+		for {
+			select {
+			case err := <-errCh:
+				log.Warn("Delegator execute subTask failed",
+					zap.String("taskType", taskType),
+					zap.Error(err),
+				)
+				return nil, err
+			case result, ok := <-resultCh:
+				if !ok {
+					return partialResults, nil
+				}
+				partialResults = append(partialResults, result.result)
+				resultSegmentCount += result.segNum
+
+				if atLeastCheckOnce && float64(resultSegmentCount) >= float64(allSegNum)*partialSearchOpt.minResultThreshold {
+					return partialResults, nil
+				}
+			case <-timer.C:
+				atLeastCheckOnce = true
+				if float64(resultSegmentCount) >= float64(allSegNum)*partialSearchOpt.minResultThreshold {
+					return partialResults, nil
+				}
+			}
+		}
 	}
 
 	wg.Wait()
@@ -665,7 +736,7 @@ func executeSubTasks[T any, R interface {
 
 	results := make([]R, 0, len(tasks))
 	for result := range resultCh {
-		results = append(results, result)
+		results = append(results, result.result)
 	}
 	return results, nil
 }

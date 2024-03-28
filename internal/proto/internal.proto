@@ -120,6 +120,9 @@ message SearchRequest {
   bool   is_advanced = 20;
   int64 offset = 21;
   common.ConsistencyLevel consistency_level = 22;
+  bool enable_partial_search = 23;
+  double min_result_threshold = 24;
+  int64 check_time = 25;
 }
 
 message SubSearchResults {

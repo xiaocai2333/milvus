@@ -19,6 +19,7 @@ package querynodev2
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"sync"
 	"time"
@@ -669,9 +670,13 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 		}
 	}()
 
-	log.Debug("start to search segments on worker",
+	sleepTime := rand.Int63n(10)
+	log.Info("start to search segments on worker",
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
+		zap.Int64("sleepTime", sleepTime),
 	)
+
+	time.Sleep(time.Duration(sleepTime) * time.Second)
 	searchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
