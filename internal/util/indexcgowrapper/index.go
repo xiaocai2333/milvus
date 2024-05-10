@@ -106,6 +106,12 @@ func CreateIndex(ctx context.Context, buildIndexInfo *BuildIndexInfo) (CodecInde
 		close:    false,
 	}
 
+	runtime.SetFinalizer(index, func(index *CgoIndex) {
+		if index != nil && !index.close {
+			log.Error("there is leakage in index object, please check.")
+		}
+	})
+
 	return index, nil
 }
 
@@ -120,6 +126,12 @@ func CreateIndexV2(ctx context.Context, buildIndexInfo *BuildIndexInfo) (CodecIn
 		indexPtr: indexPtr,
 		close:    false,
 	}
+
+	runtime.SetFinalizer(index, func(index *CgoIndex) {
+		if index != nil && !index.close {
+			log.Error("there is leakage in index object, please check.")
+		}
+	})
 
 	return index, nil
 }
@@ -392,12 +404,6 @@ func (index *CgoIndex) UpLoad() (map[string]int64, error) {
 		res[path] = size
 	}
 
-	runtime.SetFinalizer(index, func(index *CgoIndex) {
-		if index != nil && !index.close {
-			log.Error("there is leakage in index object, please check.")
-		}
-	})
-
 	return res, nil
 }
 
@@ -428,12 +434,6 @@ func (index *CgoIndex) UpLoadV2() (int64, error) {
 	version = (version << 8) + int64(buffer[2])
 	version = (version << 8) + int64(buffer[1])
 	version = (version << 8) + int64(buffer[0])
-
-	runtime.SetFinalizer(index, func(index *CgoIndex) {
-		if index != nil && !index.close {
-			log.Error("there is leakage in index object, please check.")
-		}
-	})
 
 	return version, nil
 }

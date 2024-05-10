@@ -183,6 +183,18 @@ var (
 			statusLabelName,
 		})
 
+	DataCoordCompactionLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "compaction_latency",
+			Help:      "latency of compaction operation",
+			Buckets:   longTaskBuckets,
+		}, []string{
+			isVectorFieldLabelName,
+			compactionTypeLabelName,
+		})
+
 	FlushedSegmentFileNum = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: milvusNamespace,
@@ -299,6 +311,7 @@ func RegisterDataCoord(registry *prometheus.Registry) {
 	registry.MustRegister(DataCoordDmlChannelNum)
 	registry.MustRegister(DataCoordCompactedSegmentSize)
 	registry.MustRegister(DataCoordCompactionTaskNum)
+	registry.MustRegister(DataCoordCompactionLatency)
 	registry.MustRegister(DataCoordSizeStoredL0Segment)
 	registry.MustRegister(DataCoordRateStoredL0Segment)
 	registry.MustRegister(FlushedSegmentFileNum)
