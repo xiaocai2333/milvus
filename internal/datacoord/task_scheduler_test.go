@@ -996,8 +996,10 @@ func (s *taskSchedulerSuite) Test_analyzeTaskFailCase() {
 			ID: collID,
 			Schema: &schemapb.CollectionSchema{
 				Fields: []*schemapb.FieldSchema{
-					{FieldID: s.fieldID, Name: "vec", DataType: schemapb.DataType_FloatVector,
-						TypeParams: []*commonpb.KeyValuePair{{Key: "dim", Value: "10"}}},
+					{
+						FieldID: s.fieldID, Name: "vec", DataType: schemapb.DataType_FloatVector,
+						TypeParams: []*commonpb.KeyValuePair{{Key: "dim", Value: "10"}},
+					},
 				},
 			},
 		}, nil)
