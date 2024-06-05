@@ -139,7 +139,7 @@ func (s *MixCompactionTaskSuite) TestCompactDupPK() {
 		//}
 		//bfs := metacache.NewBloomFilterSet(statistic)
 
-		kvs, fBinlogs, err := s.task.serializeWrite(context.TODO(), s.segWriter)
+		kvs, fBinlogs, err := serializeWrite(context.TODO(), s.segWriter, s.task.Allocator)
 		s.Require().NoError(err)
 		s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.MatchedBy(func(keys []string) bool {
 			left, right := lo.Difference(keys, lo.Keys(kvs))
@@ -191,7 +191,7 @@ func (s *MixCompactionTaskSuite) TestCompactTwoToOne() {
 		//	MaxPK:    s.segWriter.pkstats.MaxPk,
 		//}
 		//bfs := metacache.NewBloomFilterSet(statistic)
-		kvs, fBinlogs, err := s.task.serializeWrite(context.TODO(), s.segWriter)
+		kvs, fBinlogs, err := serializeWrite(context.TODO(), s.segWriter, s.task.Allocator)
 		s.Require().NoError(err)
 		s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.MatchedBy(func(keys []string) bool {
 			left, right := lo.Difference(keys, lo.Keys(kvs))
@@ -252,7 +252,7 @@ func (s *MixCompactionTaskSuite) TestMergeBufferFull() {
 	s.Require().NoError(err)
 
 	s.mockAlloc.EXPECT().Alloc(mock.Anything).Return(888888, 999999, nil).Times(2)
-	kvs, _, err := s.task.serializeWrite(context.TODO(), s.segWriter)
+	kvs, _, err := serializeWrite(context.TODO(), s.segWriter, s.task.Allocator)
 	s.Require().NoError(err)
 
 	s.mockAlloc.EXPECT().AllocOne().Return(888888, nil)
@@ -281,7 +281,7 @@ func (s *MixCompactionTaskSuite) TestMergeEntityExpired() {
 	s.task.plan.CollectionTtl = int64(collTTL)
 	s.mockAlloc.EXPECT().Alloc(mock.Anything).Return(888888, 999999, nil)
 
-	kvs, _, err := s.task.serializeWrite(context.TODO(), s.segWriter)
+	kvs, _, err := serializeWrite(context.TODO(), s.segWriter, s.task.Allocator)
 	s.Require().NoError(err)
 	s.mockAlloc.EXPECT().AllocOne().Return(888888, nil)
 	s.mockBinlogIO.EXPECT().Download(mock.Anything, mock.Anything).RunAndReturn(
@@ -314,7 +314,7 @@ func (s *MixCompactionTaskSuite) TestMergeNoExpiration() {
 	}
 
 	s.mockAlloc.EXPECT().Alloc(mock.Anything).Return(888888, 999999, nil)
-	kvs, _, err := s.task.serializeWrite(context.TODO(), s.segWriter)
+	kvs, _, err := serializeWrite(context.TODO(), s.segWriter, s.task.Allocator)
 	s.Require().NoError(err)
 	for _, test := range tests {
 		s.Run(test.description, func() {

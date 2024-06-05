@@ -238,6 +238,12 @@ func (node *DataNode) Compaction(ctx context.Context, req *datapb.CompactionPlan
 			node.allocator,
 			req,
 		)
+	case datapb.CompactionType_SortingCompaction:
+		task = compaction.NewSortingCompactionTask(
+			taskCtx,
+			binlogIO,
+			node.allocator,
+			req)
 	default:
 		log.Warn("Unknown compaction type", zap.String("type", req.GetType().String()))
 		return merr.Status(merr.WrapErrParameterInvalidMsg("Unknown compaction type: %v", req.GetType().String())), nil

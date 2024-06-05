@@ -325,6 +325,9 @@ message SegmentInfo {
   // so segments with Legacy level shall be treated as L1 segment
   SegmentLevel level = 20;
   int64 storage_version = 21;
+
+  // A flag to indicate whether the segments are sorted by primary key.
+  bool is_sorted = 22;
 }
 
 message SegmentStartPosition {
@@ -492,6 +495,7 @@ enum CompactionType {
   MinorCompaction = 5;
   MajorCompaction = 6;
   Level0DeleteCompaction = 7;
+  SortingCompaction = 8;
 }
 
 message CompactionStateRequest {
@@ -533,6 +537,7 @@ message CompactionSegmentBinlogs {
   SegmentLevel level = 6;
   int64 collectionID = 7;
   int64 partitionID = 8;
+  bool is_sorted = 9;
 }
 
 message CompactionPlan {
@@ -556,6 +561,7 @@ message CompactionSegment {
   repeated FieldBinlog field2StatslogPaths = 5;
   repeated FieldBinlog deltalogs = 6;
   string channel = 7;
+  bool is_sorted = 8;
 }
 
 message CompactionPlanResult {

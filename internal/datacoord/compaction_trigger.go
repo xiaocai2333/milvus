@@ -377,6 +377,17 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) error {
 			continue
 		}
 
+		needSortSegments := make([]*SegmentInfo, 0)
+		sortedSegments := make([]*SegmentInfo, 0)
+		for _, s := range group.segments {
+			if !s.GetIsSorted() {
+				needSortSegments = append(needSortSegments, s)
+				continue
+			}
+			sortedSegments = append(sortedSegments, s)
+		}
+		group.segments = sortedSegments
+
 		if Params.DataCoordCfg.IndexBasedCompaction.GetAsBool() {
 			group.segments = FilterInIndexedSegments(t.handler, t.meta, group.segments...)
 		}
@@ -401,6 +412,60 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) error {
 				zap.Int64("partitionID", group.partitionID),
 				zap.String("channel", group.channelName))
 			return err
+		}
+
+		if len(needSortSegments) > 0 {
+			plans := t.generatedSortingPlan(needSortSegments)
+			currentID, _, err := t.allocator.allocN(int64(len(plans)))
+			if err != nil {
+				return err
+			}
+			for _, plan := range plans {
+				totalRows := plan.A
+				segIDs := plan.B
+				if !signal.isForce && t.compactionHandler.isFull() {
+					log.Warn("compaction plan skipped due to handler full",
+						zap.Int64("collectionID", signal.collectionID),
+						zap.Int64s("segmentIDs", segIDs))
+					break
+				}
+				start := time.Now()
+				planID := currentID
+				currentID++
+				pts, _ := tsoutil.ParseTS(ct.startTime)
+				task := &datapb.CompactionTask{
+					PlanID:           planID,
+					TriggerID:        signal.id,
+					State:            datapb.CompactionTaskState_pipelining,
+					StartTime:        pts.Unix(),
+					TimeoutInSeconds: Params.DataCoordCfg.CompactionTimeoutInSeconds.GetAsInt32(),
+					Type:             datapb.CompactionType_SortingCompaction,
+					CollectionTtl:    ct.collectionTTL.Nanoseconds(),
+					CollectionID:     signal.collectionID,
+					PartitionID:      group.partitionID,
+					Channel:          group.channelName,
+					InputSegments:    segIDs,
+					TotalRows:        totalRows,
+					Schema:           coll.Schema,
+				}
+				err := t.compactionHandler.enqueueCompaction(task)
+				if err != nil {
+					log.Warn("failed to execute sorting compaction task",
+						zap.Int64("collectionID", signal.collectionID),
+						zap.Int64("planID", planID),
+						zap.Int64s("segmentIDs", segIDs),
+						zap.Error(err))
+					continue
+				}
+
+				log.Info("time cost of generating sorting compaction",
+					zap.Int64("planID", planID),
+					zap.Int64("time cost", time.Since(start).Milliseconds()),
+					zap.Int64("collectionID", signal.collectionID),
+					zap.String("channel", group.channelName),
+					zap.Int64("partitionID", group.partitionID),
+					zap.Int64s("segmentIDs", segIDs))
+			}
 		}
 
 		plans := t.generatePlans(group.segments, signal, ct)
@@ -458,6 +523,22 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) error {
 	return nil
 }
 
+func (t *compactionTrigger) generatedSortingPlan(segments []*SegmentInfo) []*typeutil.Pair[int64, []int64] {
+	if len(segments) == 0 {
+		log.Warn("the number of candidate segments is 0, skip to generate compaction plan")
+		return []*typeutil.Pair[int64, []int64]{}
+	}
+
+	tasks := make([]*typeutil.Pair[int64, []int64], len(segments))
+	for i, s := range segments {
+		pair := typeutil.NewPair(s.GetNumOfRows(), []int64{s.GetID()})
+		tasks[i] = &pair
+		log.Info("generatedSortingPlan", zap.Int64("collectionID", s.GetCollectionID()),
+			zap.Int64("segmentID", s.GetID()))
+	}
+	return tasks
+}
+
 // handleSignal processes segment flush caused partition-chan level compaction signal
 func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 	t.forceMu.Lock()
@@ -483,12 +564,6 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 	channel := segment.GetInsertChannel()
 	partitionID := segment.GetPartitionID()
 	collectionID := segment.GetCollectionID()
-	segments := t.getCandidateSegments(channel, partitionID)
-
-	if len(segments) == 0 {
-		log.Info("the number of candidate segments is 0, skip to handle compaction")
-		return
-	}
 
 	coll, err := t.getCollection(collectionID)
 	if err != nil {
@@ -512,6 +587,64 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 	if err != nil {
 		log.Warn("get compact time failed, skip to handle compaction", zap.Int64("collectionID", segment.GetCollectionID()),
 			zap.Int64("partitionID", partitionID), zap.String("channel", channel))
+		return
+	}
+
+	if !segment.GetIsSorted() {
+		plans := t.generatedSortingPlan([]*SegmentInfo{segment})
+		currentID, _, err := t.allocator.allocN(int64(len(plans)))
+		if err != nil {
+			log.Warn("fail to allocate id", zap.Error(err))
+			return
+		}
+
+		for _, plan := range plans {
+			if t.compactionHandler.isFull() {
+				log.Warn("compaction plan skipped due to handler full", zap.Int64("collection", signal.collectionID))
+				break
+			}
+			totalRows := plan.A
+			segmentIDS := plan.B
+			start := time.Now()
+			planID := currentID
+			currentID++
+			pts, _ := tsoutil.ParseTS(ct.startTime)
+			if err := t.compactionHandler.enqueueCompaction(&datapb.CompactionTask{
+				PlanID:           planID,
+				TriggerID:        signal.id,
+				State:            datapb.CompactionTaskState_pipelining,
+				StartTime:        pts.Unix(),
+				TimeoutInSeconds: Params.DataCoordCfg.CompactionTimeoutInSeconds.GetAsInt32(),
+				Type:             datapb.CompactionType_SortingCompaction,
+				CollectionTtl:    ct.collectionTTL.Nanoseconds(),
+				CollectionID:     collectionID,
+				PartitionID:      partitionID,
+				Channel:          channel,
+				InputSegments:    segmentIDS,
+				TotalRows:        totalRows,
+				Schema:           coll.Schema,
+			}); err != nil {
+				log.Warn("failed to execute sorting compaction task",
+					zap.Int64("collection", collectionID),
+					zap.Int64("planID", planID),
+					zap.Int64s("segmentIDs", segmentIDS),
+					zap.Error(err))
+				continue
+			}
+			log.Info("time cost of generating sorting compaction",
+				zap.Int64("planID", planID),
+				zap.Int64("time cost", time.Since(start).Milliseconds()),
+				zap.Int64("collectionID", signal.collectionID),
+				zap.String("channel", channel),
+				zap.Int64("partitionID", partitionID),
+				zap.Int64s("segmentIDs", segmentIDS))
+		}
+		return
+	}
+	segments := t.getCandidateSegments(channel, partitionID)
+
+	if len(segments) == 0 {
+		log.Info("the number of candidate segments is 0, skip to handle compaction")
 		return
 	}
 
@@ -755,7 +888,8 @@ func (t *compactionTrigger) getCandidateSegments(channel string, partitionID Uni
 			s.GetPartitionID() != partitionID ||
 			s.isCompacting ||
 			s.GetIsImporting() ||
-			s.GetLevel() == datapb.SegmentLevel_L0 {
+			s.GetLevel() == datapb.SegmentLevel_L0 ||
+			!s.GetIsSorted() {
 			continue
 		}
 		res = append(res, s)

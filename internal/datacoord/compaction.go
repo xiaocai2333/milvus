@@ -183,7 +183,7 @@ func (c *compactionPlanHandler) schedule() []CompactionTask {
 		switch t.GetType() {
 		case datapb.CompactionType_Level0DeleteCompaction:
 			l0ChannelExcludes.Insert(t.GetChannel())
-		case datapb.CompactionType_MixCompaction:
+		case datapb.CompactionType_MixCompaction, datapb.CompactionType_SortingCompaction:
 			mixChannelExcludes.Insert(t.GetChannel())
 			mixLabelExcludes.Insert(t.GetLabel())
 			// case datapb.CompactionType_ClusteringCompaction:
@@ -210,7 +210,7 @@ func (c *compactionPlanHandler) schedule() []CompactionTask {
 			}
 			picked = append(picked, t)
 			l0ChannelExcludes.Insert(t.GetChannel())
-		case datapb.CompactionType_MixCompaction:
+		case datapb.CompactionType_MixCompaction, datapb.CompactionType_SortingCompaction:
 			if l0ChannelExcludes.Contain(t.GetChannel()) {
 				continue
 			}
@@ -442,7 +442,7 @@ func (c *compactionPlanHandler) enqueueCompaction(task *datapb.CompactionTask) e
 func (c *compactionPlanHandler) createCompactTask(t *datapb.CompactionTask) CompactionTask {
 	var task CompactionTask
 	switch t.GetType() {
-	case datapb.CompactionType_MixCompaction:
+	case datapb.CompactionType_MixCompaction, datapb.CompactionType_SortingCompaction:
 		task = &mixCompactionTask{
 			CompactionTask: t,
 			meta:           c.meta,

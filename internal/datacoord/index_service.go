@@ -54,6 +54,10 @@ func (s *Server) startIndexService(ctx context.Context) {
 
 func (s *Server) createIndexForSegment(segment *SegmentInfo, indexID UniqueID) error {
 	log.Info("create index for segment", zap.Int64("segmentID", segment.ID), zap.Int64("indexID", indexID))
+	// TODO @xiaocai2333: Handle the end status of import and clustering, and then disable indexing of unsorted segments here.
+	//if !segment.GetIsSorted() || segment.GetLevel() == datapb.SegmentLevel_L0 {
+	//	return nil
+	//}
 	buildID, err := s.allocator.allocID(context.Background())
 	if err != nil {
 		return err

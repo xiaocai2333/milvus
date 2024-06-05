@@ -1351,6 +1351,7 @@ func (m *meta) CompleteCompactionMutation(plan *datapb.CompactionPlan, result *d
 			DmlPosition: getMinPosition(lo.Map(latestCompactFromSegments, func(info *SegmentInfo, _ int) *msgpb.MsgPosition {
 				return info.GetDmlPosition()
 			})),
+			IsSorted: compactToSegment.GetIsSorted(),
 		})
 
 	// L1 segment with NumRows=0 will be discarded, so no need to change the metric
