@@ -6,7 +6,13 @@ import (
 	"time"
 	"unicode"
 
+<<<<<<< HEAD
 	"github.com/antlr4-go/antlr/v4"
+=======
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+
+	"github.com/antlr/antlr4/runtime/Go/antlr"
+>>>>>>> 50d5aa6a93 (Support template to parse expression)
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
