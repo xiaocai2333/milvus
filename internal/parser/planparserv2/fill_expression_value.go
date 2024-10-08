@@ -19,4 +19,8 @@ func FillTermExpressionValue(expr *planpb.TermExpr, values map[string]*milvuspb.
 	}
 
 	arrays := value.GetArrayVal()
+	if arrays == nil {
+		return fmt.Errorf("term elements is zero")
+	}
+	return nil
 }
