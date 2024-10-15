@@ -1,6 +1,7 @@
 package planparserv2
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -560,4 +561,71 @@ func hexDigit(n uint32) byte {
 		return byte(n) + '0'
 	}
 	return byte(n-10) + 'a'
+}
+
+func convertInterfaceToGenericValue(value interface{}) (*planpb.GenericValue, schemapb.DataType, error) {
+	switch v := value.(type) {
+	case bool:
+		return NewBool(v), schemapb.DataType_Bool, nil
+	case int:
+		return NewInt(int64(v)), schemapb.DataType_Int64, nil
+	case int32:
+		return NewInt(int64(v)), schemapb.DataType_Int64, nil
+	case int64:
+		return NewInt(v), schemapb.DataType_Int64, nil
+	case float32:
+		return NewFloat(float64(v)), schemapb.DataType_Double, nil
+	case float64:
+		return NewFloat(v), schemapb.DataType_Double, nil
+	case string:
+		return NewString(v), schemapb.DataType_String, nil
+	case []interface{}:
+		arrayElements := make([]*planpb.GenericValue, len(v))
+		dataType := schemapb.DataType_None
+		sameType := true
+		for i, e := range v {
+			ev, dt, err := convertInterfaceToGenericValue(e)
+			if err != nil {
+				return nil, schemapb.DataType_None, err
+			}
+			if dataType == schemapb.DataType_None {
+				dataType = dt
+			} else if dataType != dt {
+				sameType = false
+			}
+			arrayElements[i] = ev
+		}
+		return &planpb.GenericValue{
+			Val: &planpb.GenericValue_ArrayVal{
+				ArrayVal: &planpb.Array{
+					Array:       arrayElements,
+					SameType:    sameType,
+					ElementType: dataType,
+				},
+			},
+		}, schemapb.DataType_Array, nil
+
+	default:
+		return nil, schemapb.DataType_None, fmt.Errorf("unsupported element type: %s", v)
+	}
+}
+
+func unmarshalExpressionValues(params []byte) (map[string]*planpb.GenericValue, error) {
+	var jsonMap map[string]interface{}
+	err := json.Unmarshal(params, &jsonMap)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make(map[string]*planpb.GenericValue)
+
+	for k, v := range jsonMap {
+		value, _, err := convertInterfaceToGenericValue(v)
+		if err != nil {
+			return nil, err
+		}
+		values[k] = value
+	}
+
+	return values, nil
 }

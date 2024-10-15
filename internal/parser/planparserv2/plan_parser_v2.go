@@ -6,13 +6,7 @@ import (
 	"time"
 	"unicode"
 
-<<<<<<< HEAD
 	"github.com/antlr4-go/antlr/v4"
-=======
-	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
-
-	"github.com/antlr/antlr4/runtime/Go/antlr"
->>>>>>> 50d5aa6a93 (Support template to parse expression)
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
@@ -84,7 +78,7 @@ func handleExprWithErrorListener(schema *typeutil.SchemaHelper, exprStr string, 
 	return ast.Accept(visitor)
 }
 
-func ParseExpr(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, error) {
+func ParseExpr(schema *typeutil.SchemaHelper, exprStr string, data ...map[string]*planpb.GenericValue) (*planpb.Expr, error) {
 	ret := handleExpr(schema, exprStr)
 
 	if err := getError(ret); err != nil {
@@ -97,6 +91,10 @@ func ParseExpr(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, err
 	}
 	if !canBeExecuted(predicate) {
 		return nil, fmt.Errorf("predicate is not a boolean expression: %s, data type: %s", exprStr, predicate.dataType)
+	}
+
+	if err := FillExpressionValue(predicate.expr, data[0]); err != nil {
+		return nil, err
 	}
 
 	return predicate.expr, nil
@@ -120,8 +118,13 @@ func ParseIdentifier(schema *typeutil.SchemaHelper, identifier string, checkFunc
 	return checkFunc(predicate.expr)
 }
 
-func CreateRetrievePlan(schema *typeutil.SchemaHelper, exprStr string) (*planpb.PlanNode, error) {
-	expr, err := ParseExpr(schema, exprStr)
+func CreateRetrievePlan(schema *typeutil.SchemaHelper, exprStr string, data ...[]byte) (*planpb.PlanNode, error) {
+	valueMap, err := unmarshalExpressionValues(data[0])
+	if err != nil {
+		return nil, err
+	}
+
+	expr, err := ParseExpr(schema, exprStr, valueMap)
 	if err != nil {
 		return nil, err
 	}
@@ -166,12 +169,16 @@ func convertHanToASCII(s string) string {
 	return builder.String()
 }
 
-func CreateSearchPlan(schema *typeutil.SchemaHelper, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo) (*planpb.PlanNode, error) {
+func CreateSearchPlan(schema *typeutil.SchemaHelper, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo, data ...[]byte) (*planpb.PlanNode, error) {
+	valueMap, err := unmarshalExpressionValues(data[0])
+	if err != nil {
+		return nil, err
+	}
 	parse := func() (*planpb.Expr, error) {
 		if len(exprStr) <= 0 {
 			return nil, nil
 		}
-		return ParseExpr(schema, exprStr)
+		return ParseExpr(schema, exprStr, valueMap)
 	}
 
 	expr, err := parse()

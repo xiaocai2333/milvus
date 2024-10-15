@@ -515,7 +515,14 @@ func (t *searchTask) tryGeneratePlan(params []*commonpb.KeyValuePair, dsl string
 	}
 
 	queryInfo.QueryFieldId = annField.GetFieldID()
-	plan, planErr := planparserv2.CreateSearchPlan(t.schema.schemaHelper, dsl, annsFieldName, queryInfo)
+	var expressionValues string
+	for _, kv := range t.request.GetSearchParams() {
+		if kv.GetKey() == ExprParamsKey {
+			expressionValues = kv.GetValue()
+			break
+		}
+	}
+	plan, planErr := planparserv2.CreateSearchPlan(t.schema.schemaHelper, dsl, annsFieldName, queryInfo, []byte(expressionValues))
 	if planErr != nil {
 		log.Warn("failed to create query plan", zap.Error(planErr),
 			zap.String("dsl", dsl), // may be very large if large term passed.

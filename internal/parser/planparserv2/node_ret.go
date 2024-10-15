@@ -39,3 +39,11 @@ func getGenericValue(obj interface{}) *planpb.GenericValue {
 	}
 	return expr.expr.GetValueExpr().GetValue()
 }
+
+func getValueExpr(obj interface{}) *planpb.ValueExpr {
+	expr := getExpr(obj)
+	if expr == nil {
+		return nil
+	}
+	return expr.expr.GetValueExpr()
+}

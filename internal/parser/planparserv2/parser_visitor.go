@@ -540,29 +540,39 @@ func (v *ParserVisitor) VisitTerm(ctx *parser.TermContext) interface{} {
 	if getError(term) != nil {
 		return term
 	}
-	value := getGenericValue(term)
-	if value == nil {
-		return fmt.Errorf("value '%s' in list cannot be a non-const expression", ctx.Expr(1).GetText())
-	}
+	valueExpr := getValueExpr(term)
+	var placeholder string
+	values := make([]*planpb.GenericValue, 0)
 
-	if !IsArray(value) {
-		return fmt.Errorf("the right-hand side of 'in' must be a list, but got: %s", ctx.Expr(1).GetText())
-	}
-
-	values := value.GetArrayVal().GetArray()
-	for i, e := range values {
-		castedValue, err := castValue(dataType, e)
-		if err != nil {
-			return fmt.Errorf("value '%s' in list cannot be casted to %s", e.String(), dataType.String())
+	if valueExpr.GetValue() == nil && valueExpr.GetPlaceholderName() != "" {
+		placeholder = valueExpr.GetPlaceholderName()
+		values = nil
+	} else {
+		elementValue := valueExpr.GetValue()
+		if elementValue == nil {
+			return fmt.Errorf(
+				"contains_any operation are only supported explicitly specified element, got: %s", ctx.Expr(1).GetText())
 		}
-		values[i] = castedValue
+
+		if !IsArray(elementValue) {
+			return fmt.Errorf("the right-hand side of 'in' must be a list, but got: %s", ctx.Expr(1).GetText())
+		}
+		array := elementValue.GetArrayVal().GetArray()
+		for i, e := range array {
+			castedValue, err := castValue(dataType, e)
+			if err != nil {
+				return fmt.Errorf("value '%s' in list cannot be casted to %s", e.String(), dataType.String())
+			}
+			values[i] = castedValue
+		}
 	}
 
 	expr := &planpb.Expr{
 		Expr: &planpb.Expr_TermExpr{
 			TermExpr: &planpb.TermExpr{
-				ColumnInfo: columnInfo,
-				Values:     values,
+				ColumnInfo:      columnInfo,
+				Values:          values,
+				PlaceholderName: placeholder,
 			},
 		},
 	}
@@ -1279,34 +1289,47 @@ func (v *ParserVisitor) VisitJSONContainsAny(ctx *parser.JSONContainsAnyContext)
 	if err := getError(element); err != nil {
 		return err
 	}
-	elementValue := getGenericValue(element)
-	if elementValue == nil {
-		return fmt.Errorf(
-			"contains_any operation are only supported explicitly specified element, got: %s", ctx.Expr(1).GetText())
-	}
+	valueExpr := getValueExpr(element)
+	var elements []*planpb.GenericValue
+	var sameType = true
+	var placeholder string
 
-	if elementValue.GetArrayVal() == nil {
-		return fmt.Errorf("contains_any operation element must be an array")
-	}
+	if valueExpr.GetValue() == nil && valueExpr.GetPlaceholderName() != "" {
+		placeholder = valueExpr.GetPlaceholderName()
+		elements = nil
+	} else {
+		elementValue := getGenericValue(element)
+		if elementValue == nil {
+			return fmt.Errorf(
+				"contains_any operation are only supported explicitly specified element, got: %s", ctx.Expr(1).GetText())
+		}
 
-	if typeutil.IsArrayType(columnInfo.GetDataType()) {
-		for _, value := range elementValue.GetArrayVal().GetArray() {
-			valExpr := toValueExpr(value)
-			if !canBeCompared(field.(*ExprWithType), valExpr) {
-				return fmt.Errorf("contains_any operation can't compare between array element type: %s and %s",
-					columnInfo.GetElementType(),
-					valExpr.dataType)
+		if elementValue.GetArrayVal() == nil {
+			return fmt.Errorf("contains_any operation element must be an array")
+		}
+
+		if typeutil.IsArrayType(columnInfo.GetDataType()) {
+			for _, value := range elementValue.GetArrayVal().GetArray() {
+				valExpr := toValueExpr(value)
+				if !canBeCompared(field.(*ExprWithType), valExpr) {
+					return fmt.Errorf("contains_any operation can't compare between array element type: %s and %s",
+						columnInfo.GetElementType(),
+						valExpr.dataType)
+				}
+				elements = append(elements, value)
 			}
 		}
+		sameType = elementValue.GetArrayVal().GetSameType()
 	}
 
 	expr := &planpb.Expr{
 		Expr: &planpb.Expr_JsonContainsExpr{
 			JsonContainsExpr: &planpb.JSONContainsExpr{
 				ColumnInfo:       columnInfo,
-				Elements:         elementValue.GetArrayVal().GetArray(),
+				Elements:         elements,
 				Op:               planpb.JSONContainsExpr_ContainsAny,
-				ElementsSameType: elementValue.GetArrayVal().GetSameType(),
+				ElementsSameType: sameType,
+				PlaceholderName:  placeholder,
 			},
 		},
 	}
@@ -1346,5 +1369,18 @@ func (v *ParserVisitor) VisitArrayLength(ctx *parser.ArrayLengthContext) interfa
 		expr:          expr,
 		dataType:      schemapb.DataType_Int64,
 		nodeDependent: true,
+	}
+}
+
+func (v *ParserVisitor) VisitPlaceholder(ctx *parser.PlaceholderContext) interface{} {
+	return &ExprWithType{
+		expr: &planpb.Expr{
+			Expr: &planpb.Expr_ValueExpr{
+				ValueExpr: &planpb.ValueExpr{
+					Value:           nil,
+					PlaceholderName: ctx.Identifier().GetText(),
+				},
+			},
+		},
 	}
 }

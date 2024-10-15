@@ -221,7 +221,6 @@ func createCntPlan(expr string, schemaHelper *typeutil.SchemaHelper) (*planpb.Pl
 			},
 		}, nil
 	}
-
 	plan, err := planparserv2.CreateRetrievePlan(schemaHelper, expr)
 	if err != nil {
 		return nil, merr.WrapErrAsInputError(merr.WrapErrParameterInvalidMsg("failed to create query plan: %v", err))
@@ -234,6 +233,14 @@ func createCntPlan(expr string, schemaHelper *typeutil.SchemaHelper) (*planpb.Pl
 
 func (t *queryTask) createPlan(ctx context.Context) error {
 	schema := t.schema
+
+	var expressionValues string
+	for _, kv := range t.request.GetSearchParams() {
+		if kv.GetKey() == ExprParamsKey {
+			expressionValues = kv.GetValue()
+			break
+		}
+	}
 
 	cntMatch := matchCountRule(t.request.GetOutputFields())
 	if cntMatch {
