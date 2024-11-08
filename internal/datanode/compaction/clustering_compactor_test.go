@@ -166,7 +166,6 @@ func (s *ClusteringCompactionTaskSuite) TestCompactionInit() {
 	s.Equal(true, s.task.memoryBufferSize > 0)
 	s.Equal(8, s.task.getWorkerPoolSize())
 	s.Equal(8, s.task.mappingPool.Cap())
-	s.Equal(8, s.task.flushPool.Cap())
 }
 
 func (s *ClusteringCompactionTaskSuite) TestScalarCompactionNormal() {
@@ -204,6 +203,7 @@ func (s *ClusteringCompactionTaskSuite) TestScalarCompactionNormal() {
 		Begin: time.Now().UnixMilli(),
 		End:   time.Now().UnixMilli() + 1000,
 	}
+	s.task.plan.MaxSize = paramtable.Get().DataCoordCfg.SegmentMaxSize.GetAsInt64() * 1024 * 1024
 
 	// 8+8+8+4+7+4*4=51
 	// 51*1024 = 52224
@@ -213,7 +213,6 @@ func (s *ClusteringCompactionTaskSuite) TestScalarCompactionNormal() {
 
 	compactionResult, err := s.task.Compact()
 	s.Require().NoError(err)
-	s.Equal(5, len(s.task.clusterBuffers))
 	s.Equal(5, len(compactionResult.GetSegments()))
 	totalBinlogNum := 0
 	totalRowNum := int64(0)
@@ -233,7 +232,7 @@ func (s *ClusteringCompactionTaskSuite) TestScalarCompactionNormal() {
 			statsRowNum += b.GetEntriesNum()
 		}
 	}
-	s.Equal(2, totalBinlogNum/len(schema.GetFields()))
+	s.Equal(3, totalBinlogNum/len(schema.GetFields()))
 	s.Equal(1, statsBinlogNum)
 	s.Equal(totalRowNum, statsRowNum)
 }
@@ -354,6 +353,7 @@ func (s *ClusteringCompactionTaskSuite) TestCompactionWithBM25Function() {
 		Begin: time.Now().UnixMilli(),
 		End:   time.Now().UnixMilli() + 1000,
 	}
+	s.task.plan.MaxSize = paramtable.Get().DataCoordCfg.SegmentMaxSize.GetAsInt64() * 1024 * 1024
 
 	// 8 + 8 + 8 + 7 + 8 = 39
 	// 39*1024 = 39936
@@ -364,7 +364,6 @@ func (s *ClusteringCompactionTaskSuite) TestCompactionWithBM25Function() {
 
 	compactionResult, err := s.task.Compact()
 	s.Require().NoError(err)
-	s.Equal(5, len(s.task.clusterBuffers))
 	s.Equal(5, len(compactionResult.GetSegments()))
 	totalBinlogNum := 0
 	totalRowNum := int64(0)
@@ -384,7 +383,7 @@ func (s *ClusteringCompactionTaskSuite) TestCompactionWithBM25Function() {
 			statsRowNum += b.GetEntriesNum()
 		}
 	}
-	s.Equal(2, totalBinlogNum/len(schema.GetFields()))
+	s.Equal(3, totalBinlogNum/len(schema.GetFields()))
 	s.Equal(1, statsBinlogNum)
 	s.Equal(totalRowNum, statsRowNum)
 
@@ -399,32 +398,6 @@ func (s *ClusteringCompactionTaskSuite) TestCompactionWithBM25Function() {
 
 	s.Equal(1, bm25BinlogNum)
 	s.Equal(totalRowNum, bm25RowNum)
-}
-
-func (s *ClusteringCompactionTaskSuite) TestCheckBuffersAfterCompaction() {
-	s.Run("no leak", func() {
-		task := &clusteringCompactionTask{clusterBuffers: []*ClusterBuffer{{}}}
-
-		s.NoError(task.checkBuffersAfterCompaction())
-	})
-
-	s.Run("leak binlog", func() {
-		task := &clusteringCompactionTask{
-			clusterBuffers: []*ClusterBuffer{
-				{
-					flushedBinlogs: map[typeutil.UniqueID]map[typeutil.UniqueID]*datapb.FieldBinlog{
-						1: {
-							101: {
-								FieldID: 101,
-								Binlogs: []*datapb.Binlog{{LogID: 1000}},
-							},
-						},
-					},
-				},
-			},
-		}
-		s.Error(task.checkBuffersAfterCompaction())
-	})
 }
 
 func (s *ClusteringCompactionTaskSuite) TestGenerateBM25Stats() {
