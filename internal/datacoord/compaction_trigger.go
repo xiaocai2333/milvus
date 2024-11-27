@@ -291,7 +291,7 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) error {
 		zap.Int64("signal.collectionID", signal.collectionID),
 		zap.Int64("signal.partitionID", signal.partitionID),
 		zap.Int64("signal.segmentID", signal.segmentID))
-	partSegments := t.meta.GetSegmentsChanPart(func(segment *SegmentInfo) bool {
+	partSegments := t.meta.GetSegmentsChanPartVshard(func(segment *SegmentInfo) bool {
 		return (signal.collectionID == 0 || segment.CollectionID == signal.collectionID) &&
 			isSegmentHealthy(segment) &&
 			isFlush(segment) &&
@@ -310,7 +310,9 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) error {
 	for _, group := range partSegments {
 		log := log.With(zap.Int64("collectionID", group.collectionID),
 			zap.Int64("partitionID", group.partitionID),
-			zap.String("channel", group.channelName))
+			zap.String("channel", group.channelName),
+			zap.String("vshard", group.vshard.String()))
+
 		if !signal.isForce && t.compactionHandler.isFull() {
 			log.Warn("compaction plan skipped due to handler full")
 			break
@@ -375,6 +377,8 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) error {
 					Begin: startID + 1,
 					End:   endID,
 				},
+				FromVShards: []*datapb.VShardDesc{group.vshard},
+				ToVShards:   []*datapb.VShardDesc{group.vshard},
 			}
 			err = t.compactionHandler.enqueueCompaction(task)
 			if err != nil {
@@ -415,7 +419,14 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 	channel := segment.GetInsertChannel()
 	partitionID := segment.GetPartitionID()
 	collectionID := segment.GetCollectionID()
-	segments := t.getCandidateSegments(channel, partitionID)
+	vshard := segment.GetVshardDesc()
+	segments := t.getCandidateSegments(channel, partitionID, vshard)
+	log.Info("get candidate segments",
+		zap.String("vshard", vshard.String()),
+		zap.Int64("collectionID", collectionID),
+		zap.Int64("partitionID", partitionID),
+		zap.Int64("segmentID", segment.ID),
+		zap.String("channel", channel))
 
 	if len(segments) == 0 {
 		log.Info("the number of candidate segments is 0, skip to handle compaction")
@@ -485,6 +496,8 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 				Begin: startID + 1,
 				End:   endID,
 			},
+			FromVShards: []*datapb.VShardDesc{segment.VshardDesc},
+			ToVShards:   []*datapb.VShardDesc{segment.VshardDesc},
 		}
 		if err := t.compactionHandler.enqueueCompaction(task); err != nil {
 			log.Warn("failed to execute compaction task",
@@ -612,7 +625,38 @@ func (t *compactionTrigger) generatePlans(segments []*SegmentInfo, signal *compa
 	return tasks
 }
 
-func (t *compactionTrigger) getCandidateSegments(channel string, partitionID UniqueID) []*SegmentInfo {
+func greedySelect(candidates []*SegmentInfo, free int64, maxSegment int) ([]*SegmentInfo, []*SegmentInfo, int64) {
+	var result []*SegmentInfo
+
+	for i := 0; i < len(candidates); {
+		candidate := candidates[i]
+		if len(result) < maxSegment && candidate.getSegmentSize() < free {
+			result = append(result, candidate)
+			free -= candidate.getSegmentSize()
+			candidates = append(candidates[:i], candidates[i+1:]...)
+		} else {
+			i++
+		}
+	}
+
+	return candidates, result, free
+}
+
+func reverseGreedySelect(candidates []*SegmentInfo, free int64, maxSegment int) ([]*SegmentInfo, []*SegmentInfo, int64) {
+	var result []*SegmentInfo
+
+	for i := len(candidates) - 1; i >= 0; i-- {
+		candidate := candidates[i]
+		if (len(result) < maxSegment) && (candidate.getSegmentSize() < free) {
+			result = append(result, candidate)
+			free -= candidate.getSegmentSize()
+			candidates = append(candidates[:i], candidates[i+1:]...)
+		}
+	}
+	return candidates, result, free
+}
+
+func (t *compactionTrigger) getCandidateSegments(channel string, partitionID UniqueID, vshard *datapb.VShardDesc) []*SegmentInfo {
 	segments := t.meta.GetSegmentsByChannel(channel)
 	if Params.DataCoordCfg.IndexBasedCompaction.GetAsBool() {
 		segments = FilterInIndexedSegments(t.handler, t.meta, false, segments...)
@@ -630,7 +674,10 @@ func (t *compactionTrigger) getCandidateSegments(channel string, partitionID Uni
 			s.GetLevel() == datapb.SegmentLevel_L2 {
 			continue
 		}
-		res = append(res, s)
+		if vshard == nil && s.GetVshardDesc() == nil ||
+			vshard != nil && s.GetVshardDesc() == vshard {
+			res = append(res, s)
+		}
 	}
 
 	return res

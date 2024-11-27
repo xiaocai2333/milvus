@@ -33,6 +33,8 @@ const (
 	PartitionStatsInfoPrefix           = MetaPrefix + "/partition-stats"
 	PartitionStatsCurrentVersionPrefix = MetaPrefix + "/current-partition-stats-version"
 	StatsTaskPrefix                    = MetaPrefix + "/stats-task"
+	VShardInfoPrefix                   = MetaPrefix + "/vshard-info"
+	VShardTaskPrefix                   = MetaPrefix + "/vshard-task"
 
 	NonRemoveFlagTomestone = "non-removed"
 	RemoveFlagTomestone    = "removed"

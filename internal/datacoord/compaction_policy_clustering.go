@@ -120,7 +120,7 @@ func (policy *clusteringCompactionPolicy) triggerOneCollection(ctx context.Conte
 		return nil, 0, err
 	}
 
-	partSegments := policy.meta.GetSegmentsChanPart(func(segment *SegmentInfo) bool {
+	partSegments := policy.meta.GetSegmentsChanPartVshard(func(segment *SegmentInfo) bool {
 		return segment.CollectionID == collectionID &&
 			isSegmentHealthy(segment) &&
 			isFlush(segment) &&
@@ -169,6 +169,7 @@ func (policy *clusteringCompactionPolicy) triggerOneCollection(ctx context.Conte
 			clusteringKeyField: clusteringKeyField,
 			collectionTTL:      collectionTTL,
 			triggerID:          newTriggerID,
+			vshard:             group.vshard,
 		}
 		views = append(views, view)
 	}
@@ -272,6 +273,7 @@ type ClusteringSegmentsView struct {
 	clusteringKeyField *schemapb.FieldSchema
 	collectionTTL      time.Duration
 	triggerID          int64
+	vshard             *datapb.VShardDesc
 }
 
 func (v *ClusteringSegmentsView) GetGroupLabel() *CompactionGroupLabel {
