@@ -21,6 +21,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/samber/lo"
+
 	"github.com/cockroachdb/errors"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -106,16 +108,19 @@ func (c *SplitClusterWriter) FlushLargest() error {
 		log.Info("memory low water mark", zap.Int64("memoryBufferSize", c.getTotalUsedMemorySize()))
 		return nil
 	}
-	bufferIDs := make([]string, 0)
-	bufferRowNums := make([]int64, 0)
-	for id, writer := range c.clusterWriters {
-		bufferIDs = append(bufferIDs, id)
-		// c.clusterLocks.RLock(id)
-		bufferRowNums = append(bufferRowNums, writer.GetRowNum())
-		// c.clusterLocks.RUnlock(id)
+	type buffer struct {
+		id   string
+		rows int64
 	}
-	sort.Slice(bufferIDs, func(i, j int) bool {
-		return bufferRowNums[i] > bufferRowNums[j]
+	buffers := make([]buffer, 0, len(c.clusterWriters))
+	for id, writer := range c.clusterWriters {
+		buffers = append(buffers, buffer{id: id, rows: writer.GetRowNum()})
+	}
+	sort.Slice(buffers, func(i, j int) bool {
+		return buffers[i].rows > buffers[j].rows
+	})
+	bufferIDs := lo.Map(buffers, func(buf buffer, _ int) string {
+		return buf.id
 	})
 	log.Info("start flushLargestBuffers", zap.Strings("bufferIDs", bufferIDs), zap.Int64("currentMemorySize", currentMemorySize))
 
@@ -127,6 +132,7 @@ func (c *SplitClusterWriter) FlushLargest() error {
 			zap.String("bufferID", bufferId),
 			zap.Uint64("writtenMemorySize", writer.WrittenMemorySize()),
 			zap.Int64("RowNum", writer.GetRowNum()))
+		currentMemorySize -= int64(writer.WrittenMemorySize())
 		future := c.flushPool.Submit(func() (any, error) {
 			err := writer.Flush()
 			if err != nil {

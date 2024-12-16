@@ -604,7 +604,7 @@ dataCoord:
       maxClusterSize: 5g # maximum cluster size in Kmeans train
     vshard:
       enable: true # Enable vshard
-      splitThreshold: 1gb # splitThreshold for a vshard.
+      splitThreshold: 3gb # splitThreshold for a vshard.
       checkIntervalSeconds: 30
       cleanIntervalSeconds: 600
   syncSegmentsInterval: 300 # The time interval for regularly syncing segments

@@ -19,10 +19,11 @@ package compaction
 import (
 	"context"
 	"fmt"
-	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	sio "io"
 	"math"
 	"time"
+
+	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
