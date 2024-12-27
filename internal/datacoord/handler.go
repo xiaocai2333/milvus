@@ -194,9 +194,12 @@ func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs .
 		return true
 	}
 
-	var compactionFromExist func(segID UniqueID) bool
+	var compactionFromExist func(segID UniqueID, recursionCount int) bool
 
-	compactionFromExist = func(segID UniqueID) bool {
+	compactionFromExist = func(segID UniqueID, recursionCount int) bool {
+		if recursionCount > 5 {
+			return false
+		}
 		compactionFrom := validSegmentInfos[segID].GetCompactionFrom()
 		if len(compactionFrom) == 0 || !isValid(compactionFrom...) {
 			return false
@@ -205,7 +208,7 @@ func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs .
 			if flushedIDs.Contain(fromID) || newFlushedIDs.Contain(fromID) {
 				return true
 			}
-			if compactionFromExist(fromID) {
+			if compactionFromExist(fromID, recursionCount+1) {
 				return true
 			}
 		}
@@ -224,7 +227,7 @@ func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs .
 				newFlushedIDs.Insert(id)
 				continue
 			}
-			if segmentIndexed(id) && !compactionFromExist(id) {
+			if segmentIndexed(id) && !compactionFromExist(id, 0) {
 				newFlushedIDs.Insert(id)
 			} else {
 				for _, fromID := range compactionFrom {
