@@ -156,6 +156,16 @@ func (h *ServerHandler) GetQueryVChanPositions(channel RWChannel, partitionIDs .
 		}
 	}
 
+	log.Info("debug with GetRecoveryInfo timeout",
+		zap.Int64s("flushedIDs", flushedIDs.Collect()),
+		zap.Int64s("growingIDs", growingIDs.Collect()),
+		zap.Int64s("levelZeroIDs", levelZeroIDs.Collect()),
+		zap.Int64s("droppedIDs", droppedIDs.Collect()),
+		zap.Int64s("indexed", indexed.Collect()),
+		zap.Any("validPartitions", validPartitions),
+		zap.Any("validSegmentInfos", validSegmentInfos),
+		zap.Any("segments", segments))
+
 	// ================================================
 	// Segments blood relationship:
 	//          a   b
