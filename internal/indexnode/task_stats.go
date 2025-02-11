@@ -20,7 +20,10 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/samber/lo"
@@ -398,28 +401,40 @@ func (st *statsTask) sort(ctx context.Context) ([]*datapb.FieldBinlog, error) {
 	downloadTimeCost := time.Duration(0)
 
 	rrs := make([]storage.RecordReader, len(st.insertLogs))
-
+	group := &errgroup.Group{}
+	rrsLock := sync.Mutex{}
+	downloadStart := time.Now()
 	for i, paths := range st.insertLogs {
-		log := log.With(zap.Strings("paths", paths))
-		downloadStart := time.Now()
-		allValues, err := st.binlogIO.Download(ctx, paths)
-		if err != nil {
-			log.Warn("download wrong, fail to download insertLogs", zap.Error(err))
-			return nil, err
-		}
-		downloadTimeCost += time.Since(downloadStart)
+		group.Go(func() error {
+			log := log.With(zap.Strings("paths", paths))
+			allValues, err := st.binlogIO.Download(ctx, paths)
+			if err != nil {
+				log.Warn("download wrong, fail to download insertLogs", zap.Error(err))
+				return err
+			}
 
-		blobs := lo.Map(allValues, func(v []byte, i int) *storage.Blob {
-			return &storage.Blob{Key: paths[i], Value: v}
+			blobs := lo.Map(allValues, func(v []byte, i int) *storage.Blob {
+				return &storage.Blob{Key: paths[i], Value: v}
+			})
+
+			rr, err := storage.NewCompositeBinlogRecordReader(blobs)
+			if err != nil {
+				log.Warn("downloadData wrong, failed to new insert binlogs reader", zap.Error(err))
+				return err
+			}
+			rrsLock.Lock()
+			rrs[i] = rr
+			rrsLock.Unlock()
+			return nil
 		})
-
-		rr, err := storage.NewCompositeBinlogRecordReader(blobs)
-		if err != nil {
-			log.Warn("downloadData wrong, failed to new insert binlogs reader", zap.Error(err))
-			return nil, err
-		}
-		rrs[i] = rr
 	}
+
+	err = group.Wait()
+	if err != nil {
+		return nil, err
+	}
+
+	downloadTimeCost = time.Since(downloadStart)
 
 	log.Info("download data success",
 		zap.Int64("numRows", numRows),
