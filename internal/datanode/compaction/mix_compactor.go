@@ -240,6 +240,7 @@ func (t *mixCompactionTask) writeSegment(ctx context.Context,
 			}
 			ts := typeutil.Timestamp(tsArray.Value(i))
 			if entityFilter.Filtered(pk, ts) {
+				log.Debug("EntityFilter Filtered", zap.Int64("pk", pk.(int64)))
 				if sliceStart != -1 {
 					err = writeSlice(r, sliceStart, i)
 					if err != nil {
@@ -249,6 +250,7 @@ func (t *mixCompactionTask) writeSegment(ctx context.Context,
 				}
 				continue
 			}
+			log.Debug("EntityFilter not Filtered", zap.Int64("pk", pk.(int64)))
 
 			if sliceStart == -1 {
 				sliceStart = i

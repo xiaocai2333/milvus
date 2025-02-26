@@ -28,10 +28,12 @@ import (
 	"github.com/apache/arrow/go/v17/parquet/compress"
 	"github.com/apache/arrow/go/v17/parquet/pqarrow"
 	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/v2/common"
+	"github.com/milvus-io/milvus/pkg/v2/log"
 )
 
 type Record interface {
@@ -805,6 +807,7 @@ type SerializeWriter[T any] struct {
 	rw         RecordWriter
 	serializer Serializer[T]
 	batchSize  int
+	segmentID  int64
 	mu         sync.Mutex
 
 	buffer []T
@@ -818,6 +821,28 @@ func (sw *SerializeWriter[T]) Flush() error {
 		return nil
 	}
 	buf := sw.buffer[:sw.pos]
+	pks := make([]int64, 0)
+	for _, b := range buf {
+		switch any(b).(type) {
+		case *Value:
+			pks = append(pks, any(b).(*Value).PK.GetValue().(int64))
+		case *DeleteLog:
+			pks = append(pks, any(b).(*DeleteLog).Pk.GetValue().(int64))
+		}
+	}
+	rowNum := len(pks)
+	if rowNum > 0 {
+		pkBegin := pks[0]
+		pkEnd := pks[rowNum-1]
+		log.Info("sheep debug, serde SerializeWriter",
+			zap.Int64("segmentID", sw.segmentID),
+			zap.Int("rowNum", rowNum),
+			zap.Int64("pkBegin", pkBegin),
+			zap.Int64("pkEnd", pkEnd),
+			zap.Int64s("pks", pks),
+		)
+	}
+
 	r, err := sw.serializer(buf)
 	if err != nil {
 		return err
@@ -872,11 +897,12 @@ func (sw *SerializeWriter[T]) Close() error {
 	return nil
 }
 
-func NewSerializeRecordWriter[T any](rw RecordWriter, serializer Serializer[T], batchSize int) *SerializeWriter[T] {
+func NewSerializeRecordWriter[T any](rw RecordWriter, serializer Serializer[T], batchSize int, segmentID int64) *SerializeWriter[T] {
 	return &SerializeWriter[T]{
 		rw:         rw,
 		serializer: serializer,
 		batchSize:  batchSize,
+		segmentID:  segmentID,
 	}
 }
 

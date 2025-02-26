@@ -252,6 +252,7 @@ func (st *statsTask) AssignTask(ctx context.Context, client types.IndexNodeClien
 	}
 
 	log.Ctx(ctx).Info("assign stats task success", zap.Int64("taskID", st.taskID), zap.Int64("segmentID", st.segmentID))
+	log.Ctx(ctx).Debug("assign stats task success, print request", zap.Any("req", st.req))
 	st.SetState(indexpb.JobState_JobStateInProgress, "")
 	return true
 }

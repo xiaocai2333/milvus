@@ -83,6 +83,10 @@ func (pks *Int64PrimaryKeys) Size() int64 {
 	return int64(pks.Len()) * 8
 }
 
+func (pks *Int64PrimaryKeys) Values() []int64 {
+	return pks.values
+}
+
 func (pks *Int64PrimaryKeys) MustMerge(another PrimaryKeys) {
 	aPks, ok := another.(*Int64PrimaryKeys)
 	if !ok {

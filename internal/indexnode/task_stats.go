@@ -192,6 +192,7 @@ func (st *statsTask) sort(ctx context.Context) ([]*datapb.FieldBinlog, error) {
 		isValueValid = func(r storage.Record, ri, i int) bool {
 			v := r.Column(pkFieldID).(*array.Int64).Value(i)
 			deleteTs, ok := deletePKs[v]
+			log.Debug("check pk", zap.Int64("pk", v), zap.Bool("deleted", ok))
 			ts := uint64(r.Column(common.TimeStampField).(*array.Int64).Value(i))
 			if ok && ts < deleteTs {
 				return false

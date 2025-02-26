@@ -204,5 +204,5 @@ func NewPackedSerializeWriter(paths []string, schema *schemapb.CollectionSchema,
 	}
 	return NewSerializeRecordWriter[*Value](packedRecordWriter, func(v []*Value) (Record, error) {
 		return ValueSerializer(v, schema.Fields)
-	}, batchSize), nil
+	}, batchSize, -1), nil
 }

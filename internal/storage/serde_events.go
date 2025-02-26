@@ -779,7 +779,7 @@ func NewChunkedBinlogSerializeWriter(collectionID, partitionID, segmentID Unique
 	}
 	return NewSerializeRecordWriter[*Value](rw, func(v []*Value) (Record, error) {
 		return ValueSerializer(v, schema.Fields)
-	}, batchSize), nil
+	}, batchSize, segmentID), nil
 }
 
 func NewBinlogSerializeWriter(schema *schemapb.CollectionSchema, partitionID, segmentID UniqueID,
@@ -797,7 +797,7 @@ func NewBinlogSerializeWriter(schema *schemapb.CollectionSchema, partitionID, se
 	compositeRecordWriter := NewCompositeRecordWriter(rws)
 	return NewSerializeRecordWriter[*Value](compositeRecordWriter, func(v []*Value) (Record, error) {
 		return ValueSerializer(v, schema.Fields)
-	}, batchSize), nil
+	}, batchSize, segmentID), nil
 }
 
 type DeltalogStreamWriter struct {
@@ -918,7 +918,7 @@ func newDeltalogSerializeWriter(eventWriter *DeltalogStreamWriter, batchSize int
 			0: 0,
 		}
 		return NewSimpleArrowRecord(array.NewRecord(arrow.NewSchema(field, nil), arr, int64(len(v))), field2Col), nil
-	}, batchSize), nil
+	}, batchSize, eventWriter.segmentID), nil
 }
 
 var _ RecordReader = (*simpleArrowRecordReader)(nil)
@@ -1163,7 +1163,7 @@ func newDeltalogMultiFieldWriter(eventWriter *MultiFieldDeltalogStreamWriter, ba
 			common.TimeStampField: 1,
 		}
 		return NewSimpleArrowRecord(array.NewRecord(arrowSchema, arr, int64(len(v))), field2Col), nil
-	}, batchSize), nil
+	}, batchSize, eventWriter.segmentID), nil
 }
 
 func newDeltalogMultiFieldReader(blobs []*Blob) (*DeserializeReader[*DeleteLog], error) {

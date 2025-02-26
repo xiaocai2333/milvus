@@ -329,6 +329,10 @@ func (t *l0CompactionTask) BuildCompactionRequest() (*datapb.CompactionPlan, err
 	log.Info("l0CompactionTask refreshed level zero compaction plan",
 		zap.Any("target position", taskProto.GetPos()),
 		zap.Any("target segments count", len(sealedSegBinlogs)))
+
+	log.Info("sheep debug, l0 compaction", zap.Any("sealedSegmentIDs", sealedSegmentIDs),
+		zap.Any("plan", plan))
+
 	return plan, nil
 }
 
