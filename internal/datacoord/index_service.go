@@ -738,8 +738,10 @@ func (s *Server) completeIndexInfo(indexInfo *indexpb.IndexInfo, index *model.In
 			log.Warn("receive unexpected index state: IndexStateNone", zap.Int64("segmentID", segID))
 			cntNone++
 		case commonpb.IndexState_Unissued:
+			log.Warn("segment state is unissued", zap.Int64("segmentID", segID))
 			cntUnissued++
 		case commonpb.IndexState_InProgress:
+			log.Warn("segment state is InProgress", zap.Int64("segmentID", segID))
 			cntInProgress++
 		case commonpb.IndexState_Finished:
 			cntFinished++
@@ -750,6 +752,7 @@ func (s *Server) completeIndexInfo(indexInfo *indexpb.IndexInfo, index *model.In
 			if segIdx.IndexVersion > maxIndexVersion {
 				maxIndexVersion = segIdx.IndexVersion
 			}
+			log.Warn("segment state is Finished", zap.Int64("segmentID", segID))
 		case commonpb.IndexState_Failed:
 			cntFailed++
 			failReason += fmt.Sprintf("%d: %s;", segID, segIdx.FailReason)
@@ -777,7 +780,7 @@ func (s *Server) completeIndexInfo(indexInfo *indexpb.IndexInfo, index *model.In
 		indexInfo.State = commonpb.IndexState_Finished
 	}
 
-	log.RatedInfo(60, "completeIndexInfo success", zap.Int64("collectionID", index.CollectionID), zap.Int64("indexID", index.IndexID),
+	log.Info("completeIndexInfo success", zap.Int64("collectionID", index.CollectionID), zap.Int64("indexID", index.IndexID),
 		zap.Int64("totalRows", indexInfo.TotalRows), zap.Int64("indexRows", indexInfo.IndexedRows),
 		zap.Int64("pendingIndexRows", indexInfo.PendingIndexRows),
 		zap.String("state", indexInfo.State.String()), zap.String("failReason", indexInfo.IndexStateFailReason),
