@@ -688,7 +688,7 @@ func (t *clusteringCompactionTask) mappingSegment(
 
 			// all cluster buffers are flushed for a certain record, since the values read from the same record are references instead of copies
 			for _, buffer := range t.clusterBuffers {
-				buffer.Flush()
+				buffer.FlushChunk()
 			}
 			return nil
 		}()
