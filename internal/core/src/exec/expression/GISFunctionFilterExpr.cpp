@@ -49,8 +49,7 @@ PhyGISFunctionFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                "unsupported data type: {}",
                expr_->column_.data_type_);
     if (is_index_mode_) {
-        // result = EvalForIndexSegment();
-        PanicInfo(NotImplemented, "index for geos not implement");
+        result = EvalForIndexSegment();
     } else {
         result = EvalForDataSegment();
     }
@@ -143,10 +142,219 @@ PhyGISFunctionFilterExpr::EvalForDataSegment() {
     return res_vec;
 }
 
-// VectorPtr
-// PhyGISFunctionFilterExpr::EvalForIndexSegment() {
-//     // TODO
-// }
+VectorPtr
+PhyGISFunctionFilterExpr::EvalForIndexSegment() {
+    auto real_batch_size = GetNextBatchSize();
+    if (real_batch_size == 0) {
+        return nullptr;
+    }
+
+    using Index = index::ScalarIndex<std::string>;
+
+    // Prepare shared dataset for index query (coarse candidate set by R-Tree)
+    auto ds = std::make_shared<milvus::Dataset>();
+    ds->Set(milvus::index::OPERATOR_TYPE, expr_->op_);
+    ds->Set(milvus::index::MATCH_VALUE, expr_->geometry_.to_wkb_string());
+
+    /* ------------------------------------------------------------------
+     * Prefetch: if coarse results are not cached yet, run a single R-Tree
+     * query for all index chunks and cache their coarse bitmaps.
+     * ------------------------------------------------------------------*/
+    if (!coarse_cached_) {
+        // Query segment-level R-Tree index **once** since each chunk shares the same index
+        const Index& idx_ref =
+            segment_->chunk_scalar_index<std::string>(field_id_, 0);
+        auto* idx_ptr = const_cast<Index*>(&idx_ref);
+
+        {
+            LOG_INFO("LiYinwei:Query segment id {} start",
+                     segment_->get_segment_id());
+            LOG_INFO("LiYinwei:Query op {}",
+                     ds->Get<proto::plan::GISFunctionFilterExpr_GISOp>(
+                         milvus::index::OPERATOR_TYPE));
+            auto tmp = idx_ptr->Query(ds);
+            LOG_INFO("LiYinwei:Query segment id {} end",
+                     segment_->get_segment_id());
+            coarse_global_ = std::move(tmp);
+        }
+        {
+            auto tmp_valid = idx_ptr->IsNotNull();
+            coarse_valid_global_ = std::move(tmp_valid);
+        }
+
+        coarse_cached_ = true;
+    }
+
+    TargetBitmap batch_result;
+    TargetBitmap batch_valid;
+    int processed_rows = 0;
+    auto num_chunk_data = segment_->num_chunk_data(field_id_);
+    for (size_t i = current_index_chunk_; i < num_chunk_data; ++i) {
+        // 1) Build and cache refined bitmap for this chunk (coarse + exact)
+        if (cached_index_chunk_id_ != static_cast<int64_t>(i)) {
+            // Reuse segment-level coarse bitmap directly (same for all chunks)
+            auto& coarse = this->coarse_global_;
+            auto& chunk_valid = this->coarse_valid_global_;
+
+            // Exact refinement
+            TargetBitmap refined(coarse.size());
+            const bool is_sealed = segment_->type() == SegmentType::Sealed;
+
+            if (is_sealed) {
+                auto [views, valid_vec] =
+                    segment_->chunk_view<std::string_view>(field_id_, i);
+
+                // Align global coarse bitmap positions with per-chunk local views
+                const auto start_pos =
+                    segment_->num_rows_until_chunk(field_id_, i);
+                const auto chunk_rows = views.size();
+                const auto max_local = std::min<size_t>(
+                    chunk_rows,
+                    coarse.size() > start_pos ? coarse.size() - start_pos : 0);
+
+                for (size_t local = 0; local < max_local; ++local) {
+                    const size_t pos = start_pos + local;
+                    if (!coarse[pos])
+                        continue;
+                    if (!valid_vec.empty() && !valid_vec[local])
+                        continue;
+
+                    const auto& wkb_view = views[local];
+                    Geometry left(wkb_view.data(), wkb_view.size(), false);
+                    bool ok = false;
+                    switch (expr_->op_) {
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
+                            ok = left.equals(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
+                            ok = left.touches(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
+                            ok = left.overlaps(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
+                            ok = left.crosses(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
+                            ok = left.contains(expr_->geometry_);
+                            break;
+                        case proto::plan::
+                            GISFunctionFilterExpr_GISOp_Intersects:
+                            ok = left.intersects(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Within:
+                            ok = left.within(expr_->geometry_);
+                            break;
+                        default:
+                            PanicInfo(NotImplemented,
+                                      "unknown GIS op : {}",
+                                      expr_->op_);
+                    }
+                    if (ok) {
+                        refined.set(pos);
+                    }
+                }
+            } else {  // Growing segment
+                auto span = segment_->chunk_data<std::string>(field_id_, i);
+
+                const auto start_pos =
+                    segment_->num_rows_until_chunk(field_id_, i);
+                const auto chunk_rows = span.row_count();
+                const auto max_local = std::min<size_t>(
+                    chunk_rows,
+                    coarse.size() > start_pos ? coarse.size() - start_pos : 0);
+
+                for (size_t local = 0; local < max_local; ++local) {
+                    const size_t pos = start_pos + local;
+                    if (!coarse[pos])
+                        continue;
+
+                    const auto& wkb = span[local];
+                    Geometry left(wkb.data(), wkb.size(), false);
+                    bool ok = false;
+                    switch (expr_->op_) {
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
+                            ok = left.equals(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
+                            ok = left.touches(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
+                            ok = left.overlaps(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
+                            ok = left.crosses(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
+                            ok = left.contains(expr_->geometry_);
+                            break;
+                        case proto::plan::
+                            GISFunctionFilterExpr_GISOp_Intersects:
+                            ok = left.intersects(expr_->geometry_);
+                            break;
+                        case proto::plan::GISFunctionFilterExpr_GISOp_Within:
+                            ok = left.within(expr_->geometry_);
+                            break;
+                        default:
+                            PanicInfo(NotImplemented,
+                                      "unknown GIS op : {}",
+                                      expr_->op_);
+                    }
+                    if (ok) {
+                        refined.set(pos);
+                    }
+                }
+            }
+
+            // Cache refined result for reuse by subsequent batches
+            cached_index_chunk_id_ = i;
+            cached_index_chunk_res_ = std::move(refined);
+            // No need to copy valid bitmap into member; use coarse_valid_cache_[i] directly later
+        }
+
+        // 2) Append this chunk's cached results into current batch window
+        const auto& chunk_valid_ref = this->coarse_valid_global_;
+
+        auto size = ProcessIndexOneChunk(batch_result,
+                                         batch_valid,
+                                         i,
+                                         cached_index_chunk_res_,
+                                         chunk_valid_ref,
+                                         processed_rows);
+        LOG_INFO(
+            "EvalForIndexSegment loop - i: {}, "
+            "processed_rows_before_append: {}, size_from_ProcessIndexOneChunk: "
+            "{}, batch_size_: {}",
+            i,
+            processed_rows,
+            size,
+            batch_size_);
+        if (processed_rows + size >= batch_size_) {
+            current_index_chunk_ = i;
+            current_index_chunk_pos_ = i == current_index_chunk_
+                                           ? current_index_chunk_pos_ + size
+                                           : size;
+            break;
+        }
+        processed_rows += size;
+    }
+
+    // CRITICAL FIX: Ensure the returned ColumnVector exactly matches the real_batch_size
+    // This handles the case where the loop might have accumulated slightly more
+    // due to chunking/batching logic not perfectly aligning with `real_batch_size`.
+    if (batch_result.size() > real_batch_size) {
+        LOG_WARN(
+            "EvalForIndexSegment: Truncating batch_result from {} to "
+            "{} to match real_batch_size.",
+            batch_result.size(),
+            real_batch_size);
+        batch_result.resize(real_batch_size);
+        batch_valid.resize(real_batch_size);
+    }
+
+    return std::make_shared<ColumnVector>(std::move(batch_result),
+                                          std::move(batch_valid));
+}
 
 }  //namespace exec
 }  // namespace milvus

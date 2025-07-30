@@ -46,6 +46,7 @@ constexpr const char* MARISA_TRIE_UPPER = "TRIE";
 constexpr const char* INVERTED_INDEX_TYPE = "INVERTED";
 constexpr const char* BITMAP_INDEX_TYPE = "BITMAP";
 constexpr const char* HYBRID_INDEX_TYPE = "HYBRID";
+constexpr const char* RTREE_INDEX_TYPE = "RTREE";
 constexpr const char* SCALAR_INDEX_ENGINE_VERSION =
     "scalar_index_engine_version";
 constexpr const char* INDEX_NON_ENCODING = "index.nonEncoding";
@@ -93,4 +94,9 @@ constexpr const char* DISK_ANN_PREPARE_USE_BFS_CACHE = "use_bfs_cache";
 // DiskAnn query params
 constexpr const char* DISK_ANN_QUERY_LIST = "search_list";
 constexpr const char* DISK_ANN_QUERY_BEAMWIDTH = "beamwidth";
+
+constexpr const char* R_TREE_VARIANT_KEY = "rv";
+constexpr const char* FILL_FACTOR_KEY = "fillFactor";
+constexpr const char* INDEX_CAPACITY_KEY = "indexCapacity";
+constexpr const char* LEAF_CAPACITY_KEY = "leafCapacity";
 }  // namespace milvus::index

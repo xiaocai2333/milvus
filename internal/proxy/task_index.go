@@ -242,6 +242,8 @@ func (cit *createIndexTask) parseIndexParams(ctx context.Context) error {
 					return getPrimitiveIndexType(cit.fieldSchema.ElementType), nil
 				} else if typeutil.IsJSONType(dataType) {
 					return Params.AutoIndexConfig.ScalarJSONIndexType.GetValue(), nil
+				} else if typeutil.IsGeometryType(dataType) {
+					return Params.AutoIndexConfig.ScalarGeometryIndexType.GetValue(), nil
 				}
 				return "", fmt.Errorf("create auto index on type:%s is not supported", dataType.String())
 			}()
@@ -486,6 +488,20 @@ func checkTrain(ctx context.Context, field *schemapb.FieldSchema, indexParams ma
 			indexParams[common.BitmapCardinalityLimitKey] = paramtable.Get().AutoIndexConfig.BitmapCardinalityLimit.GetValue()
 		}
 	}
+
+	if indexType == indexparamcheck.IndexRTREE {
+		// Apply default RTree parameters if not provided
+		rtreeParams := paramtable.Get().AutoIndexConfig.RTreeAutoIndexParams.GetAsJSONMap()
+		for k, v := range rtreeParams {
+			if k != common.IndexTypeKey { // Don't override index_type
+				_, exist := indexParams[k]
+				if !exist {
+					indexParams[k] = v
+				}
+			}
+		}
+	}
+
 	checker, err := indexparamcheck.GetIndexCheckerMgrInstance().GetChecker(indexType)
 	if err != nil {
 		log.Ctx(ctx).Warn("Failed to get index checker", zap.String(common.IndexTypeKey, indexType))
