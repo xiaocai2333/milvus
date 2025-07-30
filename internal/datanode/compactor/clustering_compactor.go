@@ -632,61 +632,66 @@ func (t *clusteringCompactionTask) mappingSegment(
 			log.Warn("compact wrong, failed to iter through data", zap.Error(err))
 			return err
 		}
-
-		vs := make([]*storage.Value, r.Len())
-		if err = storage.ValueDeserializerWithSchema(r, vs, t.plan.Schema, false); err != nil {
-			log.Warn("compact wrong, failed to deserialize data", zap.Error(err))
-			return err
-		}
-
-		log.Debug("read next record", zap.Int("record len", r.Len()))
-
-		for _, v := range vs {
-			offset++
-
-			if entityFilter.Filtered((*v).PK.GetValue(), uint64((*v).Timestamp)) {
-				continue
-			}
-
-			row, ok := (*v).Value.(map[typeutil.UniqueID]interface{})
-			if !ok {
-				log.Warn("convert interface to map wrong")
-				return errors.New("unexpected error")
-			}
-
-			clusteringKey := row[t.clusteringKeyField.FieldID]
-			var clusterBuffer *ClusterBuffer
-			if t.isVectorClusteringKey {
-				clusterBuffer = t.offsetToBufferFunc(offset, mappingStats.GetCentroidIdMapping())
-			} else {
-				clusterBuffer = t.keyToBufferFunc(clusteringKey)
-			}
-			if err := clusterBuffer.Write(v); err != nil {
+		err = func() error {
+			vs := make([]*storage.Value, r.Len())
+			defer func() {
+				r.Release()
+				vs = nil
+				runtime.GC()
+				runtime.GC()
+			}()
+			if err = storage.ValueDeserializerWithSchema(r, vs, t.plan.Schema, false); err != nil {
+				log.Warn("compact wrong, failed to deserialize data", zap.Error(err))
 				return err
 			}
-			t.writtenRowNum.Inc()
-			remained++
 
-			if (remained+1)%100 == 0 {
-				currentBufferTotalMemorySize := t.getBufferTotalUsedMemorySize()
-				if currentBufferTotalMemorySize > t.getMemoryBufferHighWatermark() {
-					// reach flushBinlog trigger threshold
-					log.Debug("largest buffer need to flush",
-						zap.Int64("currentBufferTotalMemorySize", currentBufferTotalMemorySize))
-					if err := t.flushLargestBuffers(ctx); err != nil {
-						return err
+			log.Debug("read next record", zap.Int("record len", r.Len()))
+
+			for _, v := range vs {
+				offset++
+
+				if entityFilter.Filtered((*v).PK.GetValue(), uint64((*v).Timestamp)) {
+					continue
+				}
+
+				row, ok := (*v).Value.(map[typeutil.UniqueID]interface{})
+				if !ok {
+					log.Warn("convert interface to map wrong")
+					return errors.New("unexpected error")
+				}
+
+				clusteringKey := row[t.clusteringKeyField.FieldID]
+				var clusterBuffer *ClusterBuffer
+				if t.isVectorClusteringKey {
+					clusterBuffer = t.offsetToBufferFunc(offset, mappingStats.GetCentroidIdMapping())
+				} else {
+					clusterBuffer = t.keyToBufferFunc(clusteringKey)
+				}
+				if err := clusterBuffer.Write(v); err != nil {
+					return err
+				}
+				t.writtenRowNum.Inc()
+				remained++
+
+				if (remained+1)%100 == 0 {
+					currentBufferTotalMemorySize := t.getBufferTotalUsedMemorySize()
+					if currentBufferTotalMemorySize > t.getMemoryBufferHighWatermark() {
+						// reach flushBinlog trigger threshold
+						log.Debug("largest buffer need to flush",
+							zap.Int64("currentBufferTotalMemorySize", currentBufferTotalMemorySize))
+						if err := t.flushLargestBuffers(ctx); err != nil {
+							return err
+						}
 					}
 				}
 			}
-		}
 
-		vs = nil
-
-		// all cluster buffers are flushed for a certain record, since the values read from the same record are references instead of copies
-		for _, buffer := range t.clusterBuffers {
-			buffer.Flush()
-		}
-		runtime.GC()
+			// all cluster buffers are flushed for a certain record, since the values read from the same record are references instead of copies
+			for _, buffer := range t.clusterBuffers {
+				buffer.Flush()
+			}
+			return nil
+		}()
 	}
 
 	missing := entityFilter.GetMissingDeleteCount()
