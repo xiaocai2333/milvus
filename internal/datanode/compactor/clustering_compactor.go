@@ -22,6 +22,7 @@ import (
 	sio "io"
 	"math"
 	"path"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -679,10 +680,13 @@ func (t *clusteringCompactionTask) mappingSegment(
 			}
 		}
 
+		vs = nil
+
 		// all cluster buffers are flushed for a certain record, since the values read from the same record are references instead of copies
 		for _, buffer := range t.clusterBuffers {
 			buffer.Flush()
 		}
+		runtime.GC()
 	}
 
 	missing := entityFilter.GetMissingDeleteCount()
