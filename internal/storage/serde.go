@@ -18,6 +18,8 @@ package storage
 
 import (
 	"fmt"
+	"github.com/milvus-io/milvus/pkg/v2/log"
+	"go.uber.org/zap"
 	"io"
 	"math"
 	"strconv"
@@ -830,6 +832,10 @@ type SerializeWriterImpl[T any] struct {
 }
 
 func (sw *SerializeWriterImpl[T]) Flush() error {
+	log.Debug("SerializeWriterImpl Flush", zap.Int("batchSize", sw.batchSize),
+		zap.Int("pos", sw.pos),
+		zap.Int("buffer len", len(sw.buffer)),
+		zap.Int("buffer cap", cap(sw.buffer)))
 	if sw.pos == 0 {
 		return nil
 	}

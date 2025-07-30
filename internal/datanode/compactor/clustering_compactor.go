@@ -638,6 +638,8 @@ func (t *clusteringCompactionTask) mappingSegment(
 			return err
 		}
 
+		log.Debug("read next record", zap.Int("record len", r.Len()))
+
 		for _, v := range vs {
 			offset++
 
