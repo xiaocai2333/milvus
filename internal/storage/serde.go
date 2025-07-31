@@ -870,6 +870,7 @@ func (sw *SerializeWriterImpl[T]) Close() error {
 	if err := sw.Flush(); err != nil {
 		return err
 	}
+	sw.buffer = nil
 	return sw.rw.Close()
 }
 

@@ -23,6 +23,7 @@ import (
 	"math"
 	"path"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -637,6 +638,7 @@ func (t *clusteringCompactionTask) mappingSegment(
 			defer func() {
 				r.Release()
 				vs = nil
+				debug.FreeOSMemory()
 				runtime.GC()
 				runtime.GC()
 			}()
@@ -688,7 +690,7 @@ func (t *clusteringCompactionTask) mappingSegment(
 
 			// all cluster buffers are flushed for a certain record, since the values read from the same record are references instead of copies
 			for _, buffer := range t.clusterBuffers {
-				buffer.FlushChunk()
+				buffer.Flush()
 			}
 			return nil
 		}()

@@ -525,6 +525,11 @@ func ValueSerializer(v []*Value, schema *schemapb.CollectionSchema) (Record, err
 		fields[i] = ConvertToArrowField(field, arrays[i].DataType())
 		field2Col[field.FieldID] = i
 	}
+	defer func() {
+		for _, arr := range arrays {
+			arr.Release()
+		}
+	}()
 	return NewSimpleArrowRecord(array.NewRecord(arrow.NewSchema(fields, nil), arrays, int64(len(v))), field2Col), nil
 }
 
