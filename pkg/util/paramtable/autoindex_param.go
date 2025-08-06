@@ -46,15 +46,17 @@ type AutoIndexConfig struct {
 	AutoIndexSearchConfig ParamItem  `refreshable:"true"`
 	AutoIndexTuningConfig ParamGroup `refreshable:"true"`
 
-	ScalarAutoIndexEnable  ParamItem `refreshable:"true"`
-	ScalarAutoIndexParams  ParamItem `refreshable:"true"`
-	ScalarNumericIndexType ParamItem `refreshable:"true"`
-	ScalarIntIndexType     ParamItem `refreshable:"true"`
-	ScalarVarcharIndexType ParamItem `refreshable:"true"`
-	ScalarBoolIndexType    ParamItem `refreshable:"true"`
-	ScalarFloatIndexType   ParamItem `refreshable:"true"`
-	ScalarJSONIndexType    ParamItem `refreshable:"true"`
+	ScalarAutoIndexEnable   ParamItem `refreshable:"true"`
+	ScalarAutoIndexParams   ParamItem `refreshable:"true"`
+	ScalarNumericIndexType  ParamItem `refreshable:"true"`
+	ScalarIntIndexType      ParamItem `refreshable:"true"`
+	ScalarVarcharIndexType  ParamItem `refreshable:"true"`
+	ScalarBoolIndexType     ParamItem `refreshable:"true"`
+	ScalarFloatIndexType    ParamItem `refreshable:"true"`
+	ScalarJSONIndexType     ParamItem `refreshable:"true"`
+	ScalarGeometryIndexType ParamItem `refreshable:"true"`
 
+	RTreeAutoIndexParams   ParamItem `refreshable:"true"`
 	BitmapCardinalityLimit ParamItem `refreshable:"true"`
 }
 
@@ -167,7 +169,7 @@ func (p *AutoIndexConfig) init(base *BaseTable) {
 	p.ScalarAutoIndexParams = ParamItem{
 		Key:          "scalarAutoIndex.params.build",
 		Version:      "2.4.0",
-		DefaultValue: `{"int": "HYBRID","varchar": "HYBRID","bool": "BITMAP", "float": "INVERTED", "json": "INVERTED"}`,
+		DefaultValue: `{"int": "HYBRID","varchar": "HYBRID","bool": "BITMAP", "float": "INVERTED", "json": "INVERTED", "geometry": "RTREE"}`,
 	}
 	p.ScalarAutoIndexParams.Init(base.mgr)
 
@@ -219,6 +221,25 @@ func (p *AutoIndexConfig) init(base *BaseTable) {
 		},
 	}
 	p.ScalarJSONIndexType.Init(base.mgr)
+
+	p.ScalarGeometryIndexType = ParamItem{
+		Version: "2.5.16",
+		Formatter: func(v string) string {
+			m := p.ScalarAutoIndexParams.GetAsJSONMap()
+			if m == nil {
+				return ""
+			}
+			return m["geometry"]
+		},
+	}
+	p.ScalarGeometryIndexType.Init(base.mgr)
+
+	p.RTreeAutoIndexParams = ParamItem{
+		Key:          "scalarAutoIndex.params.rtree",
+		Version:      "2.5.16",
+		DefaultValue: `{"fillFactor": 0.8, "indexCapacity": 100, "leafCapacity": 100, "dim": 2, "rv": "RV_RSTAR", "index_type": "RTREE"}`,
+	}
+	p.RTreeAutoIndexParams.Init(base.mgr)
 
 	p.BitmapCardinalityLimit = ParamItem{
 		Key:          "scalarAutoIndex.params.bitmapCardinalityLimit",
