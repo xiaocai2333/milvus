@@ -47,6 +47,21 @@ func CheckIntByRange(params map[string]string, key string, min, max int) bool {
 	return value >= min && value <= max
 }
 
+// CheckFloatByRange checks if the float value of key in params is in range [min, max].
+func CheckFloatByRange(params map[string]string, key string, min, max float64) bool {
+	valueStr, ok := params[key]
+	if !ok {
+		return false
+	}
+
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil {
+		return false
+	}
+
+	return value >= min && value <= max
+}
+
 // CheckStrByValues check whether the data corresponding to the key appears in the string slice of container.
 // Return false if:
 //  1. the key does not exist, or

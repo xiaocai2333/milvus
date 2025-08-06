@@ -49,6 +49,32 @@ const (
 	BM25B  = "bm25_b"
 
 	MaxBitmapCardinalityLimit = 1000
+
+	// RTree Index Param
+	RTreeFillFactor    = "fillFactor"
+	RTreeIndexCapacity = "indexCapacity"
+	RTreeLeafCapacity  = "leafCapacity"
+	RTreeDim           = "dim"
+	RTreeRV            = "rv"
+
+	// RTree parameter constraints
+	MinRTreeFillFactor     = 0.1
+	MaxRTreeFillFactor     = 1.0
+	DefaultRTreeFillFactor = 0.8
+
+	MinRTreeIndexCapacity     = 2
+	MaxRTreeIndexCapacity     = 1000
+	DefaultRTreeIndexCapacity = 128
+
+	MinRTreeLeafCapacity     = 2
+	MaxRTreeLeafCapacity     = 1000
+	DefaultRTreeLeafCapacity = 128
+
+	MinRTreeDim     = 2
+	MaxRTreeDim     = 2
+	DefaultRTreeDim = 2
+
+	DefaultRTreeRV = "RV_RSTAR"
 )
 
 var (
