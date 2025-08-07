@@ -569,7 +569,6 @@ ProtoParser::ParseExprs(const proto::plan::Expr& expr_pb,
         }
     }
     if (type_check(result->type())) {
-        LOG_WARN("passed check");
         return result;
     }
     PanicInfo(

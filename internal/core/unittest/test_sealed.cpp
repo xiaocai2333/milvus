@@ -2426,7 +2426,8 @@ TEST(Sealed, QueryAllNullableFields) {
     auto varchar_field =
         schema->AddDebugField("varchar", DataType::VARCHAR, true);
     auto json_field = schema->AddDebugField("json", DataType::JSON, true);
-    auto geometry_field = schema->AddDebugField("geometry", DataType::GEOMETRY, true);
+    auto geometry_field =
+        schema->AddDebugField("geometry", DataType::GEOMETRY, true);
     auto int_array_field = schema->AddDebugField(
         "int_array", DataType::ARRAY, DataType::INT8, true);
     auto long_array_field = schema->AddDebugField(
