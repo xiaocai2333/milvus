@@ -94,4 +94,9 @@ constexpr const char* DISK_ANN_PREPARE_USE_BFS_CACHE = "use_bfs_cache";
 // DiskAnn query params
 constexpr const char* DISK_ANN_QUERY_LIST = "search_list";
 constexpr const char* DISK_ANN_QUERY_BEAMWIDTH = "beamwidth";
+
+constexpr const char* R_TREE_VARIANT_KEY = "rv";
+constexpr const char* FILL_FACTOR_KEY = "fillFactor";
+constexpr const char* INDEX_CAPACITY_KEY = "indexCapacity";
+constexpr const char* LEAF_CAPACITY_KEY = "leafCapacity";
 }  // namespace milvus::index

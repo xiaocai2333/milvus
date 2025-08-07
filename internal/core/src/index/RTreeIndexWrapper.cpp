@@ -73,6 +73,7 @@ RTreeIndexWrapper::RTreeIndexWrapper(std::string& path, bool is_build_mode)
                                                 dimension_,
                                                 rtree_variant_,
                                                 index_id));
+        LOG_WARN("create rtree index success");
     }
 }
 
@@ -122,7 +123,7 @@ RTreeIndexWrapper::finish() {
     rtree_->flush();
 
     // NOTE: rtree_ internally holds a pointer to the storage manager. We must
-    // make sure rtree_ is destroyed BEFORE the storage manager. 
+    // make sure rtree_ is destroyed BEFORE the storage manager.
 
     // 1. Release rtree_ first so its destructor can safely write the header
     //    using a still-valid storage_manager_.
@@ -211,4 +212,51 @@ RTreeIndexWrapper::get_bounding_box(const OGRGeometry* geom,
     maxY = env.MaxY;
 }
 
+int64_t
+RTreeIndexWrapper::count() const {
+    if (rtree_ == nullptr) {
+        return 0;
+    }
+
+    // For R-Tree, we need to count the number of data entries
+    // This is a simplified implementation - in practice, you might want to
+    // maintain a separate counter during building
+    SpatialIndex::IStatistics* stats = nullptr;
+    rtree_->getStatistics(&stats);
+    if (stats != nullptr) {
+        int64_t count = stats->getNumberOfData();
+        delete stats;
+        return count;
+    }
+    return 0;
+}
+
+void
+RTreeIndexWrapper::set_rtree_variant(const std::string& variant_str) {
+    if (variant_str == "RSTAR") {
+        rtree_variant_ = SpatialIndex::RTree::RV_RSTAR;
+    } else if (variant_str == "QUADRATIC") {
+        rtree_variant_ = SpatialIndex::RTree::RV_QUADRATIC;
+    } else if (variant_str == "LINEAR") {
+        rtree_variant_ = SpatialIndex::RTree::RV_LINEAR;
+    } else {
+        PanicInfo(ErrorCode::UnexpectedError,
+                  fmt::format("Invalid R-Tree variant: {}", variant_str));
+    }
+}
+
+void
+RTreeIndexWrapper::set_fill_factor(double fill_factor) {
+    fill_factor_ = fill_factor;
+}
+
+void
+RTreeIndexWrapper::set_index_capacity(uint32_t index_capacity) {
+    index_capacity_ = index_capacity;
+}
+
+void
+RTreeIndexWrapper::set_leaf_capacity(uint32_t leaf_capacity) {
+    leaf_capacity_ = leaf_capacity;
+}
 }  // namespace milvus::index

@@ -74,6 +74,25 @@ class RTreeIndexWrapper {
                      const OGRGeometry& query_geom,
                      std::vector<int64_t>& candidate_offsets);
 
+    /**
+     * @brief Get the total number of geometries in the index
+     * @return Number of geometries
+     */
+    int64_t
+    count() const;
+
+    void
+    set_rtree_variant(const std::string& variant_str);
+
+    void
+    set_fill_factor(double fill_factor);
+
+    void
+    set_index_capacity(uint32_t index_capacity);
+
+    void
+    set_leaf_capacity(uint32_t leaf_capacity);
+
  private:
     /**
      * @brief Get bounding box from OGR geometry
