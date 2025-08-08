@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 #include <boost/filesystem.hpp>
+#include <iostream>
 #include <vector>
 #include <string>
 
@@ -256,7 +257,7 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
                                      CreateWkbFromWkt("POINT(1 1)")};
     auto remote_file = (temp_path_.get() / "geom.parquet").string();
     WriteGeometryInsertFile(chunk_manager_, field_meta_, remote_file, wkbs);
-
+    std::cout<<"JsonTest: test_rtree_index.cpp:260"<<std::endl;
     milvus::storage::FileManagerContext ctx(
         field_meta_, index_meta_, chunk_manager_);
     milvus::index::RTreeIndex<std::string> rtree(ctx);
@@ -264,21 +265,21 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
     nlohmann::json build_cfg;
     build_cfg["insert_files"] = std::vector<std::string>{remote_file};
     build_cfg["fillFactor"] = 0.6;
-    build_cfg["indexCapacity"] = 64;
-    build_cfg["leafCapacity"] = 32;
-    build_cfg["rv"] = "QUADRATIC";
+    build_cfg["indexCapacity"] = 32;
+    build_cfg["leafCapacity"] = 64;
+    build_cfg["rv"] = "RSTAR";
+    
     rtree.Build(build_cfg);
-
     auto stats = rtree.Upload({});
 
-    // Cache remote index files locally (reuse DiskFileManagerImpl path logic)
+    // Cache remote index files locally
     milvus::storage::DiskFileManagerImpl diskfm(
         {field_meta_, index_meta_, chunk_manager_});
     auto index_files = stats->GetIndexFiles();
     diskfm.CacheIndexToDisk(index_files);
     auto local_paths = diskfm.GetLocalFilePaths();
     ASSERT_FALSE(local_paths.empty());
-
+    std::cout<<"JsonTest: test_rtree_index.cpp:282"<<std::endl;
     // Determine base path like RTreeIndex::Load
     auto ends_with = [](const std::string& value, const std::string& suffix) {
         return value.size() >= suffix.size() &&
@@ -309,15 +310,13 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
     if (base_path.empty()) {
         base_path = local_paths.front();
     }
-
     // Parse local meta json
     std::ifstream ifs(base_path + ".meta.json");
     ASSERT_TRUE(ifs.good());
     nlohmann::json meta = nlohmann::json::parse(ifs);
-
     ASSERT_EQ(meta["fill_factor"], 0.6);
-    ASSERT_EQ(meta["index_capacity"], 64);
-    ASSERT_EQ(meta["leaf_capacity"], 32);
+    ASSERT_EQ(meta["index_capacity"], 32);
+    ASSERT_EQ(meta["leaf_capacity"], 64);
     ASSERT_EQ(meta["dimension"], 2);
 }
 
@@ -546,4 +545,53 @@ TEST_F(RTreeIndexTest, Build_Upload_Load_LargeDataset) {
     rtree_load.Load(trace_ctx, cfg_load);
 
     ASSERT_EQ(rtree_load.Count(), static_cast<int64_t>(N));
+}
+
+TEST_F(RTreeIndexTest, Build_BulkLoad_Nulls_And_BadWKB) {
+    // five geometries:
+    // 1. valid
+    // 2. valid but will be marked null
+    // 3. valid
+    // 4. will be truncated to make invalid
+    // 5. valid
+    std::vector<std::string> wkbs = {
+        CreateWkbFromWkt("POINT(0 0)"),     // valid
+        CreateWkbFromWkt("POINT(1 1)"),     // valid 
+        CreateWkbFromWkt("POINT(2 2)"),     // valid
+        CreatePointWKB(3.0, 3.0),           // will be truncated to make invalid
+        CreateWkbFromWkt("POINT(4 4)")      // valid
+    };
+    // make bad WKB: truncate the 4th geometry
+    wkbs[3].resize(wkbs[3].size() / 2);
+
+    // write to remote storage file (chunk manager's root directory)
+    auto remote_file = (temp_path_.get() / "geom_bulk.parquet").string();
+    WriteGeometryInsertFile(
+        chunk_manager_, field_meta_, remote_file, wkbs);
+
+    // build (default to bulk load)
+    milvus::storage::FileManagerContext ctx(field_meta_, index_meta_, chunk_manager_);
+    milvus::index::RTreeIndex<std::string> rtree(ctx);
+
+    nlohmann::json build_cfg;
+    build_cfg["insert_files"] = std::vector<std::string>{remote_file};
+    rtree.Build(build_cfg);
+
+    // expect: 3 geometries (0, 2, 4) are valid and parsable, 1st geometry is marked null and skipped, 3rd geometry is bad WKB and skipped
+    ASSERT_EQ(rtree.Count(), 4);
+
+    // upload -> load back and verify consistency
+    auto stats = rtree.Upload({});
+    ASSERT_GT(stats->GetIndexFiles().size(), 0);
+
+    milvus::storage::FileManagerContext ctx_load(field_meta_, index_meta_, chunk_manager_);
+    ctx_load.set_for_loading_index(true);
+    milvus::index::RTreeIndex<std::string> rtree_load(ctx_load);
+
+    nlohmann::json cfg;
+    cfg["index_files"] = stats->GetIndexFiles();
+
+    milvus::tracer::TraceContext trace_ctx;
+    rtree_load.Load(trace_ctx, cfg);
+    ASSERT_EQ(rtree_load.Count(), 4);
 }

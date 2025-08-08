@@ -19,6 +19,11 @@
 #include "common/Types.h"
 #include "pb/plan.pb.h"
 
+// Forward declaration to avoid pulling heavy field data headers here
+namespace milvus {
+class FieldDataBase;
+}
+
 namespace milvus::index {
 
 /**
@@ -50,6 +55,18 @@ class RTreeIndexWrapper {
      */
     void
     add_geometry(const uint8_t* wkb_data, size_t len, int64_t row_offset);
+
+    /**
+     * @brief Bulk load geometries from field data (WKB strings) into a new R-Tree.
+     *        This API will create the R-Tree via createAndBulkLoadNewRTree internally.
+     * @param field_datas Vector of field data blocks containing WKB strings
+     * @param nullable Whether the field allows nulls (null rows are skipped but offset still advances)
+     */
+    void
+    bulk_load_from_field_data(
+        const std::vector<std::shared_ptr<::milvus::FieldDataBase>>&
+            field_datas,
+        bool nullable);
 
     /**
      * @brief Finish building the index and flush to disk

@@ -11,6 +11,7 @@
 
 #include "index/RTreeIndex.h"
 #include <boost/filesystem.hpp>
+#include <iostream>
 #include "common/EasyAssert.h"
 #include "common/FieldData.h"
 #include "log/Log.h"
@@ -47,9 +48,7 @@ RTreeIndex<T>::InitForBuildIndex() {
         PanicInfo(
             IndexBuildError, "build rtree index temp dir:{} not empty", path_);
     }
-    LOG_INFO("build rtree index temp dir:{}", index_file_path);
     wrapper_ = std::make_shared<RTreeIndexWrapper>(index_file_path, true);
-    LOG_INFO("build rtree index wrapper success");
 }
 
 template <typename T>
@@ -183,7 +182,6 @@ RTreeIndex<T>::Build(const Config& config) {
                "insert_files were empty for building RTree index");
 
     InitForBuildIndex();
-
     auto fill_factor =
         GetValueFromConfig<double>(config, FILL_FACTOR_KEY).value_or(0.8);
     auto index_cap =
@@ -193,7 +191,6 @@ RTreeIndex<T>::Build(const Config& config) {
     auto variant_str =
         GetValueFromConfig<std::string>(config, R_TREE_VARIANT_KEY)
             .value_or("RSTAR");
-
     wrapper_->set_fill_factor(fill_factor);
     wrapper_->set_index_capacity(index_cap);
     wrapper_->set_leaf_capacity(leaf_cap);
@@ -202,9 +199,7 @@ RTreeIndex<T>::Build(const Config& config) {
     // load raw WKB data into memory
     auto field_datas =
         mem_file_manager_->CacheRawDataToMemory(insert_files.value());
-
     BuildWithFieldData(field_datas);
-
     // after build, mark built
     total_num_rows_ = wrapper_->count();
     is_built_ = true;
@@ -214,27 +209,12 @@ template <typename T>
 void
 RTreeIndex<T>::BuildWithFieldData(
     const std::vector<FieldDataPtr>& field_datas) {
-    int64_t offset = 0;
-
-    for (const auto& data : field_datas) {
-        auto n = data->get_num_rows();
-        for (int64_t i = 0; i < n; ++i) {
-            // Neglect null for now
-            if (schema_.nullable() && !data->is_valid(i)) {
-                ++offset;
-                continue;
-            }
-            // get wkb str from field data
-            auto wkb_ptr = static_cast<const std::string*>(data->RawValue(i));
-            // convert to uint8_t*
-            const uint8_t* wkb =
-                reinterpret_cast<const uint8_t*>(wkb_ptr->data());
-            size_t len = wkb_ptr->size();
-
-            // add to rtree index
-            wrapper_->add_geometry(wkb, len, offset);
-            ++offset;
-        }
+    // Default to bulk load for build performance
+    // If needed, we can wire a config switch later to disable it.
+    bool use_bulk_load = true;
+    if (use_bulk_load) {
+        wrapper_->bulk_load_from_field_data(field_datas, schema_.nullable());
+        return;
     }
 }
 
@@ -263,11 +243,9 @@ RTreeIndex<T>::Upload(const Config& config) {
             continue;
         }
 
-        LOG_INFO("trying to add index file: {}", it->path().string());
         AssertInfo(disk_file_manager_->AddFile(it->path().string()),
                    "failed to add index file: {}",
                    it->path().string());
-        LOG_INFO("index file: {} added", it->path().string());
     }
 
     // 3. Collect remote paths to size mapping

@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include "common/FieldDataInterface.h"
 
 namespace milvus::index {
 
@@ -64,19 +65,6 @@ RTreeIndexWrapper::RTreeIndexWrapper(std::string& path, bool is_build_mode)
         storage_manager_ = std::shared_ptr<SpatialIndex::IStorageManager>(
             SpatialIndex::StorageManager::createNewDiskStorageManager(path,
                                                                       4096));
-
-        // Create R-Tree index
-        SpatialIndex::id_type index_id;
-        rtree_ = std::shared_ptr<SpatialIndex::ISpatialIndex>(
-            SpatialIndex::RTree::createNewRTree(*storage_manager_,
-                                                fill_factor_,
-                                                index_capacity_,
-                                                leaf_capacity_,
-                                                dimension_,
-                                                rtree_variant_,
-                                                index_id));
-        index_id_ = index_id;
-        LOG_WARN("create rtree index success");
     }
 }
 
@@ -87,7 +75,20 @@ RTreeIndexWrapper::add_geometry(const uint8_t* wkb_data,
                                 size_t len,
                                 int64_t row_offset) {
     AssertInfo(is_build_mode_, "Cannot add geometry in load mode");
-    AssertInfo(rtree_ != nullptr, "R-Tree index not initialized");
+    // Lazily create the R-Tree for dynamic insertion if not present yet
+    if (rtree_ == nullptr) {
+        SpatialIndex::id_type index_id;
+        rtree_ = std::shared_ptr<SpatialIndex::ISpatialIndex>(
+            SpatialIndex::RTree::createNewRTree(*storage_manager_,
+                                                fill_factor_,
+                                                index_capacity_,
+                                                leaf_capacity_,
+                                                dimension_,
+                                                rtree_variant_,
+                                                index_id));
+        index_id_ = index_id;
+        LOG_WARN("create rtree index for dynamic insertion");
+    }
 
     // Parse WKB data to OGR geometry
     OGRGeometry* geom = nullptr;
@@ -114,6 +115,150 @@ RTreeIndexWrapper::add_geometry(const uint8_t* wkb_data,
 
     // Clean up
     OGRGeometryFactory::destroyGeometry(geom);
+}
+
+// Internal IDataStream implementation over FieldDataBase (WKB string rows)
+namespace {
+class BulkLoadDataStream : public SpatialIndex::IDataStream {
+ public:
+    BulkLoadDataStream(
+        const std::vector<std::shared_ptr<::milvus::FieldDataBase>>&
+            field_datas,
+        bool nullable)
+        : field_datas_(field_datas), nullable_param_(nullable) {
+        // Compute a cheap upper bound for stream size: sum of row counts
+        total_rows_ = 0;
+        for (const auto& fd : field_datas_) {
+            total_rows_ += static_cast<size_t>(fd->get_num_rows());
+        }
+        rewind();
+    }
+
+    ~BulkLoadDataStream() override = default;
+
+    bool
+    hasNext() override {
+        return absolute_offset_ < static_cast<int64_t>(total_rows_);
+    }
+
+    uint32_t
+    size() override {
+        // Return upper bound; actual yielded items may be fewer due to
+        // null rows or invalid WKB filtered in getNext().
+        return static_cast<uint32_t>(total_rows_);
+    }
+
+    void
+    rewind() override {
+        batch_index_ = 0;
+        row_in_batch_ = 0;
+        absolute_offset_ = 0;
+    }
+
+    SpatialIndex::IData*
+    getNext() override {
+        while (batch_index_ < field_datas_.size()) {
+            const auto& fd = field_datas_[batch_index_];
+            auto n = fd->get_num_rows();
+            if (row_in_batch_ >= n) {
+                ++batch_index_;
+                row_in_batch_ = 0;
+                continue;
+            }
+
+            int64_t current_row_in_batch = row_in_batch_;
+            int64_t current_abs = absolute_offset_;
+            // advance offsets for next call regardless of validity
+            ++row_in_batch_;
+            ++absolute_offset_;
+
+            const bool is_nullable_effective =
+                nullable_param_ || fd->IsNullable();
+            if (is_nullable_effective && !fd->is_valid(current_row_in_batch)) {
+                // skip nulls but keep offset progression
+                continue;
+            }
+
+            const auto* wkb_str = static_cast<const std::string*>(
+                fd->RawValue(current_row_in_batch));
+            if (wkb_str == nullptr || wkb_str->empty()) {
+                continue;
+            }
+
+            // Parse WKB using OGR to get envelope
+            OGRGeometry* geom = nullptr;
+            OGRErr err = OGRGeometryFactory::createFromWkb(
+                reinterpret_cast<const uint8_t*>(wkb_str->data()),
+                nullptr,
+                &geom,
+                wkb_str->size());
+            if (err != OGRERR_NONE || geom == nullptr) {
+                LOG_WARN(
+                    "BulkLoadDataStream: failed to parse WKB at abs {} (batch "
+                    "{}, row {})",
+                    current_abs,
+                    batch_index_,
+                    current_row_in_batch);
+                continue;
+            }
+
+            OGREnvelope env;
+            geom->getEnvelope(&env);
+            OGRGeometryFactory::destroyGeometry(geom);
+
+            double low[2] = {env.MinX, env.MinY};
+            double high[2] = {env.MaxX, env.MaxY};
+            SpatialIndex::Region region(low, high, 2);
+
+            return new SpatialIndex::RTree::Data(
+                0,
+                nullptr,
+                region,
+                static_cast<SpatialIndex::id_type>(current_abs));
+        }
+        return nullptr;
+    }
+
+ private:
+    const std::vector<std::shared_ptr<::milvus::FieldDataBase>>& field_datas_;
+    bool nullable_param_ = false;
+    size_t total_rows_ = 0;
+    size_t batch_index_ = 0;
+    int64_t row_in_batch_ = 0;
+    int64_t absolute_offset_ = 0;
+};
+}  // anonymous namespace
+
+void
+RTreeIndexWrapper::bulk_load_from_field_data(
+    const std::vector<std::shared_ptr<::milvus::FieldDataBase>>& field_datas,
+    bool nullable) {
+    AssertInfo(is_build_mode_, "Cannot bulk load in load mode");
+    AssertInfo(storage_manager_ != nullptr, "Storage manager is null");
+    AssertInfo(rtree_ == nullptr,
+               "R-Tree already initialized; bulk load requires a fresh tree");
+
+    BulkLoadDataStream stream(field_datas, nullable);
+    SpatialIndex::id_type index_id;
+    try {
+        rtree_ = std::shared_ptr<SpatialIndex::ISpatialIndex>(
+            SpatialIndex::RTree::createAndBulkLoadNewRTree(
+                SpatialIndex::RTree::BLM_STR,
+                stream,
+                *storage_manager_,
+                fill_factor_,
+                index_capacity_,
+                leaf_capacity_,
+                dimension_,
+                rtree_variant_,
+                index_id));
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to bulk load R-Tree: {}", e.what());
+    }
+
+    index_id_ = index_id;
+    LOG_INFO("R-Tree bulk load completed with {} entries",
+             rtree_ ? "some" : "none");
 }
 
 void
@@ -148,7 +293,6 @@ RTreeIndexWrapper::finish() {
     // 1. Release rtree_ first so its destructor can safely write the header
     //    using a still-valid storage_manager_.
     rtree_.reset();
-
 
     // 2. Now it is safe to release the storage manager.
     storage_manager_.reset();
@@ -292,7 +436,8 @@ RTreeIndexWrapper::set_rtree_variant(const std::string& variant_str) {
     if (variant_str == "RSTAR") {
         rtree_variant_ = SpatialIndex::RTree::RV_RSTAR;
     } else if (variant_str == "QUADRATIC") {
-        rtree_variant_ = SpatialIndex::RTree::RV_QUADRATIC;
+        LOG_WARN("QUADRATIC variant is not supported, using RSTAR instead");
+        rtree_variant_ = SpatialIndex::RTree::RV_RSTAR;
     } else if (variant_str == "LINEAR") {
         rtree_variant_ = SpatialIndex::RTree::RV_LINEAR;
     } else {
