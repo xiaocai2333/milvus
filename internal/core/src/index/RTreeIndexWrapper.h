@@ -115,6 +115,10 @@ class RTreeIndexWrapper {
     std::string index_path_;
     bool is_build_mode_;
 
+    // Flag to guard against repeated invocations which could otherwise attempt to release resources multiple times (e.g. BuildWithRawDataForUT() calls finish(), and Upload() may call it again).
+    bool finished_ = false;
+    SpatialIndex::id_type index_id_ = 0;  // persisted to meta for reliable load
+
     // R-Tree parameters
     double fill_factor_ = 0.8;
     uint32_t index_capacity_ = 50;

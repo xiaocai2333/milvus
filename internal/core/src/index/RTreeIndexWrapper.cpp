@@ -14,6 +14,8 @@
 #include "log/Log.h"
 #include "pb/plan.pb.h"
 #include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace milvus::index {
 
@@ -73,6 +75,7 @@ RTreeIndexWrapper::RTreeIndexWrapper(std::string& path, bool is_build_mode)
                                                 dimension_,
                                                 rtree_variant_,
                                                 index_id));
+        index_id_ = index_id;
         LOG_WARN("create rtree index success");
     }
 }
@@ -115,8 +118,25 @@ RTreeIndexWrapper::add_geometry(const uint8_t* wkb_data,
 
 void
 RTreeIndexWrapper::finish() {
+    // Guard against repeated invocations which could otherwise attempt to
+    // release resources multiple times (e.g. BuildWithRawDataForUT() calls
+    // finish(), and Upload() may call it again).
+    if (finished_) {
+        LOG_DEBUG("RTreeIndexWrapper::finish() called more than once, skip.");
+        return;
+    }
+
     AssertInfo(is_build_mode_, "Cannot finish in load mode");
-    AssertInfo(rtree_ != nullptr, "R-Tree index not initialized");
+
+    // If rtree_ is already reset, we have nothing left to do. Mark finished
+    // and return.
+    if (rtree_ == nullptr) {
+        LOG_DEBUG(
+            "RTreeIndexWrapper::finish() called with null rtree_, likely "
+            "already finished.");
+        finished_ = true;
+        return;
+    }
 
     // Explicitly flush the index header & buffers to disk to guarantee
     // consistency before releasing resources.
@@ -129,8 +149,29 @@ RTreeIndexWrapper::finish() {
     //    using a still-valid storage_manager_.
     rtree_.reset();
 
+
     // 2. Now it is safe to release the storage manager.
     storage_manager_.reset();
+
+    // 3. Write meta file with index parameters for reliable loading.
+    try {
+        nlohmann::json meta;
+        meta["index_id"] = index_id_;
+        meta["variant"] = static_cast<int>(rtree_variant_);
+        meta["fill_factor"] = fill_factor_;
+        meta["index_capacity"] = index_capacity_;
+        meta["leaf_capacity"] = leaf_capacity_;
+        meta["dimension"] = dimension_;
+
+        std::ofstream ofs(index_path_ + ".meta.json", std::ios::trunc);
+        ofs << meta.dump();
+        ofs.close();
+        LOG_INFO("R-Tree meta written: {}.meta.json", index_path_);
+    } catch (const std::exception& e) {
+        LOG_WARN("Failed to write R-Tree meta json: {}", e.what());
+    }
+
+    finished_ = true;
 
     LOG_INFO("R-Tree index finished building and saved to {}", index_path_);
 }
@@ -144,10 +185,25 @@ RTreeIndexWrapper::load() {
         storage_manager_ = std::shared_ptr<SpatialIndex::IStorageManager>(
             SpatialIndex::StorageManager::loadDiskStorageManager(index_path_));
 
-        // Load R-Tree index
+        // Determine index id from meta json if available
+        SpatialIndex::id_type idx_id_to_load = 0;
+        try {
+            std::ifstream ifs(index_path_ + ".meta.json");
+            if (ifs.good()) {
+                auto meta = nlohmann::json::parse(ifs);
+                if (meta.contains("index_id")) {
+                    idx_id_to_load =
+                        meta["index_id"].get<SpatialIndex::id_type>();
+                }
+            }
+        } catch (const std::exception& e) {
+            LOG_WARN("Failed to read meta json, fallback to default id 0: {}",
+                     e.what());
+        }
+
+        // Load R-Tree index with the resolved id
         rtree_ = std::shared_ptr<SpatialIndex::ISpatialIndex>(
-            SpatialIndex::RTree::loadRTree(*storage_manager_,
-                                           1));  // 1 is the index ID
+            SpatialIndex::RTree::loadRTree(*storage_manager_, idx_id_to_load));
 
         LOG_INFO("R-Tree index loaded from {}", index_path_);
     } catch (const std::exception& e) {

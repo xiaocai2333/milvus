@@ -134,12 +134,31 @@ RTreeIndex<T>::Load(milvus::tracer::TraceContext ctx, const Config& config) {
     AssertInfo(!local_paths.empty(),
                "RTreeIndex local files are empty after caching to disk");
 
-    // Pick first .dat or .idx, strip extension.
-    std::string base_path = local_paths.front();
-    if (ends_with(base_path, ".dat")) {
-        base_path = base_path.substr(0, base_path.size() - 4);
-    } else if (ends_with(base_path, ".idx")) {
-        base_path = base_path.substr(0, base_path.size() - 4);
+    // Pick a .dat or .idx file explicitly; avoid meta or others.
+    std::string base_path;
+    for (const auto& p : local_paths) {
+        if (ends_with(p, ".dat")) {
+            base_path = p.substr(0, p.size() - 4);
+            break;
+        }
+        if (ends_with(p, ".idx")) {
+            base_path = p.substr(0, p.size() - 4);
+            break;
+        }
+    }
+    // Fallback: if not found, try meta json
+    if (base_path.empty()) {
+        for (const auto& p : local_paths) {
+            if (ends_with(p, ".meta.json")) {
+                base_path =
+                    p.substr(0, p.size() - std::string(".meta.json").size());
+                break;
+            }
+        }
+    }
+    // Final fallback: use the first path as-is
+    if (base_path.empty()) {
+        base_path = local_paths.front();
     }
     path_ = base_path;
 
@@ -162,6 +181,9 @@ RTreeIndex<T>::Build(const Config& config) {
         GetValueFromConfig<std::vector<std::string>>(config, "insert_files");
     AssertInfo(insert_files.has_value(),
                "insert_files were empty for building RTree index");
+
+    InitForBuildIndex();
+
     auto fill_factor =
         GetValueFromConfig<double>(config, FILL_FACTOR_KEY).value_or(0.8);
     auto index_cap =
@@ -176,8 +198,6 @@ RTreeIndex<T>::Build(const Config& config) {
     wrapper_->set_index_capacity(index_cap);
     wrapper_->set_leaf_capacity(leaf_cap);
     wrapper_->set_rtree_variant(variant_str);
-
-    InitForBuildIndex();
 
     // load raw WKB data into memory
     auto field_datas =
