@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <vector>
+#include <folly/SharedMutex.h>
 #include "index/Index.h"
 #include "storage/FileManager.h"
 #include "storage/DiskFileManagerImpl.h"
@@ -68,7 +69,7 @@ class RTreeIndex : public ScalarIndex<T> {
         if (is_built_) {
             return total_num_rows_;
         }
-        return wrapper_ ? wrapper_->count() : 0;
+        return wrapper_ ? wrapper_->count() + null_offset_.size() : 0;
     }
 
     // BuildWithRawDataForUT should be only used in ut. Only string is supported.
@@ -165,5 +166,9 @@ class RTreeIndex : public ScalarIndex<T> {
     // Index state
     bool is_built_ = false;
     int64_t total_num_rows_ = 0;
+
+    // Track null rows to support IsNull/IsNotNull just like other scalar indexes
+    folly::SharedMutexWritePriority mutex_{};
+    std::vector<size_t> null_offset_;
 };
 }  // namespace milvus::index

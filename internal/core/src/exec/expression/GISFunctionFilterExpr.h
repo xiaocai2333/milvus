@@ -48,8 +48,8 @@ class PhyGISFunctionFilterExpr : public SegmentExpr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
  private:
-    //  VectorPtr
-    //  EvalForIndexSegment();
+    VectorPtr
+    EvalForIndexSegment();
 
     VectorPtr
     EvalForDataSegment();

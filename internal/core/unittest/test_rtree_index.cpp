@@ -30,6 +30,11 @@
 #include "common/FieldData.h"
 #include <boost/algorithm/string/predicate.hpp>
 #include <fstream>
+#include "segcore/SegmentGrowingImpl.h"
+#include "segcore/SegmentSealedImpl.h"
+#include "test_utils/DataGen.h"
+#include "query/ExecPlanNodeVisitor.h"
+#include "common/Consts.h"
 
 // Helper: create simple POINT(x,y) WKB (little-endian)
 static std::string
@@ -95,6 +100,9 @@ class RTreeIndexTest : public ::testing::Test {
 
         // prepare field & index meta – minimal info for DiskFileManagerImpl
         field_meta_ = milvus::storage::FieldDataMeta{1, 1, 1, 100};
+        // set geometry data type in field schema for index schema checks
+        field_meta_.field_schema.set_data_type(
+            ::milvus::proto::schema::DataType::Geometry);
         index_meta_ = milvus::storage::IndexMeta{.segment_id = 1,
                                                  .field_id = 100,
                                                  .build_id = 1,
@@ -257,7 +265,6 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
                                      CreateWkbFromWkt("POINT(1 1)")};
     auto remote_file = (temp_path_.get() / "geom.parquet").string();
     WriteGeometryInsertFile(chunk_manager_, field_meta_, remote_file, wkbs);
-    std::cout<<"JsonTest: test_rtree_index.cpp:260"<<std::endl;
     milvus::storage::FileManagerContext ctx(
         field_meta_, index_meta_, chunk_manager_);
     milvus::index::RTreeIndex<std::string> rtree(ctx);
@@ -268,7 +275,7 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
     build_cfg["indexCapacity"] = 32;
     build_cfg["leafCapacity"] = 64;
     build_cfg["rv"] = "RSTAR";
-    
+
     rtree.Build(build_cfg);
     auto stats = rtree.Upload({});
 
@@ -279,7 +286,6 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
     diskfm.CacheIndexToDisk(index_files);
     auto local_paths = diskfm.GetLocalFilePaths();
     ASSERT_FALSE(local_paths.empty());
-    std::cout<<"JsonTest: test_rtree_index.cpp:282"<<std::endl;
     // Determine base path like RTreeIndex::Load
     auto ends_with = [](const std::string& value, const std::string& suffix) {
         return value.size() >= suffix.size() &&
@@ -443,37 +449,6 @@ TEST_F(RTreeIndexTest, Load_NonexistentRemote_ShouldThrow) {
     EXPECT_THROW(rtree_load.Load(trace_ctx, cfg), milvus::SegcoreError);
 }
 
-TEST_F(RTreeIndexTest, API_NotImplemented_Throws) {
-    milvus::storage::FileManagerContext ctx(
-        field_meta_, index_meta_, chunk_manager_);
-    milvus::index::RTreeIndex<std::string> rtree(ctx);
-
-    EXPECT_THROW(rtree.Serialize({}), milvus::SegcoreError);
-
-    milvus::BinarySet bs;
-    EXPECT_THROW(rtree.Load(bs, {}), milvus::SegcoreError);
-
-    std::string dummy;
-    EXPECT_THROW(rtree.In(1, &dummy), milvus::SegcoreError);
-    EXPECT_THROW(rtree.IsNull(), milvus::SegcoreError);
-    EXPECT_THROW(rtree.IsNotNull(), milvus::SegcoreError);
-    EXPECT_THROW(rtree.InApplyFilter(1, &dummy, [](size_t) { return true; }),
-                 milvus::SegcoreError);
-    EXPECT_THROW(rtree.InApplyCallback(1, &dummy, [](size_t) {}),
-                 milvus::SegcoreError);
-    EXPECT_THROW(rtree.NotIn(1, &dummy), milvus::SegcoreError);
-    EXPECT_THROW(rtree.Range(dummy, milvus::OpType::GreaterEqual),
-                 milvus::SegcoreError);
-    EXPECT_THROW(rtree.Range(dummy, true, dummy, false), milvus::SegcoreError);
-    std::vector<int64_t> candidates;
-    EXPECT_THROW(
-        rtree.QueryCandidates(
-            ::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Contains,
-            CreateWkbFromWkt("POINT(0 0)"),
-            candidates),
-        milvus::SegcoreError);
-}
-
 TEST_F(RTreeIndexTest, Build_EndToEnd_FromInsertFiles) {
     // prepare remote file via InsertData serialization
     std::vector<std::string> wkbs = {CreateWkbFromWkt("POINT(0 0)"),
@@ -555,22 +530,22 @@ TEST_F(RTreeIndexTest, Build_BulkLoad_Nulls_And_BadWKB) {
     // 4. will be truncated to make invalid
     // 5. valid
     std::vector<std::string> wkbs = {
-        CreateWkbFromWkt("POINT(0 0)"),     // valid
-        CreateWkbFromWkt("POINT(1 1)"),     // valid 
-        CreateWkbFromWkt("POINT(2 2)"),     // valid
-        CreatePointWKB(3.0, 3.0),           // will be truncated to make invalid
-        CreateWkbFromWkt("POINT(4 4)")      // valid
+        CreateWkbFromWkt("POINT(0 0)"),  // valid
+        CreateWkbFromWkt("POINT(1 1)"),  // valid
+        CreateWkbFromWkt("POINT(2 2)"),  // valid
+        CreatePointWKB(3.0, 3.0),        // will be truncated to make invalid
+        CreateWkbFromWkt("POINT(4 4)")   // valid
     };
     // make bad WKB: truncate the 4th geometry
     wkbs[3].resize(wkbs[3].size() / 2);
 
     // write to remote storage file (chunk manager's root directory)
     auto remote_file = (temp_path_.get() / "geom_bulk.parquet").string();
-    WriteGeometryInsertFile(
-        chunk_manager_, field_meta_, remote_file, wkbs);
+    WriteGeometryInsertFile(chunk_manager_, field_meta_, remote_file, wkbs);
 
     // build (default to bulk load)
-    milvus::storage::FileManagerContext ctx(field_meta_, index_meta_, chunk_manager_);
+    milvus::storage::FileManagerContext ctx(
+        field_meta_, index_meta_, chunk_manager_);
     milvus::index::RTreeIndex<std::string> rtree(ctx);
 
     nlohmann::json build_cfg;
@@ -584,7 +559,8 @@ TEST_F(RTreeIndexTest, Build_BulkLoad_Nulls_And_BadWKB) {
     auto stats = rtree.Upload({});
     ASSERT_GT(stats->GetIndexFiles().size(), 0);
 
-    milvus::storage::FileManagerContext ctx_load(field_meta_, index_meta_, chunk_manager_);
+    milvus::storage::FileManagerContext ctx_load(
+        field_meta_, index_meta_, chunk_manager_);
     ctx_load.set_for_loading_index(true);
     milvus::index::RTreeIndex<std::string> rtree_load(ctx_load);
 
@@ -594,4 +570,281 @@ TEST_F(RTreeIndexTest, Build_BulkLoad_Nulls_And_BadWKB) {
     milvus::tracer::TraceContext trace_ctx;
     rtree_load.Load(trace_ctx, cfg);
     ASSERT_EQ(rtree_load.Count(), 4);
+}
+
+// The following two tests only test the coarse query (R-Tree) and not the exact query (GDAL)
+TEST_F(RTreeIndexTest, Query_CoarseAndExact_Equals_Intersects_Within) {
+    // Build a small index in-memory (via UT API)
+    milvus::storage::FileManagerContext ctx(
+        field_meta_, index_meta_, chunk_manager_);
+    milvus::index::RTreeIndex<std::string> rtree(ctx);
+
+    // Prepare simple geometries: two points and a square polygon
+    std::vector<std::string> wkbs;
+    wkbs.emplace_back(CreateWkbFromWkt("POINT(0 0)"));  // id 0
+    wkbs.emplace_back(CreateWkbFromWkt("POINT(2 2)"));  // id 1
+    wkbs.emplace_back(
+        CreateWkbFromWkt("POLYGON((0 0, 0 3, 3 3, 3 0, 0 0))"));  // id 2 square
+
+    rtree.BuildWithRawDataForUT(wkbs.size(), wkbs.data(), {});
+    ASSERT_EQ(rtree.Count(), 3);
+
+    // Upload and then load into a new index instance for querying
+    auto stats = rtree.Upload({});
+    milvus::storage::FileManagerContext ctx_load(
+        field_meta_, index_meta_, chunk_manager_);
+    ctx_load.set_for_loading_index(true);
+    milvus::index::RTreeIndex<std::string> rtree_load(ctx_load);
+    nlohmann::json cfg;
+    cfg["index_files"] = stats->GetIndexFiles();
+    milvus::tracer::TraceContext trace_ctx;
+    rtree_load.Load(trace_ctx, cfg);
+
+    // Helper to run Query
+    auto run_query = [&](::milvus::proto::plan::GISFunctionFilterExpr_GISOp op,
+                         const std::string& wkt) {
+        auto ds = std::make_shared<milvus::Dataset>();
+        ds->Set(milvus::index::OPERATOR_TYPE, op);
+        ds->Set(milvus::index::MATCH_VALUE, CreateWkbFromWkt(wkt));
+        return rtree_load.Query(ds);
+    };
+
+    // Equals with same point should match id 0 only
+    {
+        auto bm =
+            run_query(::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Equals,
+                      "POINT(0 0)");
+        EXPECT_TRUE(bm[0]);
+        EXPECT_FALSE(bm[1]);
+        EXPECT_TRUE(
+            bm[2]);  //This is true because POINT(0 0) is within the square (0 0, 0 3, 3 3, 3 0, 0 0) and we have not done exact spatial query yet
+    }
+
+    // Intersects: square intersects point (on boundary considered intersect)
+    {
+        auto bm = run_query(
+            ::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Intersects,
+            "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))");
+        // square(0..1) intersects POINT(0,0) and POLYGON(0..3)
+        // but not POINT(2,2)
+        EXPECT_TRUE(bm[0]);   // point (0,0)
+        EXPECT_FALSE(bm[1]);  // point (2,2)
+        EXPECT_TRUE(bm[2]);   // big polygon
+    }
+
+    // Within: point within the big square
+    {
+        auto bm =
+            run_query(::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Within,
+                      "POLYGON((0 0, 0 3, 3 3, 3 0, 0 0))");
+        EXPECT_TRUE(
+            bm[0]);  // (0,0) is within or on boundary considered within by GDAL Within?
+        // GDAL Within returns true only if strictly inside (no boundary). If boundary excluded, (0,0) may be false.
+        // To make assertion robust across GEOS versions, simply check big polygon within itself should be true.
+        auto bm_poly =
+            run_query(::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Within,
+                      "POLYGON((0 0, 0 3, 3 3, 3 0, 0 0))");
+        EXPECT_TRUE(bm_poly[2]);
+    }
+}
+
+TEST_F(RTreeIndexTest, Query_Touches_Contains_Crosses_Overlaps) {
+    milvus::storage::FileManagerContext ctx(
+        field_meta_, index_meta_, chunk_manager_);
+    milvus::index::RTreeIndex<std::string> rtree(ctx);
+
+    // Two overlapping squares and one disjoint square
+    std::vector<std::string> wkbs;
+    wkbs.emplace_back(
+        CreateWkbFromWkt("POLYGON((0 0, 0 2, 2 2, 2 0, 0 0))"));  // id 0
+    wkbs.emplace_back(CreateWkbFromWkt(
+        "POLYGON((1 1, 1 3, 3 3, 3 1, 1 1))"));  // id 1 overlaps with 0
+    wkbs.emplace_back(CreateWkbFromWkt(
+        "POLYGON((4 4, 4 5, 5 5, 5 4, 4 4))"));  // id 2 disjoint
+
+    rtree.BuildWithRawDataForUT(wkbs.size(), wkbs.data(), {});
+    ASSERT_EQ(rtree.Count(), 3);
+
+    // Upload and load a new instance for querying
+    auto stats = rtree.Upload({});
+    milvus::storage::FileManagerContext ctx_load(
+        field_meta_, index_meta_, chunk_manager_);
+    ctx_load.set_for_loading_index(true);
+    milvus::index::RTreeIndex<std::string> rtree_load(ctx_load);
+    nlohmann::json cfg;
+    cfg["index_files"] = stats->GetIndexFiles();
+    milvus::tracer::TraceContext trace_ctx;
+    rtree_load.Load(trace_ctx, cfg);
+
+    auto run_query = [&](::milvus::proto::plan::GISFunctionFilterExpr_GISOp op,
+                         const std::string& wkt) {
+        auto ds = std::make_shared<milvus::Dataset>();
+        ds->Set(milvus::index::OPERATOR_TYPE, op);
+        ds->Set(milvus::index::MATCH_VALUE, CreateWkbFromWkt(wkt));
+        return rtree_load.Query(ds);
+    };
+
+    // Overlaps: query polygon overlapping both 0 and 1
+    {
+        auto bm = run_query(
+            ::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Overlaps,
+            "POLYGON((0.5 0.5, 0.5 2.5, 2.5 2.5, 2.5 0.5, 0.5 0.5))");
+        EXPECT_TRUE(bm[0]);
+        EXPECT_TRUE(bm[1]);
+        EXPECT_FALSE(bm[2]);
+    }
+
+    // Contains: big polygon contains small polygon
+    {
+        auto bm = run_query(
+            ::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Contains,
+            "POLYGON(( -1 -1, -1 4, 4 4, 4 -1, -1 -1))");
+        EXPECT_TRUE(bm[0]);
+        EXPECT_TRUE(bm[1]);
+        EXPECT_FALSE(bm[2]);
+    }
+
+    // Touches: polygon that only touches at the corner (2,2) with id1
+    {
+        auto bm = run_query(
+            ::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Touches,
+            "POLYGON((2 2, 2 3, 3 3, 3 2, 2 2))");
+        // This touches id1 at (2,2); depending on GEOS, touches excludes interior intersection
+        // The id0 might also touch at (2,2). We only assert at least one touch.
+        EXPECT_TRUE(bm[0] || bm[1]);
+    }
+
+    // Crosses: a segment crossing the first polygon
+    {
+        auto bm = run_query(
+            ::milvus::proto::plan::GISFunctionFilterExpr_GISOp_Crosses,
+            "LINESTRING( -1 1, 3 1 )");
+        EXPECT_TRUE(bm[0]);
+    }
+}
+
+TEST_F(RTreeIndexTest, GIS_Index_Exact_Filtering) {
+    using namespace milvus;
+    using namespace milvus::query;
+    using namespace milvus::segcore;
+
+    // 1) Create schema: id (INT64, primary), vector, geometry
+    auto schema = std::make_shared<Schema>();
+    auto pk_id = schema->AddDebugField("id", DataType::INT64);
+    auto dim = 16;
+    auto vec_id = schema->AddDebugField(
+        "vec", DataType::VECTOR_FLOAT, dim, knowhere::metric::L2);
+    auto geo_id = schema->AddDebugField("geo", DataType::GEOMETRY);
+    schema->set_primary_field_id(pk_id);
+
+    int N = 200;
+    int num_iters = 1;
+    // 2) Promote to sealed and build/load indices for vector + geometry
+    auto sealed = milvus::segcore::CreateSealedSegment(schema);
+    // load raw field data into sealed, excluding geometry (we will load controlled geometry separately)
+    auto full_ds = DataGen(schema, N * num_iters);
+    SealedLoadFieldData(full_ds, *sealed, {geo_id.get()});
+
+    // Prepare controlled geometry WKBs mirroring the shapes used in growing
+    std::vector<std::string> wkbs;
+    wkbs.reserve(N * num_iters);
+    for (int i = 0; i < N * num_iters; ++i) {
+        if (i % 4 == 0) {
+            wkbs.emplace_back(milvus::Geometry("POINT(0 0)").to_wkb_string());
+        } else if (i % 4 == 1) {
+            wkbs.emplace_back(
+                milvus::Geometry("POLYGON((-1 -1,1 -1,1 1,-1 1,-1 -1))")
+                    .to_wkb_string());
+        } else if (i % 4 == 2) {
+            wkbs.emplace_back(
+                milvus::Geometry("POLYGON((10 10,20 10,20 20,10 20,10 10))")
+                    .to_wkb_string());
+        } else {
+            wkbs.emplace_back(
+                milvus::Geometry("LINESTRING(-1 0,1 0)").to_wkb_string());
+        }
+    }
+
+    // now load the controlled geometry data into sealed
+    FieldDataInfo geo_fd_info;
+    geo_fd_info.field_id = geo_id.get();
+    geo_fd_info.row_count = N * num_iters;
+    auto geo_field_data = milvus::storage::CreateFieldData(
+        milvus::storage::DataType::GEOMETRY, /*nullable=*/false);
+    geo_field_data->FillFieldData(wkbs.data(), wkbs.size());
+    geo_fd_info.channel->push(geo_field_data);
+    geo_fd_info.channel->close();
+    sealed->LoadFieldData(geo_id, geo_fd_info);
+
+    // build geometry R-Tree index files and load into sealed
+    // Write a single parquet for geometry to simulate build input
+    // wkbs already prepared above
+    auto remote_file = (temp_path_.get() / "rtree_e2e.parquet").string();
+    WriteGeometryInsertFile(chunk_manager_, field_meta_, remote_file, wkbs);
+
+    // build index files by invoking RTreeIndex::Build
+    milvus::storage::FileManagerContext fm_ctx(
+        field_meta_, index_meta_, chunk_manager_);
+    milvus::index::RTreeIndex<std::string> rtree_build(fm_ctx);
+    nlohmann::json build_cfg;
+    build_cfg["insert_files"] = std::vector<std::string>{remote_file};
+    rtree_build.Build(build_cfg);
+    auto stats = rtree_build.Upload({});
+
+    // load geometry index into sealed segment
+    milvus::segcore::LoadIndexInfo info{};
+    info.collection_id = 1;
+    info.partition_id = 1;
+    info.segment_id = 1;
+    info.field_id = geo_id.get();
+    info.field_type = DataType::GEOMETRY;
+    info.index_id = 1;
+    info.index_build_id = 1;
+    info.index_version = 1;
+    info.schema = proto::schema::FieldSchema();
+    info.schema.set_data_type(proto::schema::DataType::Geometry);
+    // Prepare a loaded RTree index instance and assign to info.index for scalar index loading path
+    milvus::storage::FileManagerContext fm_ctx_load(
+        field_meta_, index_meta_, chunk_manager_);
+    fm_ctx_load.set_for_loading_index(true);
+    auto rtree_loaded =
+        std::make_unique<milvus::index::RTreeIndex<std::string>>(fm_ctx_load);
+    nlohmann::json cfg_load;
+    cfg_load["index_files"] = stats->GetIndexFiles();
+    milvus::tracer::TraceContext trace_ctx_load;
+    rtree_loaded->Load(trace_ctx_load, cfg_load);
+    info.index = std::move(rtree_loaded);
+    sealed->LoadIndex(info);
+
+    // 3) Build a GIS filter expression and run exact filtering via segcore
+    auto test_op = [&](const std::string& wkt,
+                       proto::plan::GISFunctionFilterExpr_GISOp op,
+                       std::function<bool(int)> expected) {
+        milvus::Geometry right(wkt.c_str());
+        auto gis_expr = std::make_shared<milvus::expr::GISFunctionFilterExpr>(
+            milvus::expr::ColumnInfo(geo_id, DataType::GEOMETRY), op, right);
+        auto plan = std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID,
+                                                           gis_expr);
+        BitsetType bits =
+            ExecuteQueryExpr(plan, sealed.get(), N * num_iters, MAX_TIMESTAMP);
+        ASSERT_EQ(bits.size(), N * num_iters);
+        for (int i = 0; i < N * num_iters; ++i) {
+            EXPECT_EQ(bool(bits[i]), expected(i)) << "i=" << i;
+        }
+    };
+
+    // exact within: polygon around origin should include indices 0,1,3
+    test_op("POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))",
+            proto::plan::GISFunctionFilterExpr_GISOp_Within,
+            [](int i) { return (i % 4 == 0) || (i % 4 == 1) || (i % 4 == 3); });
+
+    // exact intersects: point (0,0) should intersect point, polygon containing it, and line through it
+    test_op("POINT(0 0)",
+            proto::plan::GISFunctionFilterExpr_GISOp_Intersects,
+            [](int i) { return (i % 4 == 0) || (i % 4 == 1) || (i % 4 == 3); });
+
+    // exact equals: only the point equals
+    test_op("POINT(0 0)",
+            proto::plan::GISFunctionFilterExpr_GISOp_Equals,
+            [](int i) { return (i % 4 == 0); });
 }

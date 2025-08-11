@@ -49,8 +49,7 @@ PhyGISFunctionFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                "unsupported data type: {}",
                expr_->column_.data_type_);
     if (is_index_mode_) {
-        // result = EvalForIndexSegment();
-        PanicInfo(NotImplemented, "index for geos not implement");
+        result = EvalForIndexSegment();
     } else {
         result = EvalForDataSegment();
     }
@@ -143,10 +142,147 @@ PhyGISFunctionFilterExpr::EvalForDataSegment() {
     return res_vec;
 }
 
-// VectorPtr
-// PhyGISFunctionFilterExpr::EvalForIndexSegment() {
-//     // TODO
-// }
+VectorPtr
+PhyGISFunctionFilterExpr::EvalForIndexSegment() {
+    auto real_batch_size = GetNextBatchSize();
+    if (real_batch_size == 0) {
+        return nullptr;
+    }
+
+    using Index = index::ScalarIndex<std::string>;
+
+    // Prepare shared dataset for index query (coarse candidate set by R-Tree)
+    auto ds = std::make_shared<milvus::Dataset>();
+    ds->Set(milvus::index::OPERATOR_TYPE, expr_->op_);
+    ds->Set(milvus::index::MATCH_VALUE, expr_->geometry_.to_wkb_string());
+
+    TargetBitmap batch_result;
+    TargetBitmap batch_valid;
+    int processed_rows = 0;
+
+    for (size_t i = current_index_chunk_; i < num_index_chunk_; i++) {
+        // 1) fetch index for this chunk and run coarse query
+        const Index& index_ref =
+            segment_->chunk_scalar_index<std::string>(field_id_, i);
+        Index* index_ptr = const_cast<Index*>(&index_ref);
+        auto coarse = index_ptr->Query(ds);
+        auto chunk_valid = index_ptr->IsNotNull();
+
+        // 2) exact refinement on candidates using raw geometry
+        TargetBitmap refined(coarse.size());
+
+        // Choose underlying storage type for this segment
+        const bool is_sealed = segment_->type() == SegmentType::Sealed;
+        if (is_sealed) {
+            // sealed: std::string_view views
+            auto [views, valid_vec] =
+                segment_->chunk_view<std::string_view>(field_id_, i);
+            for (size_t pos = 0; pos < coarse.size(); ++pos) {
+                if (!coarse[pos]) {
+                    continue;
+                }
+                // optionally also check nulls
+                if (!valid_vec.empty() && !valid_vec[pos]) {
+                    continue;
+                }
+                const auto& wkb_view = views[pos];
+                Geometry left(wkb_view.data(), wkb_view.size());
+                bool ok = false;
+                switch (expr_->op_) {
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
+                        ok = left.equals(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
+                        ok = left.touches(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
+                        ok = left.overlaps(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
+                        ok = left.crosses(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
+                        ok = left.contains(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Intersects:
+                        ok = left.intersects(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Within:
+                        ok = left.within(expr_->geometry_);
+                        break;
+                    default:
+                        PanicInfo(
+                            NotImplemented, "unknown GIS op : {}", expr_->op_);
+                }
+                if (ok) {
+                    refined.set(pos);
+                }
+            }
+        } else {
+            // growing: std::string values
+            auto span = segment_->chunk_data<std::string>(field_id_, i);
+            for (size_t pos = 0; pos < coarse.size(); ++pos) {
+                if (!coarse[pos]) {
+                    continue;
+                }
+                const auto& wkb = span[pos];
+                Geometry left(wkb.data(), wkb.size());
+                bool ok = false;
+                switch (expr_->op_) {
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
+                        ok = left.equals(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
+                        ok = left.touches(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
+                        ok = left.overlaps(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
+                        ok = left.crosses(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
+                        ok = left.contains(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Intersects:
+                        ok = left.intersects(expr_->geometry_);
+                        break;
+                    case proto::plan::GISFunctionFilterExpr_GISOp_Within:
+                        ok = left.within(expr_->geometry_);
+                        break;
+                    default:
+                        PanicInfo(
+                            NotImplemented, "unknown GIS op : {}", expr_->op_);
+                }
+                if (ok) {
+                    refined.set(pos);
+                }
+            }
+        }
+
+        // 3) append this chunk's refined result to batch result according to batch window
+        auto data_pos =
+            i == current_index_chunk_ ? current_index_chunk_pos_ : 0;
+        auto size = std::min(
+            std::min(size_per_chunk_ - data_pos, batch_size_ - processed_rows),
+            int64_t(refined.size()));
+
+        batch_result.append(refined, data_pos, size);
+        batch_valid.append(chunk_valid, data_pos, size);
+
+        if (processed_rows + size >= batch_size_) {
+            current_index_chunk_ = i;
+            current_index_chunk_pos_ = i == current_index_chunk_
+                                           ? current_index_chunk_pos_ + size
+                                           : size;
+            break;
+        }
+        processed_rows += size;
+    }
+
+    return std::make_shared<ColumnVector>(std::move(batch_result),
+                                          std::move(batch_valid));
+}
 
 }  //namespace exec
 }  // namespace milvus

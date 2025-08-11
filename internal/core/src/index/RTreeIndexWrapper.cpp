@@ -175,7 +175,6 @@ class BulkLoadDataStream : public SpatialIndex::IDataStream {
             const bool is_nullable_effective =
                 nullable_param_ || fd->IsNullable();
             if (is_nullable_effective && !fd->is_valid(current_row_in_batch)) {
-                // skip nulls but keep offset progression
                 continue;
             }
 

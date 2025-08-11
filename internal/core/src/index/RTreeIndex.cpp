@@ -12,6 +12,9 @@
 #include "index/RTreeIndex.h"
 #include <boost/filesystem.hpp>
 #include <iostream>
+#include <algorithm>
+#include <cstring>
+#include "common/Slice.h"  // for INDEX_FILE_SLICE_META and Disassemble
 #include "common/EasyAssert.h"
 #include "common/FieldData.h"
 #include "log/Log.h"
@@ -101,18 +104,65 @@ RTreeIndex<T>::Load(milvus::tracer::TraceContext ctx, const Config& config) {
 
     auto files = index_files_opt.value();
 
-    // 1. Extract potential null_offset file (optional)
+    // 1. Extract and load null_offset file(s) if present
     {
-        auto it = std::find_if(
-            files.begin(), files.end(), [](const std::string& file) {
-                return GetFileName(file) == "index_null_offset";
-            });
-        if (it != files.end()) {
-            std::vector<std::string> tmp{*it};
+        auto find_file = [&](const std::string& target) -> auto {
+            return std::find_if(
+                files.begin(), files.end(), [&](const std::string& filename) {
+                    return GetFileName(filename) == target;
+                });
+        };
+
+        auto fill_null_offsets = [&](const uint8_t* data, int64_t size) {
+            folly::SharedMutexWritePriority::WriteHolder lock(mutex_);
+            null_offset_.resize((size_t)size / sizeof(size_t));
+            memcpy(null_offset_.data(), data, (size_t)size);
+        };
+
+        std::vector<std::string> null_offset_files;
+        if (auto it = find_file(INDEX_FILE_SLICE_META); it != files.end()) {
+            // sliced case: collect all parts with prefix index_null_offset
+            null_offset_files.push_back(*it);
+            for (auto& f : files) {
+                auto filename = GetFileName(f);
+                static const std::string kName = "index_null_offset";
+                if (filename.size() >= kName.size() &&
+                    filename.substr(0, kName.size()) == kName) {
+                    null_offset_files.push_back(f);
+                }
+            }
+            if (!null_offset_files.empty()) {
+                auto index_datas =
+                    mem_file_manager_->LoadIndexToMemory(null_offset_files);
+                auto compacted = CompactIndexDatas(index_datas);
+                auto codecs = std::move(compacted.at("index_null_offset"));
+                for (auto&& codec : codecs.codecs_) {
+                    fill_null_offsets(codec->PayloadData(),
+                                      codec->PayloadSize());
+                }
+            }
+        } else if (auto it = find_file("index_null_offset");
+                   it != files.end()) {
+            null_offset_files.push_back(*it);
             files.erase(it);
-            auto index_datas = mem_file_manager_->LoadIndexToMemory(tmp);
-            BinarySet binary_set;
-            AssembleIndexDatas(index_datas, binary_set);
+            auto index_datas = mem_file_manager_->LoadIndexToMemory(
+                {*null_offset_files.begin()});
+            auto null_data = std::move(index_datas.at("index_null_offset"));
+            fill_null_offsets(null_data->PayloadData(),
+                              null_data->PayloadSize());
+        }
+
+        // remove loaded null_offset files from files list
+        if (!null_offset_files.empty()) {
+            files.erase(std::remove_if(
+                            files.begin(),
+                            files.end(),
+                            [&](const std::string& f) {
+                                return std::find(null_offset_files.begin(),
+                                                 null_offset_files.end(),
+                                                 f) != null_offset_files.end();
+                            }),
+                        files.end());
         }
     }
 
@@ -166,7 +216,9 @@ RTreeIndex<T>::Load(milvus::tracer::TraceContext ctx, const Config& config) {
         std::make_shared<RTreeIndexWrapper>(path_, /*is_build_mode=*/false);
     wrapper_->load();
 
-    total_num_rows_ = wrapper_->count();
+    // total rows = non-null rows in rtree + number of nulls we loaded (if any)
+    total_num_rows_ =
+        wrapper_->count() + static_cast<int64_t>(null_offset_.size());
     is_built_ = true;
 
     LOG_INFO(
@@ -213,7 +265,37 @@ RTreeIndex<T>::BuildWithFieldData(
     // If needed, we can wire a config switch later to disable it.
     bool use_bulk_load = true;
     if (use_bulk_load) {
+        // Single pass: collect null offsets locally and compute total rows
+        int64_t total_rows = 0;
+        if (schema_.nullable()) {
+            std::vector<size_t> local_nulls;
+            int64_t global_offset = 0;
+            for (const auto& fd : field_datas) {
+                const auto n = fd->get_num_rows();
+                for (int64_t i = 0; i < n; ++i) {
+                    if (!fd->is_valid(i)) {
+                        local_nulls.push_back(
+                            static_cast<size_t>(global_offset));
+                    }
+                    ++global_offset;
+                }
+                total_rows += n;
+            }
+            if (!local_nulls.empty()) {
+                folly::SharedMutexWritePriority::WriteHolder lock(mutex_);
+                null_offset_.reserve(null_offset_.size() + local_nulls.size());
+                null_offset_.insert(
+                    null_offset_.end(), local_nulls.begin(), local_nulls.end());
+            }
+        } else {
+            for (const auto& fd : field_datas) {
+                total_rows += fd->get_num_rows();
+            }
+        }
+        // bulk load non-null geometries
         wrapper_->bulk_load_from_field_data(field_datas, schema_.nullable());
+        total_num_rows_ = total_rows;
+        is_built_ = true;
         return;
     }
 }
@@ -251,14 +333,24 @@ RTreeIndex<T>::Upload(const Config& config) {
     // 3. Collect remote paths to size mapping
     auto remote_paths_to_size = disk_file_manager_->GetRemotePathsToFileSize();
 
-    // 4. Assemble IndexStats result (no in-memory part for now)
+    // 4. Serialize and register in-memory null_offset if any
+    auto binary_set = Serialize(config);
+    mem_file_manager_->AddFile(binary_set);
+    auto remote_mem_path_to_size =
+        mem_file_manager_->GetRemotePathsToFileSize();
+
+    // 5. Assemble IndexStats result
     std::vector<SerializedIndexFileInfo> index_files;
-    index_files.reserve(remote_paths_to_size.size());
+    index_files.reserve(remote_paths_to_size.size() +
+                        remote_mem_path_to_size.size());
     for (auto& kv : remote_paths_to_size) {
         index_files.emplace_back(kv.first, kv.second);
     }
+    for (auto& kv : remote_mem_path_to_size) {
+        index_files.emplace_back(kv.first, kv.second);
+    }
 
-    int64_t mem_size = mem_file_manager_->GetAddedTotalMemSize();  // likely 0
+    int64_t mem_size = mem_file_manager_->GetAddedTotalMemSize();
     int64_t file_size = disk_file_manager_->GetAddedTotalFileSize();
 
     return IndexStats::New(mem_size + file_size, std::move(index_files));
@@ -267,9 +359,16 @@ RTreeIndex<T>::Upload(const Config& config) {
 template <typename T>
 BinarySet
 RTreeIndex<T>::Serialize(const Config& config) {
-    PanicInfo(ErrorCode::NotImplemented,
-              "Serialize() is not yet supported for RTreeIndex");
-    return {};
+    folly::SharedMutexWritePriority::ReadHolder lock(mutex_);
+    auto bytes = null_offset_.size() * sizeof(size_t);
+    BinarySet res_set;
+    if (bytes > 0) {
+        std::shared_ptr<uint8_t[]> buf(new uint8_t[bytes]);
+        std::memcpy(buf.get(), null_offset_.data(), bytes);
+        res_set.Append("index_null_offset", buf, bytes);
+    }
+    milvus::Disassemble(res_set);
+    return res_set;
 }
 
 template <typename T>
@@ -297,17 +396,29 @@ RTreeIndex<T>::In(size_t n, const T* values) {
 template <typename T>
 const TargetBitmap
 RTreeIndex<T>::IsNull() {
-    PanicInfo(ErrorCode::NotImplemented,
-              "IsNull() not supported for RTreeIndex");
-    return {};
+    int64_t count = Count();
+    TargetBitmap bitset(count);
+    folly::SharedMutexWritePriority::ReadHolder lock(mutex_);
+    auto end = std::lower_bound(
+        null_offset_.begin(), null_offset_.end(), static_cast<size_t>(count));
+    for (auto it = null_offset_.begin(); it != end; ++it) {
+        bitset.set(*it);
+    }
+    return bitset;
 }
 
 template <typename T>
 const TargetBitmap
 RTreeIndex<T>::IsNotNull() {
-    PanicInfo(ErrorCode::NotImplemented,
-              "IsNotNull() not supported for RTreeIndex");
-    return {};
+    int64_t count = Count();
+    TargetBitmap bitset(count, true);
+    folly::SharedMutexWritePriority::ReadHolder lock(mutex_);
+    auto end = std::lower_bound(
+        null_offset_.begin(), null_offset_.end(), static_cast<size_t>(count));
+    for (auto it = null_offset_.begin(); it != end; ++it) {
+        bitset.reset(*it);
+    }
+    return bitset;
 }
 
 template <typename T>
@@ -361,15 +472,42 @@ void
 RTreeIndex<T>::QueryCandidates(proto::plan::GISFunctionFilterExpr_GISOp op,
                                const std::string& query_geom_wkb,
                                std::vector<int64_t>& candidate_offsets) {
-    PanicInfo(ErrorCode::NotImplemented,
-              "QueryCandidates() not yet implemented for RTreeIndex");
+    AssertInfo(wrapper_ != nullptr, "R-Tree index wrapper is null");
+    OGRGeometry* geom = nullptr;
+    // Create OGRGeometry from WKB bytes
+    OGRGeometryFactory::createFromWkb(
+        reinterpret_cast<const unsigned char*>(query_geom_wkb.data()),
+        nullptr,
+        &geom,
+        query_geom_wkb.size());
+    AssertInfo(geom != nullptr, "invalid query geometry wkb");
+    std::unique_ptr<OGRGeometry> holder(geom);
+    wrapper_->query_candidates(op, *geom, candidate_offsets);
 }
 
 template <typename T>
 const TargetBitmap
 RTreeIndex<T>::Query(const DatasetPtr& dataset) {
-    // Empty implementation – to be filled by GIS spatial query in the future
-    return {};
+    AssertInfo(schema_.data_type() == proto::schema::DataType::Geometry,
+               "RTreeIndex can only be queried on geometry field");
+    auto op =
+        dataset->Get<proto::plan::GISFunctionFilterExpr_GISOp>(OPERATOR_TYPE);
+    // Query geometry WKB passed via MATCH_VALUE as std::string
+    auto wkb = dataset->Get<std::string>(MATCH_VALUE);
+
+    // 1) Coarse candidates by R-Tree on MBR
+    std::vector<int64_t> candidate_offsets;
+    QueryCandidates(op, wkb, candidate_offsets);
+
+    // 2) Build initial bitmap from candidates
+    TargetBitmap res(this->Count());
+    for (auto off : candidate_offsets) {
+        if (off >= 0 && off < res.size()) {
+            res.set(off);
+        }
+    }
+
+    return res;
 }
 
 // ------------------------------------------------------------------
