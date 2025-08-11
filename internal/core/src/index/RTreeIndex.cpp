@@ -216,7 +216,7 @@ RTreeIndex<T>::Load(milvus::tracer::TraceContext ctx, const Config& config) {
         std::make_shared<RTreeIndexWrapper>(path_, /*is_build_mode=*/false);
     wrapper_->load();
 
-    total_num_rows_ = wrapper_->count() + wrapper_->null_count();
+    total_num_rows_ = wrapper_->count();
     is_built_ = true;
 
     LOG_INFO(
@@ -248,7 +248,7 @@ RTreeIndex<T>::Build(const Config& config) {
         mem_file_manager_->CacheRawDataToMemory(insert_files.value());
     BuildWithFieldData(field_datas);
     // after build, mark built
-    total_num_rows_ = wrapper_->count() + wrapper_->null_count();
+    total_num_rows_ = wrapper_->count();
     is_built_ = true;
 }
 

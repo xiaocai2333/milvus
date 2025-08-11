@@ -98,11 +98,6 @@ class RTreeIndexWrapper {
     int64_t
     count() const;
 
-    int64_t
-    null_count() const {
-        return null_rows_;
-    }
-
     void
     set_rtree_variant(const std::string& variant_str);
 
@@ -148,8 +143,6 @@ class RTreeIndexWrapper {
     uint32_t dimension_ = 2;
     SpatialIndex::RTree::RTreeVariant rtree_variant_ =
         SpatialIndex::RTree::RV_RSTAR;
-    // Number of null rows encountered when building.
-    int64_t null_rows_ = 0;
 };
 
 }  // namespace milvus::index

@@ -14,12 +14,10 @@
 #include <cstddef>
 #include <vector>
 #include <folly/SharedMutex.h>
-#include "index/Index.h"
 #include "storage/FileManager.h"
 #include "storage/DiskFileManagerImpl.h"
 #include "storage/MemFileManagerImpl.h"
 #include "index/RTreeIndexWrapper.h"
-#include "index/StringIndex.h"
 #include "index/ScalarIndex.h"
 #include "pb/plan.pb.h"
 
@@ -67,9 +65,9 @@ class RTreeIndex : public ScalarIndex<T> {
     int64_t
     Count() override {
         if (is_built_) {
-            return total_num_rows_;
-        
-        return wrapper_ ? wrapper_->count() + wrapper_->null_count() : 0;
+            return total_num_rows_ + null_offset_.size();
+        }
+        return wrapper_ ? wrapper_->count() : 0;
     }
 
     // BuildWithRawDataForUT should be only used in ut. Only string is supported.
