@@ -163,6 +163,15 @@ GetFieldDataMetaFromConfig(const Config& config);
 storage::IndexMeta
 GetIndexMetaFromConfig(const Config& config);
 
+double
+GetFillFactorFromConfig(const Config& config);
+
+uint32_t
+GetIndexCapacityFromConfig(const Config& config);
+
+uint32_t
+GetLeafCapacityFromConfig(const Config& config);
+
 Config
 ParseConfigFromIndexParams(
     const std::map<std::string, std::string>& index_params);

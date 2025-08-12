@@ -74,7 +74,7 @@ const (
 	MaxRTreeDim     = 2
 	DefaultRTreeDim = 2
 
-	DefaultRTreeRV = "RV_RSTAR"
+	DefaultRTreeRV = "RSTAR"
 )
 
 var (

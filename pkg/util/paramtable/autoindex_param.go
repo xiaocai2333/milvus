@@ -237,7 +237,7 @@ func (p *AutoIndexConfig) init(base *BaseTable) {
 	p.RTreeAutoIndexParams = ParamItem{
 		Key:          "scalarAutoIndex.params.rtree",
 		Version:      "2.5.16",
-		DefaultValue: `{"fillFactor": 0.8, "indexCapacity": 100, "leafCapacity": 100, "dim": 2, "rv": "RV_RSTAR", "index_type": "RTREE"}`,
+		DefaultValue: `{"fillFactor": 0.8, "indexCapacity": 100, "leafCapacity": 100, "dim": 2, "rv": "RSTAR", "index_type": "RTREE"}`,
 	}
 	p.RTreeAutoIndexParams.Init(base.mgr)
 

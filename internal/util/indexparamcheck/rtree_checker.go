@@ -64,7 +64,7 @@ func (c *RTREEChecker) CheckTrain(dataType schemapb.DataType, params map[string]
 	// Validate rv
 	rvValue, exists := params[RTreeRV]
 	if exists {
-		validRVValues := []string{"RV_LINEAR", "RV_QUADRATIC", "RV_RSTAR"}
+		validRVValues := []string{"LINEAR", "QUADRATIC", "RSTAR"}
 		if !funcutil.SliceContain(validRVValues, rvValue) {
 			return fmt.Errorf("rv value %s is not supported, supported values: %v", rvValue, validRVValues)
 		}

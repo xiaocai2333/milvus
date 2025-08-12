@@ -216,9 +216,7 @@ RTreeIndex<T>::Load(milvus::tracer::TraceContext ctx, const Config& config) {
         std::make_shared<RTreeIndexWrapper>(path_, /*is_build_mode=*/false);
     wrapper_->load();
 
-    // total rows = non-null rows in rtree + number of nulls we loaded (if any)
-    total_num_rows_ =
-        wrapper_->count() + static_cast<int64_t>(null_offset_.size());
+    total_num_rows_ = wrapper_->count() + wrapper_->null_count();
     is_built_ = true;
 
     LOG_INFO(
@@ -234,12 +232,9 @@ RTreeIndex<T>::Build(const Config& config) {
                "insert_files were empty for building RTree index");
 
     InitForBuildIndex();
-    auto fill_factor =
-        GetValueFromConfig<double>(config, FILL_FACTOR_KEY).value_or(0.8);
-    auto index_cap =
-        GetValueFromConfig<uint32_t>(config, INDEX_CAPACITY_KEY).value_or(100);
-    auto leaf_cap =
-        GetValueFromConfig<uint32_t>(config, LEAF_CAPACITY_KEY).value_or(100);
+    auto fill_factor = GetFillFactorFromConfig(config);
+    auto index_cap = GetIndexCapacityFromConfig(config);
+    auto leaf_cap = GetLeafCapacityFromConfig(config);
     auto variant_str =
         GetValueFromConfig<std::string>(config, R_TREE_VARIANT_KEY)
             .value_or("RSTAR");
@@ -253,7 +248,7 @@ RTreeIndex<T>::Build(const Config& config) {
         mem_file_manager_->CacheRawDataToMemory(insert_files.value());
     BuildWithFieldData(field_datas);
     // after build, mark built
-    total_num_rows_ = wrapper_->count();
+    total_num_rows_ = wrapper_->count() + wrapper_->null_count();
     is_built_ = true;
 }
 

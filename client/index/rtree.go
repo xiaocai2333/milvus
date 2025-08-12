@@ -35,7 +35,7 @@ const (
 	DefaultRTreeIndexCapacity = 100
 	DefaultRTreeLeafCapacity  = 100
 	DefaultRTreeDim           = 2
-	DefaultRTreeRV            = "RV_RSTAR"
+	DefaultRTreeRV            = "RSTAR"
 )
 
 var _ Index = rtreeIndex{}
@@ -136,7 +136,7 @@ func (b *RTreeIndexBuilder) WithDimension(dim int) *RTreeIndexBuilder {
 }
 
 // WithRVType sets the RV type for the RTree index
-// Valid values: "RV_LINEAR", "RV_QUADRATIC", "RV_RSTAR"
+// Valid values: "LINEAR", "QUADRATIC", "RSTAR"
 func (b *RTreeIndexBuilder) WithRVType(rv string) *RTreeIndexBuilder {
 	b.index.rv = rv
 	return b

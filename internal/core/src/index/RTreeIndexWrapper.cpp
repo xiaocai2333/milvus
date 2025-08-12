@@ -175,6 +175,7 @@ class BulkLoadDataStream : public SpatialIndex::IDataStream {
             const bool is_nullable_effective =
                 nullable_param_ || fd->IsNullable();
             if (is_nullable_effective && !fd->is_valid(current_row_in_batch)) {
+                null_rows_++;
                 continue;
             }
 
@@ -218,6 +219,11 @@ class BulkLoadDataStream : public SpatialIndex::IDataStream {
         return nullptr;
     }
 
+    int64_t
+    null_rows() const {
+        return null_rows_;
+    }
+
  private:
     const std::vector<std::shared_ptr<::milvus::FieldDataBase>>& field_datas_;
     bool nullable_param_ = false;
@@ -225,6 +231,7 @@ class BulkLoadDataStream : public SpatialIndex::IDataStream {
     size_t batch_index_ = 0;
     int64_t row_in_batch_ = 0;
     int64_t absolute_offset_ = 0;
+    int64_t null_rows_ = 0;
 };
 }  // anonymous namespace
 
@@ -256,6 +263,7 @@ RTreeIndexWrapper::bulk_load_from_field_data(
     }
 
     index_id_ = index_id;
+    null_rows_ = stream.null_rows();
     LOG_INFO("R-Tree bulk load completed with {} entries",
              rtree_ ? "some" : "none");
 }
@@ -305,6 +313,7 @@ RTreeIndexWrapper::finish() {
         meta["index_capacity"] = index_capacity_;
         meta["leaf_capacity"] = leaf_capacity_;
         meta["dimension"] = dimension_;
+        meta["null_rows"] = null_rows_;
 
         std::ofstream ofs(index_path_ + ".meta.json", std::ios::trunc);
         ofs << meta.dump();
@@ -337,6 +346,9 @@ RTreeIndexWrapper::load() {
                 if (meta.contains("index_id")) {
                     idx_id_to_load =
                         meta["index_id"].get<SpatialIndex::id_type>();
+                }
+                if (meta.contains("null_rows")) {
+                    null_rows_ = meta["null_rows"].get<int64_t>();
                 }
             }
         } catch (const std::exception& e) {
