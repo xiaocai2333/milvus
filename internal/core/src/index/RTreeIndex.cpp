@@ -11,7 +11,6 @@
 
 #include "index/RTreeIndex.h"
 #include <boost/filesystem.hpp>
-#include <iostream>
 #include <algorithm>
 #include <cstring>
 #include "common/Slice.h"  // for INDEX_FILE_SLICE_META and Disassemble
@@ -186,11 +185,7 @@ RTreeIndex<T>::Load(milvus::tracer::TraceContext ctx, const Config& config) {
     // Pick a .dat or .idx file explicitly; avoid meta or others.
     std::string base_path;
     for (const auto& p : local_paths) {
-        if (ends_with(p, ".dat")) {
-            base_path = p.substr(0, p.size() - 4);
-            break;
-        }
-        if (ends_with(p, ".idx")) {
+        if (ends_with(p, ".bgi")) {
             base_path = p.substr(0, p.size() - 4);
             break;
         }
@@ -232,16 +227,6 @@ RTreeIndex<T>::Build(const Config& config) {
     AssertInfo(insert_files.has_value(),
                "insert_files were empty for building RTree index");
     InitForBuildIndex();
-    auto fill_factor = GetFillFactorFromConfig(config);
-    auto index_cap = GetIndexCapacityFromConfig(config);
-    auto leaf_cap = GetLeafCapacityFromConfig(config);
-    auto variant_str =
-        GetValueFromConfig<std::string>(config, R_TREE_VARIANT_KEY)
-            .value_or("RSTAR");
-    wrapper_->set_fill_factor(fill_factor);
-    wrapper_->set_index_capacity(index_cap);
-    wrapper_->set_leaf_capacity(leaf_cap);
-    wrapper_->set_rtree_variant(variant_str);
 
     // load raw WKB data into memory
     auto field_datas =

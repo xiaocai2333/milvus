@@ -14,6 +14,7 @@
 #include "common/Geometry.h"
 #include "common/Types.h"
 #include "pb/plan.pb.h"
+#include "pb/schema.pb.h"
 namespace milvus {
 namespace exec {
 
@@ -167,14 +168,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
         auto* idx_ptr = const_cast<Index*>(&idx_ref);
 
         {
-            LOG_INFO("LiYinwei:Query segment id {} start",
-                     segment_->get_segment_id());
-            LOG_INFO("LiYinwei:Query op {}",
-                     ds->Get<proto::plan::GISFunctionFilterExpr_GISOp>(
-                         milvus::index::OPERATOR_TYPE));
             auto tmp = idx_ptr->Query(ds);
-            LOG_INFO("LiYinwei:Query segment id {} end",
-                     segment_->get_segment_id());
             coarse_global_ = std::move(tmp);
         }
         {
@@ -188,70 +182,88 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
     TargetBitmap batch_result;
     TargetBitmap batch_valid;
     int processed_rows = 0;
-    auto num_chunk_data = segment_->num_chunk_data(field_id_);
-    for (size_t i = current_index_chunk_; i < num_chunk_data; ++i) {
+
+    for (size_t i = current_index_chunk_; i < num_index_chunk_; ++i) {
         // 1) Build and cache refined bitmap for this chunk (coarse + exact)
         if (cached_index_chunk_id_ != static_cast<int64_t>(i)) {
-            // Reuse segment-level coarse bitmap directly (same for all chunks)
-            auto& coarse = this->coarse_global_;
-            auto& chunk_valid = this->coarse_valid_global_;
-
+            // Reuse segment-level coarse cache directly
+            auto& coarse = coarse_global_;
+            auto& chunk_valid = coarse_valid_global_;
             // Exact refinement
             TargetBitmap refined(coarse.size());
             const bool is_sealed = segment_->type() == SegmentType::Sealed;
-
             if (is_sealed) {
-                auto [views, valid_vec] =
-                    segment_->chunk_view<std::string_view>(field_id_, i);
-
-                // Align global coarse bitmap positions with per-chunk local views
-                const auto start_pos =
-                    segment_->num_rows_until_chunk(field_id_, i);
-                const auto chunk_rows = views.size();
-                const auto max_local = std::min<size_t>(
-                    chunk_rows,
-                    coarse.size() > start_pos ? coarse.size() - start_pos : 0);
-
-                for (size_t local = 0; local < max_local; ++local) {
-                    const size_t pos = start_pos + local;
-                    if (!coarse[pos])
-                        continue;
-                    if (!valid_vec.empty() && !valid_vec[local])
-                        continue;
-
-                    const auto& wkb_view = views[local];
-                    Geometry left(wkb_view.data(), wkb_view.size(), false);
-                    bool ok = false;
-                    switch (expr_->op_) {
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
-                            ok = left.equals(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
-                            ok = left.touches(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
-                            ok = left.overlaps(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
-                            ok = left.crosses(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
-                            ok = left.contains(expr_->geometry_);
-                            break;
-                        case proto::plan::
-                            GISFunctionFilterExpr_GISOp_Intersects:
-                            ok = left.intersects(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Within:
-                            ok = left.within(expr_->geometry_);
-                            break;
-                        default:
-                            PanicInfo(NotImplemented,
-                                      "unknown GIS op : {}",
-                                      expr_->op_);
+                // Collect all hit row offsets from coarse bitmap
+                std::vector<int64_t> hit_offsets;
+                hit_offsets.reserve(
+                    coarse.count());  // Reserve space for efficiency
+                for (size_t i = 0; i < coarse.size(); ++i) {
+                    if (coarse[i]) {
+                        hit_offsets.push_back(static_cast<int64_t>(i));
                     }
-                    if (ok) {
-                        refined.set(pos);
+                }
+
+                if (!hit_offsets.empty()) {
+                    // Bulk get data for all hit rows at once
+                    auto data_array = segment_->bulk_subscript(
+                        field_id_, hit_offsets.data(), hit_offsets.size());
+
+                    // Process each hit row
+                    auto geometry_array = static_cast<
+                        const milvus::proto::schema::GeometryArray*>(
+                        &data_array->scalars().geometry_data());
+                    const auto& valid_data = data_array->valid_data();
+
+                    for (size_t i = 0; i < hit_offsets.size(); ++i) {
+                        const auto pos = hit_offsets[i];
+
+                        // Check validity if available
+                        if (!valid_data.empty() && !valid_data[i]) {
+                            continue;
+                        }
+
+                        const auto& wkb_data = geometry_array->data(i);
+                        Geometry left(wkb_data.data(), wkb_data.size(), false);
+                        bool ok = false;
+
+                        switch (expr_->op_) {
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Equals:
+                                ok = left.equals(expr_->geometry_);
+                                break;
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Touches:
+                                ok = left.touches(expr_->geometry_);
+                                break;
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Overlaps:
+                                ok = left.overlaps(expr_->geometry_);
+                                break;
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Crosses:
+                                ok = left.crosses(expr_->geometry_);
+                                break;
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Contains:
+                                ok = left.contains(expr_->geometry_);
+                                break;
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Intersects:
+                                ok = left.intersects(expr_->geometry_);
+                                break;
+                            case proto::plan::
+                                GISFunctionFilterExpr_GISOp_Within:
+                                ok = left.within(expr_->geometry_);
+                                break;
+                            default:
+                                PanicInfo(NotImplemented,
+                                          "unknown GIS op : {}",
+                                          expr_->op_);
+                        }
+
+                        if (ok) {
+                            refined.set(pos);
+                        }
                     }
                 }
             } else {  // Growing segment
@@ -338,20 +350,6 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
         }
         processed_rows += size;
     }
-
-    // CRITICAL FIX: Ensure the returned ColumnVector exactly matches the real_batch_size
-    // This handles the case where the loop might have accumulated slightly more
-    // due to chunking/batching logic not perfectly aligning with `real_batch_size`.
-    if (batch_result.size() > real_batch_size) {
-        LOG_WARN(
-            "EvalForIndexSegment: Truncating batch_result from {} to "
-            "{} to match real_batch_size.",
-            batch_result.size(),
-            real_batch_size);
-        batch_result.resize(real_batch_size);
-        batch_valid.resize(real_batch_size);
-    }
-
     return std::make_shared<ColumnVector>(std::move(batch_result),
                                           std::move(batch_valid));
 }

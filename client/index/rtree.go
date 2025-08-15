@@ -16,48 +16,16 @@
 
 package index
 
-import (
-	"strconv"
-)
-
-// RTree index parameter keys
-const (
-	RTreeFillFactorKey    = "fillFactor"
-	RTreeIndexCapacityKey = "indexCapacity"
-	RTreeLeafCapacityKey  = "leafCapacity"
-	RTreeDimKey           = "dim"
-	RTreeRVKey            = "rv"
-)
-
-// RTree index parameter defaults
-const (
-	DefaultRTreeFillFactor    = 0.8
-	DefaultRTreeIndexCapacity = 100
-	DefaultRTreeLeafCapacity  = 100
-	DefaultRTreeDim           = 2
-	DefaultRTreeRV            = "RSTAR"
-)
-
 var _ Index = rtreeIndex{}
 
 // rtreeIndex represents an RTree index for geometry fields
 type rtreeIndex struct {
 	baseIndex
-	fillFactor    float64
-	indexCapacity int
-	leafCapacity  int
-	dim           int
-	rv            string
 }
 
 func (idx rtreeIndex) Params() map[string]string {
 	params := map[string]string{
-		IndexTypeKey:          string(RTREE),
-		RTreeFillFactorKey:    strconv.FormatFloat(idx.fillFactor, 'f', -1, 64),
-		RTreeIndexCapacityKey: strconv.Itoa(idx.indexCapacity),
-		RTreeLeafCapacityKey:  strconv.Itoa(idx.leafCapacity),
-		RTreeDimKey:           strconv.Itoa(idx.dim),
-		RTreeRVKey:            idx.rv,
+		IndexTypeKey: string(RTREE),
 	}
 	return params
 }
@@ -68,25 +36,15 @@ func NewRTreeIndex() Index {
 		baseIndex: baseIndex{
 			indexType: RTREE,
 		},
-		fillFactor:    DefaultRTreeFillFactor,
-		indexCapacity: DefaultRTreeIndexCapacity,
-		leafCapacity:  DefaultRTreeLeafCapacity,
-		dim:           DefaultRTreeDim,
-		rv:            DefaultRTreeRV,
 	}
 }
 
 // NewRTreeIndexWithParams creates a new RTree index with custom parameters
-func NewRTreeIndexWithParams(fillFactor float64, indexCapacity, leafCapacity, dim int, rv string) Index {
+func NewRTreeIndexWithParams() Index {
 	return rtreeIndex{
 		baseIndex: baseIndex{
 			indexType: RTREE,
 		},
-		fillFactor:    fillFactor,
-		indexCapacity: indexCapacity,
-		leafCapacity:  leafCapacity,
-		dim:           dim,
-		rv:            rv,
 	}
 }
 
@@ -102,44 +60,8 @@ func NewRTreeIndexBuilder() *RTreeIndexBuilder {
 			baseIndex: baseIndex{
 				indexType: RTREE,
 			},
-			fillFactor:    DefaultRTreeFillFactor,
-			indexCapacity: DefaultRTreeIndexCapacity,
-			leafCapacity:  DefaultRTreeLeafCapacity,
-			dim:           DefaultRTreeDim,
-			rv:            DefaultRTreeRV,
 		},
 	}
-}
-
-// WithFillFactor sets the fill factor for the RTree index
-func (b *RTreeIndexBuilder) WithFillFactor(fillFactor float64) *RTreeIndexBuilder {
-	b.index.fillFactor = fillFactor
-	return b
-}
-
-// WithIndexCapacity sets the index capacity for the RTree index
-func (b *RTreeIndexBuilder) WithIndexCapacity(capacity int) *RTreeIndexBuilder {
-	b.index.indexCapacity = capacity
-	return b
-}
-
-// WithLeafCapacity sets the leaf capacity for the RTree index
-func (b *RTreeIndexBuilder) WithLeafCapacity(capacity int) *RTreeIndexBuilder {
-	b.index.leafCapacity = capacity
-	return b
-}
-
-// WithDimension sets the dimension for the RTree index
-func (b *RTreeIndexBuilder) WithDimension(dim int) *RTreeIndexBuilder {
-	b.index.dim = dim
-	return b
-}
-
-// WithRVType sets the RV type for the RTree index
-// Valid values: "LINEAR", "QUADRATIC", "RSTAR"
-func (b *RTreeIndexBuilder) WithRVType(rv string) *RTreeIndexBuilder {
-	b.index.rv = rv
-	return b
 }
 
 // Build returns the constructed RTree index

@@ -489,19 +489,6 @@ func checkTrain(ctx context.Context, field *schemapb.FieldSchema, indexParams ma
 		}
 	}
 
-	if indexType == indexparamcheck.IndexRTREE {
-		// Apply default RTree parameters if not provided
-		rtreeParams := paramtable.Get().AutoIndexConfig.RTreeAutoIndexParams.GetAsJSONMap()
-		for k, v := range rtreeParams {
-			if k != common.IndexTypeKey { // Don't override index_type
-				_, exist := indexParams[k]
-				if !exist {
-					indexParams[k] = v
-				}
-			}
-		}
-	}
-
 	checker, err := indexparamcheck.GetIndexCheckerMgrInstance().GetChecker(indexType)
 	if err != nil {
 		log.Ctx(ctx).Warn("Failed to get index checker", zap.String(common.IndexTypeKey, indexType))

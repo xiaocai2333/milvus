@@ -56,7 +56,6 @@ type AutoIndexConfig struct {
 	ScalarJSONIndexType     ParamItem `refreshable:"true"`
 	ScalarGeometryIndexType ParamItem `refreshable:"true"`
 
-	RTreeAutoIndexParams   ParamItem `refreshable:"true"`
 	BitmapCardinalityLimit ParamItem `refreshable:"true"`
 }
 
@@ -233,13 +232,6 @@ func (p *AutoIndexConfig) init(base *BaseTable) {
 		},
 	}
 	p.ScalarGeometryIndexType.Init(base.mgr)
-
-	p.RTreeAutoIndexParams = ParamItem{
-		Key:          "scalarAutoIndex.params.rtree",
-		Version:      "2.5.16",
-		DefaultValue: `{"fillFactor": 0.8, "indexCapacity": 100, "leafCapacity": 100, "dim": 2, "rv": "RSTAR", "index_type": "RTREE"}`,
-	}
-	p.RTreeAutoIndexParams.Init(base.mgr)
 
 	p.BitmapCardinalityLimit = ParamItem{
 		Key:          "scalarAutoIndex.params.bitmapCardinalityLimit",
