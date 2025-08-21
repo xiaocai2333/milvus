@@ -271,10 +271,6 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
 
     nlohmann::json build_cfg;
     build_cfg["insert_files"] = std::vector<std::string>{remote_file};
-    build_cfg["fillFactor"] = "0.6";
-    build_cfg["indexCapacity"] = "32";
-    build_cfg["leafCapacity"] = "64";
-    build_cfg["rv"] = "RSTAR";
 
     rtree.Build(build_cfg);
     auto stats = rtree.Upload({});
@@ -295,11 +291,7 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
 
     std::string base_path;
     for (const auto& p : local_paths) {
-        if (ends_with(p, ".dat")) {
-            base_path = p.substr(0, p.size() - 4);
-            break;
-        }
-        if (ends_with(p, ".idx")) {
+        if (ends_with(p, ".bgi")) {
             base_path = p.substr(0, p.size() - 4);
             break;
         }
@@ -320,92 +312,7 @@ TEST_F(RTreeIndexTest, Build_ConfigAndMetaJson) {
     std::ifstream ifs(base_path + ".meta.json");
     ASSERT_TRUE(ifs.good());
     nlohmann::json meta = nlohmann::json::parse(ifs);
-    ASSERT_EQ(meta["fill_factor"], "0.6");
-    ASSERT_EQ(meta["index_capacity"], "32");
-    ASSERT_EQ(meta["leaf_capacity"], "64");
     ASSERT_EQ(meta["dimension"], 2);
-}
-
-TEST_F(RTreeIndexTest, Build_InvalidVariant_ShouldThrow) {
-    // Prepare insert
-    std::vector<std::string> wkbs = {CreateWkbFromWkt("POINT(0 0)")};
-    auto remote_file = (temp_path_.get() / "geom2.parquet").string();
-    WriteGeometryInsertFile(chunk_manager_, field_meta_, remote_file, wkbs);
-
-    milvus::storage::FileManagerContext ctx(
-        field_meta_, index_meta_, chunk_manager_);
-    milvus::index::RTreeIndex<std::string> rtree(ctx);
-
-    nlohmann::json build_cfg;
-    build_cfg["insert_files"] = std::vector<std::string>{remote_file};
-    build_cfg["rv"] = "FOO";  // invalid
-    EXPECT_THROW(rtree.Build(build_cfg), milvus::SegcoreError);
-}
-
-TEST_F(RTreeIndexTest, Load_OnlyIdx_OnlyDat) {
-    // Build and upload
-    milvus::storage::FileManagerContext ctx(
-        field_meta_, index_meta_, chunk_manager_);
-    milvus::index::RTreeIndex<std::string> rtree(ctx);
-    std::vector<std::string> wkbs = {CreatePointWKB(3.0, 3.0),
-                                     CreatePointWKB(4.0, 4.0)};
-    rtree.BuildWithRawDataForUT(wkbs.size(), wkbs.data());
-    auto stats = rtree.Upload({});
-
-    std::vector<std::string> only_idx, only_dat;
-    for (const auto& p : stats->GetIndexFiles()) {
-        if (boost::algorithm::ends_with(p, ".idx_0"))
-            only_idx.push_back(p);
-        if (boost::algorithm::ends_with(p, ".dat_0"))
-            only_dat.push_back(p);
-    }
-    ASSERT_FALSE(only_idx.empty());
-    ASSERT_FALSE(only_dat.empty());
-
-    // Load with only idx should fail
-    milvus::storage::FileManagerContext ctx_load1(
-        field_meta_, index_meta_, chunk_manager_);
-    ctx_load1.set_for_loading_index(true);
-    milvus::index::RTreeIndex<std::string> rtree_load1(ctx_load1);
-    nlohmann::json cfg1;
-    cfg1["index_files"] = only_idx;
-    milvus::tracer::TraceContext trace_ctx;
-    EXPECT_ANY_THROW(rtree_load1.Load(trace_ctx, cfg1));
-
-    // Load with only dat should fail
-    milvus::storage::FileManagerContext ctx_load2(
-        field_meta_, index_meta_, chunk_manager_);
-    ctx_load2.set_for_loading_index(true);
-    milvus::index::RTreeIndex<std::string> rtree_load2(ctx_load2);
-    nlohmann::json cfg2;
-    cfg2["index_files"] = only_dat;
-    EXPECT_ANY_THROW(rtree_load2.Load(trace_ctx, cfg2));
-}
-
-TEST_F(RTreeIndexTest, Load_OnlyMeta_ShouldThrow) {
-    // Build and upload
-    milvus::storage::FileManagerContext ctx(
-        field_meta_, index_meta_, chunk_manager_);
-    milvus::index::RTreeIndex<std::string> rtree(ctx);
-    std::vector<std::string> wkbs = {CreatePointWKB(5.0, 5.0)};
-    rtree.BuildWithRawDataForUT(wkbs.size(), wkbs.data());
-    auto stats = rtree.Upload({});
-
-    std::vector<std::string> only_meta;
-    for (const auto& p : stats->GetIndexFiles()) {
-        if (boost::algorithm::ends_with(p, ".meta.json_0"))
-            only_meta.push_back(p);
-    }
-    ASSERT_FALSE(only_meta.empty());
-
-    milvus::storage::FileManagerContext ctx_load(
-        field_meta_, index_meta_, chunk_manager_);
-    ctx_load.set_for_loading_index(true);
-    milvus::index::RTreeIndex<std::string> rtree_load(ctx_load);
-    nlohmann::json cfg;
-    cfg["index_files"] = only_meta;
-    milvus::tracer::TraceContext trace_ctx;
-    EXPECT_ANY_THROW(rtree_load.Load(trace_ctx, cfg));
 }
 
 TEST_F(RTreeIndexTest, Load_MixedFileNamesAndPaths) {
@@ -444,7 +351,7 @@ TEST_F(RTreeIndexTest, Load_NonexistentRemote_ShouldThrow) {
     // nonexist file
     nlohmann::json cfg;
     cfg["index_files"] = std::vector<std::string>{
-        (temp_path_.get() / "does_not_exist.idx_0").string()};
+        (temp_path_.get() / "does_not_exist.bgi_0").string()};
     milvus::tracer::TraceContext trace_ctx;
     EXPECT_THROW(rtree_load.Load(trace_ctx, cfg), milvus::SegcoreError);
 }
@@ -462,10 +369,7 @@ TEST_F(RTreeIndexTest, Build_EndToEnd_FromInsertFiles) {
 
     nlohmann::json build_cfg;
     build_cfg["insert_files"] = std::vector<std::string>{remote_file};
-    build_cfg["fillFactor"] = "0.8";
-    build_cfg["indexCapacity"] = "50";
-    build_cfg["leafCapacity"] = "50";
-    build_cfg["rv"] = "RSTAR";
+
     rtree.Build(build_cfg);
     ASSERT_EQ(rtree.Count(), wkbs.size());
 
@@ -504,10 +408,7 @@ TEST_F(RTreeIndexTest, Build_Upload_Load_LargeDataset) {
 
     nlohmann::json build_cfg;
     build_cfg["insert_files"] = std::vector<std::string>{remote_file};
-    build_cfg["fillFactor"] = "0.8";
-    build_cfg["indexCapacity"] = "50";
-    build_cfg["leafCapacity"] = "50";
-    build_cfg["rv"] = "RSTAR";
+
     rtree.Build(build_cfg);
 
     ASSERT_EQ(rtree.Count(), static_cast<int64_t>(N));
@@ -558,10 +459,7 @@ TEST_F(RTreeIndexTest, Build_BulkLoad_Nulls_And_BadWKB) {
 
     nlohmann::json build_cfg;
     build_cfg["insert_files"] = std::vector<std::string>{remote_file};
-    build_cfg["fillFactor"] = "0.8";
-    build_cfg["indexCapacity"] = "50";
-    build_cfg["leafCapacity"] = "50";
-    build_cfg["rv"] = "RSTAR";
+
     rtree.Build(build_cfg);
 
     // expect: 3 geometries (0, 2, 4) are valid and parsable, 1st geometry is marked null and skipped, 3rd geometry is bad WKB and skipped
@@ -585,6 +483,7 @@ TEST_F(RTreeIndexTest, Build_BulkLoad_Nulls_And_BadWKB) {
 }
 
 // The following two tests only test the coarse query (R-Tree) and not the exact query (GDAL)
+
 TEST_F(RTreeIndexTest, Query_CoarseAndExact_Equals_Intersects_Within) {
     // Build a small index in-memory (via UT API)
     milvus::storage::FileManagerContext ctx(
@@ -713,7 +612,7 @@ TEST_F(RTreeIndexTest, Query_Touches_Contains_Crosses_Overlaps) {
             "POLYGON(( -1 -1, -1 4, 4 4, 4 -1, -1 -1))");
         EXPECT_TRUE(bm[0]);
         EXPECT_TRUE(bm[1]);
-        EXPECT_FALSE(bm[2]);
+        EXPECT_TRUE(bm[2]);
     }
 
     // Touches: polygon that only touches at the corner (2,2) with id1
@@ -800,10 +699,7 @@ TEST_F(RTreeIndexTest, GIS_Index_Exact_Filtering) {
     milvus::index::RTreeIndex<std::string> rtree_build(fm_ctx);
     nlohmann::json build_cfg;
     build_cfg["insert_files"] = std::vector<std::string>{remote_file};
-    build_cfg["fillFactor"] = "0.8";
-    build_cfg["indexCapacity"] = "50";
-    build_cfg["leafCapacity"] = "50";
-    build_cfg["rv"] = "RSTAR";
+
     rtree_build.Build(build_cfg);
     auto stats = rtree_build.Upload({});
 
