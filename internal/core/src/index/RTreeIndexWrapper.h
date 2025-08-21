@@ -19,7 +19,6 @@
 #include <boost/geometry/index/rtree.hpp>
 #include "ogr_geometry.h"
 #include "pb/plan.pb.h"
-#include <folly/SharedMutex.h>
 
 // Forward declaration to avoid pulling heavy field data headers here
 namespace milvus {
