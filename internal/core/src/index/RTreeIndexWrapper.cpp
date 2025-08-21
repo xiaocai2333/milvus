@@ -42,11 +42,10 @@ void
 RTreeIndexWrapper::add_geometry(const uint8_t* wkb_data,
                                 size_t len,
                                 int64_t row_offset) {
-    // Acquire write lock to protect rtree_ modification
-    folly::SharedMutexWritePriority::WriteHolder lock(rtree_mutex_);
+    // Acquire write lock to protect rtree_
+    std::unique_lock<std::shared_mutex> guard(rtree_mutex_);
 
     AssertInfo(is_build_mode_, "Cannot add geometry in load mode");
-    std::unique_lock<std::shared_mutex> guard(rtree_mutex_);
 
     // Parse WKB data to OGR geometry
     OGRGeometry* geom = nullptr;
@@ -79,10 +78,10 @@ RTreeIndexWrapper::bulk_load_from_field_data(
     const std::vector<std::shared_ptr<::milvus::FieldDataBase>>& field_datas,
     bool nullable) {
     // Acquire write lock to protect rtree_ creation and modification
-    folly::SharedMutexWritePriority::WriteHolder lock(rtree_mutex_);
+    std::unique_lock<std::shared_mutex> guard(rtree_mutex_);
 
     AssertInfo(is_build_mode_, "Cannot bulk load in load mode");
-    std::unique_lock<std::shared_mutex> guard(rtree_mutex_);
+
     std::vector<Value> local_values;
     local_values.reserve(1024);
     int64_t absolute_offset = 0;
@@ -123,8 +122,6 @@ RTreeIndexWrapper::bulk_load_from_field_data(
 void
 RTreeIndexWrapper::finish() {
     // Acquire write lock to protect rtree_ modification and cleanup
-    folly::SharedMutexWritePriority::WriteHolder lock(rtree_mutex_);
-
     // Guard against repeated invocations which could otherwise attempt to
     // release resources multiple times (e.g. BuildWithRawDataForUT() calls
     // finish(), and Upload() may call it again).
@@ -164,11 +161,10 @@ RTreeIndexWrapper::finish() {
 void
 RTreeIndexWrapper::load() {
     // Acquire write lock to protect rtree_ initialization during loading
-    folly::SharedMutexWritePriority::WriteHolder lock(rtree_mutex_);
+    std::unique_lock<std::shared_mutex> guard(rtree_mutex_);
 
     AssertInfo(!is_build_mode_, "Cannot load in build mode");
 
-    std::unique_lock<std::shared_mutex> guard(rtree_mutex_);
     try {
         // Read meta (optional)
         try {
