@@ -19,6 +19,7 @@
 #include "storage/MemFileManagerImpl.h"
 #include "index/RTreeIndexWrapper.h"
 #include "index/ScalarIndex.h"
+#include "index/Meta.h"
 #include "pb/plan.pb.h"
 
 namespace milvus::index {
@@ -36,7 +37,8 @@ class RTreeIndex : public ScalarIndex<T> {
     RTreeIndex() : ScalarIndex<T>(RTREE_INDEX_TYPE) {
     }
 
-    explicit RTreeIndex(const storage::FileManagerContext& ctx);
+    explicit RTreeIndex(
+        const storage::FileManagerContext& ctx = storage::FileManagerContext());
 
     ~RTreeIndex();
 
@@ -77,6 +79,14 @@ class RTreeIndex : public ScalarIndex<T> {
     BuildWithRawDataForUT(size_t n,
                           const void* values,
                           const Config& config = {}) override;
+
+    // Build index with string data (WKB format) for growing segment
+    void
+    BuildWithStrings(const std::vector<std::string>& geometries);
+
+    // Add single geometry incrementally (for growing segment)
+    void
+    AddGeometry(const std::string& wkb_data, int64_t row_offset);
 
     BinarySet
     Serialize(const Config& config) override;

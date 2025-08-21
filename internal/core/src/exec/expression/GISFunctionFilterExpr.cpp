@@ -161,187 +161,174 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
      * Prefetch: if coarse results are not cached yet, run a single R-Tree
      * query for all index chunks and cache their coarse bitmaps.
      * ------------------------------------------------------------------*/
-    if (!coarse_cached_) {
-        // Query segment-level R-Tree index **once** since each chunk shares the same index
-        const Index& idx_ref =
-            segment_->chunk_scalar_index<std::string>(field_id_, 0);
-        auto* idx_ptr = const_cast<Index*>(&idx_ref);
+    const bool is_sealed = segment_->type() == SegmentType::Sealed;
 
-        {
-            auto tmp = idx_ptr->Query(ds);
-            coarse_global_ = std::move(tmp);
+    auto evaluate_geometry = [this](const Geometry& left) -> bool {
+        switch (expr_->op_) {
+            case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
+                return left.equals(expr_->geometry_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
+                return left.touches(expr_->geometry_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
+                return left.overlaps(expr_->geometry_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
+                return left.crosses(expr_->geometry_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
+                return left.contains(expr_->geometry_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_Intersects:
+                return left.intersects(expr_->geometry_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_Within:
+                return left.within(expr_->geometry_);
+            default:
+                PanicInfo(NotImplemented, "unknown GIS op : {}", expr_->op_);
         }
-        {
-            auto tmp_valid = idx_ptr->IsNotNull();
-            coarse_valid_global_ = std::move(tmp_valid);
-        }
-
-        coarse_cached_ = true;
-    }
+    };
 
     TargetBitmap batch_result;
     TargetBitmap batch_valid;
     int processed_rows = 0;
 
-    for (size_t i = current_index_chunk_; i < num_index_chunk_; ++i) {
-        // 1) Build and cache refined bitmap for this chunk (coarse + exact)
-        if (cached_index_chunk_id_ != static_cast<int64_t>(i)) {
-            // Reuse segment-level coarse cache directly
-            auto& coarse = coarse_global_;
-            auto& chunk_valid = coarse_valid_global_;
-            // Exact refinement
-            TargetBitmap refined(coarse.size());
-            const bool is_sealed = segment_->type() == SegmentType::Sealed;
-            if (is_sealed) {
-                // Collect all hit row offsets from coarse bitmap
-                std::vector<int64_t> hit_offsets;
-                hit_offsets.reserve(
-                    coarse.count());  // Reserve space for efficiency
-                for (size_t i = 0; i < coarse.size(); ++i) {
-                    if (coarse[i]) {
-                        hit_offsets.push_back(static_cast<int64_t>(i));
+    if (is_sealed) {
+        if (!coarse_cached_) {
+            // Query segment-level R-Tree index **once** since each chunk shares the same index
+            const Index& idx_ref =
+                segment_->chunk_scalar_index<std::string>(field_id_, 0);
+            auto* idx_ptr = const_cast<Index*>(&idx_ref);
+
+            {
+                auto tmp = idx_ptr->Query(ds);
+                coarse_global_ = std::move(tmp);
+            }
+            {
+                auto tmp_valid = idx_ptr->IsNotNull();
+                coarse_valid_global_ = std::move(tmp_valid);
+            }
+
+            coarse_cached_ = true;
+        }
+
+        for (size_t i = current_index_chunk_; i < num_index_chunk_; ++i) {
+            // 1) Build and cache refined bitmap for this chunk (coarse + exact)
+            if (cached_index_chunk_id_ != static_cast<int64_t>(i)) {
+                // Reuse segment-level coarse cache directly
+                auto& coarse = coarse_global_;
+                auto& chunk_valid = coarse_valid_global_;
+                // Exact refinement with lambda functions for code reuse
+                TargetBitmap refined(coarse.size());
+
+                // Lambda: Evaluate geometry operation (shared by both segment types)
+
+                // Lambda: Collect hit offsets from coarse bitmap
+                auto collect_hits = [&coarse]() -> std::vector<int64_t> {
+                    std::vector<int64_t> hit_offsets;
+                    hit_offsets.reserve(coarse.count());
+                    for (size_t i = 0; i < coarse.size(); ++i) {
+                        if (coarse[i]) {
+                            hit_offsets.emplace_back(static_cast<int64_t>(i));
+                        }
                     }
+                    return hit_offsets;
+                };
+
+                // Lambda: Process sealed segment data using bulk_subscript
+                auto process_sealed_data =
+                    [&](const std::vector<int64_t>& hit_offsets) {
+                        if (hit_offsets.empty())
+                            return;
+
+                        auto data_array = segment_->bulk_subscript(
+                            field_id_, hit_offsets.data(), hit_offsets.size());
+
+                        auto geometry_array = static_cast<
+                            const milvus::proto::schema::GeometryArray*>(
+                            &data_array->scalars().geometry_data());
+                        const auto& valid_data = data_array->valid_data();
+
+                        for (size_t i = 0; i < hit_offsets.size(); ++i) {
+                            const auto pos = hit_offsets[i];
+
+                            // Skip invalid data
+                            if (!valid_data.empty() && !valid_data[i]) {
+                                continue;
+                            }
+
+                            const auto& wkb_data = geometry_array->data(i);
+                            Geometry left(
+                                wkb_data.data(), wkb_data.size(), false);
+
+                            if (evaluate_geometry(left)) {
+                                refined.set(pos);
+                            }
+                        }
+                    };
+
+                auto hit_offsets = collect_hits();
+                process_sealed_data(hit_offsets);
+
+                // Cache refined result for reuse by subsequent batches
+                cached_index_chunk_id_ = i;
+                cached_index_chunk_res_ = std::move(refined);
+                // No need to copy valid bitmap into member; use coarse_valid_cache_[i] directly later
+            }
+
+            auto size = ProcessIndexOneChunk(batch_result,
+                                             batch_valid,
+                                             i,
+                                             cached_index_chunk_res_,
+                                             coarse_valid_global_,
+                                             processed_rows);
+            processed_rows += size;
+            if (processed_rows + size >= real_batch_size) {
+                current_index_chunk_ = i;
+                current_index_chunk_pos_ = i == current_index_chunk_
+                                               ? current_index_chunk_pos_ + size
+                                               : size;
+                break;
+            }
+        }
+    } else {
+        const Index& idx_ref = segment_->chunk_scalar_index<std::string>(
+            field_id_, current_index_chunk_);
+        auto* idx_ptr = const_cast<Index*>(&idx_ref);
+        auto tmp = idx_ptr->Query(ds);
+        auto tmp_valid = idx_ptr->IsNotNull();
+        TargetBitmap refined(tmp.size());
+        int64_t processed_size = 0;
+        for (size_t i = current_data_chunk_; i < num_data_chunk_; i++) {
+            auto data_pos =
+                (i == current_data_chunk_) ? current_data_chunk_pos_ : 0;
+            auto span = segment_->chunk_data<std::string>(field_id_, i);
+            auto valid_data = span.valid_data();
+            int64_t size = segment_->chunk_size(field_id_, i) - data_pos;
+            size = std::min(size, real_batch_size - processed_size);
+
+            for (size_t start_pos = data_pos; start_pos < size; start_pos++) {
+                if (!tmp[processed_size + start_pos])
+                    continue;
+
+                if (valid_data != nullptr && !valid_data[start_pos]) {
+                    continue;
                 }
 
-                if (!hit_offsets.empty()) {
-                    // Bulk get data for all hit rows at once
-                    auto data_array = segment_->bulk_subscript(
-                        field_id_, hit_offsets.data(), hit_offsets.size());
+                const auto& wkb = span[start_pos];
+                Geometry left(wkb.data(), wkb.size(), false);
 
-                    // Process each hit row
-                    auto geometry_array = static_cast<
-                        const milvus::proto::schema::GeometryArray*>(
-                        &data_array->scalars().geometry_data());
-                    const auto& valid_data = data_array->valid_data();
-
-                    for (size_t i = 0; i < hit_offsets.size(); ++i) {
-                        const auto pos = hit_offsets[i];
-
-                        // Check validity if available
-                        if (!valid_data.empty() && !valid_data[i]) {
-                            continue;
-                        }
-
-                        const auto& wkb_data = geometry_array->data(i);
-                        Geometry left(wkb_data.data(), wkb_data.size(), false);
-                        bool ok = false;
-
-                        switch (expr_->op_) {
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Equals:
-                                ok = left.equals(expr_->geometry_);
-                                break;
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Touches:
-                                ok = left.touches(expr_->geometry_);
-                                break;
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Overlaps:
-                                ok = left.overlaps(expr_->geometry_);
-                                break;
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Crosses:
-                                ok = left.crosses(expr_->geometry_);
-                                break;
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Contains:
-                                ok = left.contains(expr_->geometry_);
-                                break;
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Intersects:
-                                ok = left.intersects(expr_->geometry_);
-                                break;
-                            case proto::plan::
-                                GISFunctionFilterExpr_GISOp_Within:
-                                ok = left.within(expr_->geometry_);
-                                break;
-                            default:
-                                PanicInfo(NotImplemented,
-                                          "unknown GIS op : {}",
-                                          expr_->op_);
-                        }
-
-                        if (ok) {
-                            refined.set(pos);
-                        }
-                    }
-                }
-            } else {  // Growing segment
-                auto span = segment_->chunk_data<std::string>(field_id_, i);
-
-                const auto start_pos =
-                    segment_->num_rows_until_chunk(field_id_, i);
-                const auto chunk_rows = span.row_count();
-                const auto max_local = std::min<size_t>(
-                    chunk_rows,
-                    coarse.size() > start_pos ? coarse.size() - start_pos : 0);
-
-                for (size_t local = 0; local < max_local; ++local) {
-                    const size_t pos = start_pos + local;
-                    if (!coarse[pos])
-                        continue;
-
-                    const auto& wkb = span[local];
-                    Geometry left(wkb.data(), wkb.size(), false);
-                    bool ok = false;
-                    switch (expr_->op_) {
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Equals:
-                            ok = left.equals(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Touches:
-                            ok = left.touches(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Overlaps:
-                            ok = left.overlaps(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Crosses:
-                            ok = left.crosses(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Contains:
-                            ok = left.contains(expr_->geometry_);
-                            break;
-                        case proto::plan::
-                            GISFunctionFilterExpr_GISOp_Intersects:
-                            ok = left.intersects(expr_->geometry_);
-                            break;
-                        case proto::plan::GISFunctionFilterExpr_GISOp_Within:
-                            ok = left.within(expr_->geometry_);
-                            break;
-                        default:
-                            PanicInfo(NotImplemented,
-                                      "unknown GIS op : {}",
-                                      expr_->op_);
-                    }
-                    if (ok) {
-                        refined.set(pos);
-                    }
+                if (evaluate_geometry(left)) {
+                    refined.set(processed_size + start_pos);
                 }
             }
 
-            // Cache refined result for reuse by subsequent batches
-            cached_index_chunk_id_ = i;
-            cached_index_chunk_res_ = std::move(refined);
-            // No need to copy valid bitmap into member; use coarse_valid_cache_[i] directly later
+            processed_size += size;
+            if (processed_size >= real_batch_size) {
+                current_data_chunk_ = i;
+                current_data_chunk_pos_ = data_pos + size;
+                break;
+            }
         }
-
-        // 2) Append this chunk's cached results into current batch window
-        const auto& chunk_valid_ref = this->coarse_valid_global_;
-
-        auto size = ProcessIndexOneChunk(batch_result,
-                                         batch_valid,
-                                         i,
-                                         cached_index_chunk_res_,
-                                         chunk_valid_ref,
-                                         processed_rows);
-        if (processed_rows + size >= batch_size_) {
-            current_index_chunk_ = i;
-            current_index_chunk_pos_ = i == current_index_chunk_
-                                           ? current_index_chunk_pos_ + size
-                                           : size;
-            break;
-        }
-        processed_rows += size;
+        batch_result.append(refined, 0, real_batch_size);
+        batch_valid.append(tmp_valid, 0, real_batch_size);
     }
+
     return std::make_shared<ColumnVector>(std::move(batch_result),
                                           std::move(batch_valid));
 }

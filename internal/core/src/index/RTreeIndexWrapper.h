@@ -120,7 +120,7 @@ class RTreeIndexWrapper {
 
  private:
     // Boost.Geometry types and in-memory structures
-    using Point = bg::model::point<double, 2, bg::cs::geographic<bg::degree>>;
+    using Point = bg::model::point<double, 2, bg::cs::cartesian>;
     using Box = bg::model::box<Point>;
     using Value = std::pair<Box, int64_t>;  // (MBR, row_offset)
     using RTree = bgi::rtree<Value, bgi::rstar<16>>;

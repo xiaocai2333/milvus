@@ -9,18 +9,17 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
-#include "RTreeIndexWrapper.h"
-#include "RTreeIndexSerialization.h"
 #include "common/EasyAssert.h"
 #include "log/Log.h"
 #include "ogr_geometry.h"
 #include "pb/plan.pb.h"
 #include <filesystem>
 #include <fstream>
-#include <chrono>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include "common/FieldDataInterface.h"
+#include "RTreeIndexWrapper.h"
+#include "RTreeIndexSerialization.h"
 
 namespace milvus::index {
 

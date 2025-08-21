@@ -9,18 +9,14 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
-#include "index/RTreeIndex.h"
 #include <boost/filesystem.hpp>
-#include <algorithm>
-#include <cstring>
 #include "common/Slice.h"  // for INDEX_FILE_SLICE_META and Disassemble
 #include "common/EasyAssert.h"
-#include "common/FieldData.h"
 #include "log/Log.h"
-#include "index/Utils.h"
-#include "index/Meta.h"
 #include "storage/LocalChunkManagerSingleton.h"
 #include "pb/schema.pb.h"
+#include "index/Utils.h"
+#include "index/RTreeIndex.h"
 
 namespace milvus::index {
 
@@ -511,6 +507,70 @@ RTreeIndex<T>::BuildWithRawDataForUT(size_t n,
     this->total_num_rows_ = offset;
     LOG_WARN("BuildWithRawDataForUT total_num_rows_:{}", this->total_num_rows_);
     this->is_built_ = true;
+}
+
+template <typename T>
+void
+RTreeIndex<T>::BuildWithStrings(const std::vector<std::string>& geometries) {
+    AssertInfo(!geometries.empty(),
+               "BuildWithStrings expects non-empty geometries");
+    LOG_INFO("BuildWithStrings: building RTree index for {} geometries",
+             geometries.size());
+
+    this->InitForBuildIndex();
+
+    int64_t offset = 0;
+    for (const auto& wkb : geometries) {
+        if (!wkb.empty()) {
+            const uint8_t* data_ptr =
+                reinterpret_cast<const uint8_t*>(wkb.data());
+            this->wrapper_->add_geometry(data_ptr, wkb.size(), offset);
+        } else {
+            // Handle null geometry
+            this->null_offset_.push_back(offset);
+        }
+        offset++;
+    }
+
+    this->finish();
+    this->total_num_rows_ = offset;
+    this->is_built_ = true;
+
+    LOG_INFO("BuildWithStrings: completed building RTree index, total_rows: {}",
+             this->total_num_rows_);
+}
+
+template <typename T>
+void
+RTreeIndex<T>::AddGeometry(const std::string& wkb_data, int64_t row_offset) {
+    if (!wrapper_) {
+        // Initialize if not already done
+        this->InitForBuildIndex();
+    }
+
+    if (!wkb_data.empty()) {
+        const uint8_t* data_ptr =
+            reinterpret_cast<const uint8_t*>(wkb_data.data());
+        wrapper_->add_geometry(data_ptr, wkb_data.size(), row_offset);
+
+        // Update total row count
+        if (row_offset >= total_num_rows_) {
+            total_num_rows_ = row_offset + 1;
+        }
+
+        LOG_DEBUG("Added geometry at row offset {}", row_offset);
+    } else {
+        // Handle null geometry
+        folly::SharedMutexWritePriority::WriteHolder lock(mutex_);
+        null_offset_.push_back(static_cast<size_t>(row_offset));
+
+        // Update total row count
+        if (row_offset >= total_num_rows_) {
+            total_num_rows_ = row_offset + 1;
+        }
+
+        LOG_DEBUG("Added null geometry at row offset {}", row_offset);
+    }
 }
 
 // Explicit template instantiation for std::string as we only support string field for now.
