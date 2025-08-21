@@ -216,9 +216,9 @@ FieldDataImpl<Type, is_type_entire_row>::FillFieldData(
         case DataType::GEOMETRY: {
             auto geometry_array =
                 std::dynamic_pointer_cast<arrow::BinaryArray>(array);
-            std::vector<uint8_t> values(element_count);
+            std::vector<std::string> values(element_count);
             for (size_t index = 0; index < element_count; ++index) {
-                values[index] = *geometry_array->GetValue(index, 0);
+                values[index] = geometry_array->GetString(index);
             }
             if (nullable_) {
                 return FillFieldData(

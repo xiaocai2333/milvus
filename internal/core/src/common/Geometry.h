@@ -39,6 +39,17 @@ class Geometry {
         geometry_.reset(geometry);
     }
 
+    // lightweight constructor: parse wkb but **do not** copy it back to internal buffer,
+    // which avoids an extra malloc + memcpy. Suitable for short-lived, read-only objects
+    // where we only need spatial predicates (equals/intersects/…).
+    explicit Geometry(const void* wkb, size_t size, bool copy_wkb) {
+        OGRGeometry* geometry = nullptr;
+        OGRGeometryFactory::createFromWkb(wkb, nullptr, &geometry, size);
+        AssertInfo(geometry != nullptr,
+                   "failed to construct geometry from wkb data");
+        geometry_.reset(geometry);
+    }
+
     explicit Geometry(const char* wkt) {
         OGRGeometry* geometry = nullptr;
         OGRGeometryFactory::createFromWkt(wkt, nullptr, &geometry);
