@@ -333,14 +333,6 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
                                          cached_index_chunk_res_,
                                          chunk_valid_ref,
                                          processed_rows);
-        LOG_INFO(
-            "EvalForIndexSegment loop - i: {}, "
-            "processed_rows_before_append: {}, size_from_ProcessIndexOneChunk: "
-            "{}, batch_size_: {}",
-            i,
-            processed_rows,
-            size,
-            batch_size_);
         if (processed_rows + size >= batch_size_) {
             current_index_chunk_ = i;
             current_index_chunk_pos_ = i == current_index_chunk_
