@@ -5,10 +5,12 @@ go 1.24.4
 require (
 	github.com/milvus-io/milvus/client/v2 v2.5.4
 	github.com/milvus-io/milvus/pkg/v2 v2.5.7
+
+	github.com/peterstace/simplefeatures v0.54.0
 	github.com/quasilyte/go-ruleguard/dsl v0.3.22
 	github.com/samber/lo v1.27.0
 	github.com/stretchr/testify v1.10.0
-	// github.com/twpayne/go-geom v1.6.1
+	github.com/twpayne/go-geom v1.5.2
 	github.com/x448/float16 v0.8.4
 	go.uber.org/zap v1.27.0
 	google.golang.org/grpc v1.65.0
@@ -52,7 +54,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20240226150601-1dcf7310316a // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
-	github.com/milvus-io/milvus-proto/go-api/v2 v2.5.17 // indirect
+	github.com/milvus-io/milvus-proto/go-api/v2 v2.5.18-0.20250822062940-e34629021786 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/opencontainers/runtime-spec v1.0.2 // indirect

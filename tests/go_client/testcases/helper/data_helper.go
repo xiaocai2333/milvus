@@ -292,7 +292,7 @@ func GenNestedJSONExprKey(depth int, jsonField string) string {
 	return fmt.Sprintf("%s['%s']", jsonField, strings.Join(pathParts, "']['"))
 }
 
-func GenDefaultGeometryData(nb int, option GenDataOption) [][]byte {
+func GenDefaultGeometryData(nb int, option GenDataOption) []string {
 	const (
 		point           = "POINT (30.123 -10.456)"
 		linestring      = "LINESTRING (30.123 -10.456, 10.789 30.123, -40.567 40.890)"
@@ -302,10 +302,10 @@ func GenDefaultGeometryData(nb int, option GenDataOption) [][]byte {
 		multipolygon    = "MULTIPOLYGON (((30.123 -10.456, 40.678 40.890, 20.345 40.567, 10.123 20.456, 30.123 -10.456)),((15.123 5.456, 25.678 5.890, 25.345 15.567, 15.123 15.456, 15.123 5.456)))"
 	)
 	wktArray := [6]string{point, linestring, polygon, multipoint, multilinestring, multipolygon}
-	geometryValues := make([][]byte, 0, nb)
+	geometryValues := make([]string, 0, nb)
 	start := option.start
 	for i := start; i < start+nb; i++ {
-		geometryValues = append(geometryValues, []byte(wktArray[i%6]))
+		geometryValues = append(geometryValues, wktArray[i%6])
 	}
 	return geometryValues
 }
@@ -412,7 +412,7 @@ func GenColumnData(nb int, fieldType entity.FieldType, option GenDataOption) col
 
 	case entity.FieldTypeGeometry:
 		geometryValues := GenDefaultGeometryData(nb, option)
-		return column.NewColumnGeometryBytes(fieldName, geometryValues)
+		return column.NewColumnGeometryWKT(fieldName, geometryValues)
 
 	case entity.FieldTypeFloatVector:
 		vecFloatValues := make([][]float32, 0, nb)
