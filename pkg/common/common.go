@@ -152,6 +152,7 @@ const (
 	DimKey         = "dim"
 	MaxLengthKey   = "max_length"
 	MaxCapacityKey = "max_capacity"
+	SridKey        = "srid"
 
 	DropRatioBuildKey = "drop_ratio_build"
 
@@ -264,6 +265,15 @@ const (
 	TszSecond      string = "second"
 	TszMicrosecond string = "microsecond"
 )
+
+// Geometry field
+const (
+	GeometrySRIDKey     = "srid"
+	GeometryDefaultSRID = "4326"
+)
+
+// GeometrySupportedSRIDs defines the coordinate systems supported by Milvus
+var GeometrySupportedSRIDs = []int64{4326, 3857, 4087, 4490}
 
 func IsSystemField(fieldID int64) bool {
 	return fieldID < StartOfUserFieldID

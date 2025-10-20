@@ -511,6 +511,7 @@ type FieldSchema struct {
 	ElementTypeParams map[string]interface{} `json:"elementTypeParams"`
 	Nullable          bool                   `json:"nullable"`
 	DefaultValue      interface{}            `json:"defaultValue"`
+	Srid              *int32                 `json:"srid,omitempty"`
 }
 
 func (field *FieldSchema) GetProto(ctx context.Context) (*schemapb.FieldSchema, error) {
@@ -550,6 +551,19 @@ func (field *FieldSchema) GetProto(ctx context.Context) (*schemapb.FieldSchema, 
 		}
 		fieldSchema.TypeParams = append(fieldSchema.TypeParams, &commonpb.KeyValuePair{Key: key, Value: value})
 	}
+
+	// Handle SRID for Geometry type
+	if dataType == schemapb.DataType_Geometry {
+		srid := int32(4326) // default SRID
+		if field.Srid != nil {
+			srid = *field.Srid
+		}
+		fieldSchema.TypeParams = append(fieldSchema.TypeParams, &commonpb.KeyValuePair{
+			Key:   "srid",
+			Value: strconv.FormatInt(int64(srid), 10),
+		})
+	}
+
 	return fieldSchema, nil
 }
 

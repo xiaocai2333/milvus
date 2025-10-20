@@ -60,14 +60,20 @@ namespace exec {
 
 // Specialized macro for distance-based operations (ST_DWITHIN)
 #define GEOMETRY_EXECUTE_SUB_BATCH_WITH_COMPARISON_DISTANCE(_DataType, method) \
-    auto execute_sub_batch = [this](const _DataType* data,                     \
-                                    const bool* valid_data,                    \
-                                    const int32_t* offsets,                    \
-                                    const int32_t* segment_offsets,            \
-                                    const int size,                            \
-                                    TargetBitmapView res,                      \
-                                    TargetBitmapView valid_res,                \
-                                    const Geometry& right_source) {            \
+    /* Get SRID from field metadata */                                         \
+    std::string srid = "4326"; /* Default SRID */                              \
+    if (segment_->get_schema().operator[](field_id_).get_data_type() ==        \
+        DataType::GEOMETRY) {                                                  \
+        srid = segment_->get_schema().operator[](field_id_).get_srid();        \
+    }                                                                          \
+    auto execute_sub_batch = [this, srid](const _DataType* data,               \
+                                          const bool* valid_data,              \
+                                          const int32_t* offsets,              \
+                                          const int32_t* segment_offsets,      \
+                                          const int size,                      \
+                                          TargetBitmapView res,                \
+                                          TargetBitmapView valid_res,          \
+                                          const Geometry& right_source) {      \
         AssertInfo(segment_offsets != nullptr,                                 \
                    "segment_offsets should not be nullptr");                   \
         auto& geometry_cache =                                                 \
@@ -84,7 +90,8 @@ namespace exec {
                 geometry_cache.GetByOffsetUnsafe(absolute_offset);             \
             AssertInfo(cached_geometry != nullptr,                             \
                        "cached geometry is nullptr");                          \
-            res[i] = cached_geometry->method(right_source, expr_->distance_);  \
+            res[i] =                                                           \
+                cached_geometry->method(right_source, expr_->distance_, srid); \
         }                                                                      \
     };                                                                         \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(               \
@@ -285,8 +292,16 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
                 return left.intersects(query_geometry);
             case proto::plan::GISFunctionFilterExpr_GISOp_Within:
                 return left.within(query_geometry);
-            case proto::plan::GISFunctionFilterExpr_GISOp_DWithin:
-                return left.dwithin(query_geometry, expr_->distance_);
+            case proto::plan::GISFunctionFilterExpr_GISOp_DWithin: {
+                std::string srid = "4326";  // Default SRID
+                if (segment_->get_schema()
+                        .operator[](field_id_)
+                        .get_data_type() == DataType::GEOMETRY) {
+                    srid =
+                        segment_->get_schema().operator[](field_id_).get_srid();
+                }
+                return left.dwithin(query_geometry, expr_->distance_, srid);
+            }
             default:
                 ThrowInfo(NotImplemented, "unknown GIS op : {}", expr_->op_);
         }

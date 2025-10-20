@@ -36,6 +36,9 @@ const (
 	// TypeParamEnableMatch is the const for enable text match
 	TypeParamEnableMatch = `enable_match`
 
+	// TypeParamSrid is the const for geometry field SRID
+	TypeParamSrid = "srid"
+
 	// ClStrong strong consistency level
 	ClStrong ConsistencyLevel = ConsistencyLevel(commonpb.ConsistencyLevel_Strong)
 	// ClBounded bounded consistency level with default tolerance of 5 seconds

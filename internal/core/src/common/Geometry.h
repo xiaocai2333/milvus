@@ -160,9 +160,28 @@ class Geometry {
         return result == 1;
     }
 
-    // Distance within check using GEOS distance calculation
+    enum class CoordinateSystemType {
+        GEOGRAPHIC,  // 4326, 4490 - use spherical distance (degrees)
+        PROJECTED,   // 3857, 4087 - use Euclidean distance (meters)
+        UNKNOWN      // fallback to geographic
+    };
+
+    static CoordinateSystemType
+    GetCoordinateSystemType(const std::string& srid) {
+        if (srid == "4326" || srid == "4490") {
+            return CoordinateSystemType::GEOGRAPHIC;
+        } else if (srid == "3857" || srid == "4087") {
+            return CoordinateSystemType::PROJECTED;
+        } else {
+            return CoordinateSystemType::UNKNOWN;
+        }
+    }
+
+    // Distance within check using coordinate system-aware distance calculation
     bool
-    dwithin(const Geometry& other, double distance) const {
+    dwithin(const Geometry& other,
+            double distance,
+            const std::string& srid = "4326") const {
         if (!IsValid() || !other.IsValid()) {
             return false;
         }
@@ -174,34 +193,54 @@ class Geometry {
         // Ensure other geometry is a point
         AssertInfo(otherType == GEOS_POINT, "other geometry is not a point");
 
-        // For point-to-point, use Haversine formula for accuracy
-        if (thisType == GEOS_POINT) {
-            double thisX, thisY, otherX, otherY;
-            if (GEOSGeomGetX_r(ctx_, geometry_, &thisX) == 1 &&
-                GEOSGeomGetY_r(ctx_, geometry_, &thisY) == 1 &&
-                GEOSGeomGetX_r(ctx_, other.geometry_, &otherX) == 1 &&
-                GEOSGeomGetY_r(ctx_, other.geometry_, &otherY) == 1) {
-                double actual_distance =
-                    haversine_distance_meters(thisY, thisX, otherY, otherX);
-                return actual_distance <= distance;
+        CoordinateSystemType coordType = GetCoordinateSystemType(srid);
+
+        switch (coordType) {
+            case CoordinateSystemType::GEOGRAPHIC: {
+                if (thisType == GEOS_POINT) {
+                    double thisX, thisY, otherX, otherY;
+                    if (GEOSGeomGetX_r(ctx_, geometry_, &thisX) == 1 &&
+                        GEOSGeomGetY_r(ctx_, geometry_, &thisY) == 1 &&
+                        GEOSGeomGetX_r(ctx_, other.geometry_, &otherX) == 1 &&
+                        GEOSGeomGetY_r(ctx_, other.geometry_, &otherY) == 1) {
+                        double actual_distance = haversine_distance_meters(
+                            thisY, thisX, otherY, otherX);
+                        return actual_distance <= distance;
+                    }
+                } else {
+                    double geos_distance;
+                    if (GEOSDistance_r(
+                            ctx_, geometry_, other.geometry_, &geos_distance) ==
+                        1) {
+                        double query_lat, query_lon;
+                        if (GEOSGeomGetX_r(ctx_, other.geometry_, &query_lon) ==
+                                1 &&
+                            GEOSGeomGetY_r(ctx_, other.geometry_, &query_lat) ==
+                                1) {
+                            double distance_in_meters =
+                                degrees_to_meters_at_location(geos_distance,
+                                                              query_lat);
+                            return distance_in_meters <= distance;
+                        }
+                    }
+                }
+                break;
+            }
+            case CoordinateSystemType::PROJECTED: {
+                double geos_distance;
+                if (GEOSDistance_r(
+                        ctx_, geometry_, other.geometry_, &geos_distance) ==
+                    1) {
+                    return geos_distance <= distance;
+                }
+                break;
+            }
+            default: {
+                ThrowInfo(UnexpectedError,
+                          "Unsupported SRID '{}' for distance calculation",
+                          srid);
             }
         }
-
-        // For other geometry types, use GEOS distance (in degrees)
-        double geos_distance;
-        if (GEOSDistance_r(ctx_, geometry_, other.geometry_, &geos_distance) ==
-            1) {
-            // Get query point coordinates for conversion reference
-            double query_lat, query_lon;
-            if (GEOSGeomGetX_r(ctx_, other.geometry_, &query_lon) == 1 &&
-                GEOSGeomGetY_r(ctx_, other.geometry_, &query_lat) == 1) {
-                double distance_in_meters =
-                    degrees_to_meters_at_location(geos_distance, query_lat);
-                return distance_in_meters <= distance;
-            }
-        }
-
-        return false;
     }
 
  private:

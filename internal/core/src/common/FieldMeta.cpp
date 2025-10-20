@@ -175,6 +175,18 @@ FieldMeta::ParseFrom(const milvus::proto::schema::FieldSchema& schema_proto) {
                          default_value};
     }
 
+    // Handle geometry fields with SRID parameter
+    if (data_type == DataType::GEOMETRY) {
+        auto type_map = RepeatedKeyValToMap(schema_proto.type_params());
+        std::string srid = "4326";  // Default SRID
+        if (type_map.count("srid")) {
+            srid = type_map.at("srid");
+        }
+
+        return FieldMeta{
+            name, field_id, data_type, nullable, default_value, srid};
+    }
+
     return FieldMeta{name, field_id, data_type, nullable, default_value};
 }
 

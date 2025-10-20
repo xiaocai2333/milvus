@@ -22,7 +22,6 @@
 #include "common/Geometry.h"
 #include "common/Types.h"
 #include "geos_c.h"
-#include "log/Log.h"
 
 namespace milvus {
 namespace exec {
@@ -36,6 +35,9 @@ MakeCacheKey(int64_t segment_id, FieldId field_id) {
 // Vector-based Geometry cache that maintains original field data order
 class SimpleGeometryCache {
  public:
+    // Constructor
+    SimpleGeometryCache() = default;
+
     // Append WKB data during field loading
     void
     AppendData(GEOSContextHandle_t ctx, const char* wkb_data, size_t size) {

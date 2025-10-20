@@ -544,6 +544,44 @@ func validateElementType(dataType schemapb.DataType) error {
 	return fmt.Errorf("element type %s is not supported", dataType.String())
 }
 
+func validateGeometryField(field *schemapb.FieldSchema) error {
+	sridFound := false
+	for _, param := range field.GetTypeParams() {
+		if param.Key == common.SridKey {
+			sridFound = true
+			log.Info("srid found", zap.String("srid", param.Value), zap.String("field name", field.GetName()))
+			if err := validateSridValue(param.Value, field.GetName()); err != nil {
+				return err
+			}
+			break
+		}
+	}
+
+	if !sridFound {
+		field.TypeParams = append(field.TypeParams, &commonpb.KeyValuePair{
+			Key:   common.SridKey,
+			Value: "4326",
+		})
+	}
+
+	return nil
+}
+
+func validateSridValue(sridStr, fieldName string) error {
+	srid, err := strconv.ParseInt(sridStr, 10, 32)
+	if err != nil {
+		return fmt.Errorf("invalid SRID value for geometry field %s: %s, SRID must be a valid integer", fieldName, sridStr)
+	}
+
+	for _, supportedSrid := range common.GeometrySupportedSRIDs {
+		if srid == supportedSrid {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("unsupported SRID %d for field '%s'. currently supported SRIDs: %v", srid, fieldName, common.GeometrySupportedSRIDs)
+}
+
 func validateFieldType(schema *schemapb.CollectionSchema) error {
 	for _, field := range schema.GetFields() {
 		switch field.GetDataType() {
@@ -553,6 +591,10 @@ func validateFieldType(schema *schemapb.CollectionSchema) error {
 			return errors.New("data type None is not valid")
 		case schemapb.DataType_Array:
 			if err := validateElementType(field.GetElementType()); err != nil {
+				return err
+			}
+		case schemapb.DataType_Geometry:
+			if err := validateGeometryField(field); err != nil {
 				return err
 			}
 		}

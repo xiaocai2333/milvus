@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <map>
 
 #include "common/EasyAssert.h"
 #include "common/Consts.h"
@@ -53,6 +54,22 @@ class FieldMeta {
           nullable_(nullable),
           default_value_(std::move(default_value)) {
         Assert(!IsVectorDataType(type_));
+    }
+
+    // Constructor for geometry fields with SRID
+    FieldMeta(FieldName name,
+              FieldId id,
+              DataType type,
+              bool nullable,
+              std::optional<DefaultValueType> default_value,
+              const std::string& srid)
+        : name_(std::move(name)),
+          id_(id),
+          type_(type),
+          nullable_(nullable),
+          default_value_(std::move(default_value)),
+          geometry_info_(GeometryInfo{srid}) {
+        Assert(type_ == DataType::GEOMETRY);
     }
 
     FieldMeta(FieldName name,
@@ -201,6 +218,15 @@ class FieldMeta {
         return vector_info_->metric_type_;
     }
 
+    std::string
+    get_srid() const {
+        Assert(type_ == DataType::GEOMETRY);
+        if (geometry_info_.has_value()) {
+            return geometry_info_->srid;
+        }
+        return "4326";  // Default SRID
+    }
+
     const FieldName&
     get_name() const {
         return name_;
@@ -289,6 +315,9 @@ class FieldMeta {
         bool enable_analyzer;
         std::map<std::string, std::string> params;
     };
+    struct GeometryInfo {
+        std::string srid;
+    };
     FieldName name_;
     FieldId id_;
     DataType type_ = DataType::NONE;
@@ -297,6 +326,7 @@ class FieldMeta {
     std::optional<DefaultValueType> default_value_;
     std::optional<VectorInfo> vector_info_;
     std::optional<StringInfo> string_info_;
+    std::optional<GeometryInfo> geometry_info_;
     // for json stats, the main field id is the real field id
     // of collection schema, the field id is the json shredding field id
     int64_t main_field_id_ = INVALID_FIELD_ID;

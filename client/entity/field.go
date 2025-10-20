@@ -440,6 +440,32 @@ func (f *Field) WithEnableMatch(enable bool) *Field {
 	return f
 }
 
+func (f *Field) WithSrid(srid int32) *Field {
+	if f.TypeParams == nil {
+		f.TypeParams = make(map[string]string)
+	}
+	f.TypeParams[TypeParamSrid] = strconv.FormatInt(int64(srid), 10)
+	return f
+}
+
+func (f *Field) GetSrid() (int32, error) {
+	sridStr, has := f.TypeParams[TypeParamSrid]
+	if !has {
+		return 4326, nil // default SRID
+	}
+	srid, err := strconv.ParseInt(sridStr, 10, 32)
+	if err != nil {
+		return 4326, errors.Newf("field with bad format srid: %s", err.Error())
+	}
+	if srid < 0 {
+		return 4326, errors.Newf("SRID must be non-negative: %d", srid)
+	}
+	if srid > 2147483647 {
+		return 4326, errors.Newf("SRID value too large: %d, maximum allowed is 2147483647", srid)
+	}
+	return int32(srid), nil
+}
+
 // ReadProto parses FieldSchema
 func (f *Field) ReadProto(p *schemapb.FieldSchema) *Field {
 	f.ID = p.GetFieldID()
