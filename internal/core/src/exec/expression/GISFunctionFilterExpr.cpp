@@ -20,6 +20,36 @@
 namespace milvus {
 namespace exec {
 
+// Thread-local GEOS context manager for performance optimization
+// IMPORTANT: GEOS contexts are NOT thread-safe. Each thread must have its own context.
+// Using segment->get_ctx() would cause race conditions when multiple queries
+// access the same sealed segment concurrently.
+class ThreadLocalGEOSContext {
+ public:
+    static GEOSContextHandle_t
+    Get() {
+        thread_local ThreadLocalGEOSContext instance;
+        return instance.ctx_;
+    }
+
+ private:
+    ThreadLocalGEOSContext() : ctx_(GEOS_init_r()) {
+    }
+
+    ~ThreadLocalGEOSContext() {
+        if (ctx_ != nullptr) {
+            GEOS_finish_r(ctx_);
+        }
+    }
+
+    // Delete copy constructor and assignment operator
+    ThreadLocalGEOSContext(const ThreadLocalGEOSContext&) = delete;
+    ThreadLocalGEOSContext&
+    operator=(const ThreadLocalGEOSContext&) = delete;
+
+    GEOSContextHandle_t ctx_;
+};
+
 #define GEOMETRY_EXECUTE_SUB_BATCH_WITH_COMPARISON(_DataType, method)       \
     auto execute_sub_batch = [this](const _DataType* data,                  \
                                     const bool* valid_data,                 \
@@ -49,7 +79,7 @@ namespace exec {
                 res[i] = cached_geometry->method(right_source);             \
             }                                                               \
         } else {                                                            \
-            GEOSContextHandle_t ctx_ = GEOS_init_r();                       \
+            GEOSContextHandle_t ctx_ = ThreadLocalGEOSContext::Get();       \
             for (int i = 0; i < size; ++i) {                                \
                 if (valid_data != nullptr && !valid_data[i]) {              \
                     res[i] = valid_res[i] = false;                          \
@@ -58,7 +88,6 @@ namespace exec {
                 res[i] = Geometry(ctx_, data[i].data(), data[i].size())     \
                              .method(right_source);                         \
             }                                                               \
-            GEOS_finish_r(ctx_);                                            \
         }                                                                   \
     };                                                                      \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(            \
@@ -100,7 +129,7 @@ namespace exec {
                     cached_geometry->method(right_source, expr_->distance_);   \
             }                                                                  \
         } else {                                                               \
-            GEOSContextHandle_t ctx_ = GEOS_init_r();                          \
+            GEOSContextHandle_t ctx_ = ThreadLocalGEOSContext::Get();          \
             for (int i = 0; i < size; ++i) {                                   \
                 if (valid_data != nullptr && !valid_data[i]) {                 \
                     res[i] = valid_res[i] = false;                             \
@@ -109,7 +138,6 @@ namespace exec {
                 res[i] = Geometry(ctx_, data[i].data(), data[i].size())        \
                              .method(right_source, expr_->distance_);          \
             }                                                                  \
-            GEOS_finish_r(ctx_);                                               \
         }                                                                      \
     };                                                                         \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(               \
@@ -150,7 +178,7 @@ namespace exec {
                 res[i] = cached_geometry->method();                          \
             }                                                                \
         } else {                                                             \
-            GEOSContextHandle_t ctx_ = GEOS_init_r();                        \
+            GEOSContextHandle_t ctx_ = ThreadLocalGEOSContext::Get();        \
             for (int i = 0; i < size; ++i) {                                 \
                 if (valid_data != nullptr && !valid_data[i]) {               \
                     res[i] = valid_res[i] = false;                           \
@@ -159,7 +187,6 @@ namespace exec {
                 res[i] =                                                     \
                     Geometry(ctx_, data[i].data(), data[i].size()).method(); \
             }                                                                \
-            GEOS_finish_r(ctx_);                                             \
         }                                                                    \
     };                                                                       \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(             \
@@ -222,7 +249,7 @@ PhyGISFunctionFilterExpr::EvalForDataSegment() {
     }
 
     auto right_source =
-        Geometry(segment_->get_ctx(), expr_->geometry_wkt_.c_str());
+        Geometry(ThreadLocalGEOSContext::Get(), expr_->geometry_wkt_.c_str());
 
     // Choose underlying data type according to segment type to avoid element
     // size mismatch: Sealed segments and growing segments with mmap use std::string_view;
@@ -388,7 +415,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
     }
 
     Geometry query_geometry =
-        Geometry(segment_->get_ctx(), expr_->geometry_wkt_.c_str());
+        Geometry(ThreadLocalGEOSContext::Get(), expr_->geometry_wkt_.c_str());
 
     /* ------------------------------------------------------------------
      * Prefetch: if coarse results are not cached yet, run a single R-Tree
@@ -433,17 +460,19 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
         // For range_within operations, use bounding box for coarse filtering
         if (expr_->op_ == proto::plan::GISFunctionFilterExpr_GISOp_DWithin) {
             // Create bounding box geometry for index coarse filtering
-            Geometry bbox_geometry = create_bounding_box_for_dwithin(
-                segment_->get_ctx(), query_geometry, expr_->distance_);
+            Geometry bbox_geometry =
+                create_bounding_box_for_dwithin(ThreadLocalGEOSContext::Get(),
+                                                query_geometry,
+                                                expr_->distance_);
 
             ds->Set(milvus::index::MATCH_VALUE, bbox_geometry);
 
             // Note: Distance is not used for bounding box intersection query
         } else {
             // For other operations, use original geometry
-            ds->Set(
-                milvus::index::MATCH_VALUE,
-                Geometry(segment_->get_ctx(), expr_->geometry_wkt_.c_str()));
+            ds->Set(milvus::index::MATCH_VALUE,
+                    Geometry(ThreadLocalGEOSContext::Get(),
+                             expr_->geometry_wkt_.c_str()));
         }
 
         // Query segment-level R-Tree index **once** since each chunk shares the same index
@@ -521,7 +550,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
                         &data_array->scalars().geometry_data());
                 const auto& valid_data = data_array->valid_data();
 
-                GEOSContextHandle_t ctx = GEOS_init_r();
+                GEOSContextHandle_t ctx = ThreadLocalGEOSContext::Get();
                 for (size_t i = 0; i < hit_offsets.size(); ++i) {
                     const auto pos = hit_offsets[i];
 
@@ -538,7 +567,6 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment() {
                         refined.set(pos);
                     }
                 }
-                GEOS_finish_r(ctx);
             }
         };
 
