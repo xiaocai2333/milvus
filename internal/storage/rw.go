@@ -21,8 +21,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	sio "io"
+	"os"
 	"path"
 	"sort"
+	"strings"
 
 	"github.com/samber/lo"
 
@@ -37,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v2/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v2/util/merr"
 	"github.com/milvus-io/milvus/pkg/v2/util/typeutil"
+	"go.uber.org/zap"
 )
 
 const (
@@ -70,6 +73,7 @@ type rwOptions struct {
 	neededFields        typeutil.Set[int64]
 	useLoonFFI          bool
 	pluginContext       *indexcgopb.StoragePluginContext
+	prefetch            bool
 }
 
 func (o *rwOptions) validate() error {
@@ -127,6 +131,12 @@ func WithVersion(version int64) RwOption {
 func WithBufferSize(bufferSize int64) RwOption {
 	return func(options *rwOptions) {
 		options.bufferSize = bufferSize
+	}
+}
+
+func WithPrefetch() RwOption {
+	return func(options *rwOptions) {
+		options.prefetch = true
 	}
 }
 
@@ -249,6 +259,59 @@ func makeBlobsReader(ctx context.Context, binlogs []*datapb.FieldBinlog, downloa
 	}, nil
 }
 
+// prefetchRecordReader wraps a RecordReader and cleans up the temp directory on Close.
+type prefetchRecordReader struct {
+	inner   RecordReader
+	tempDir string
+}
+
+func (r *prefetchRecordReader) Next() (Record, error) {
+	return r.inner.Next()
+}
+
+func (r *prefetchRecordReader) Close() error {
+	err := r.inner.Close()
+	if r.tempDir != "" {
+		os.RemoveAll(r.tempDir)
+		log.Debug("cleaned up prefetch temp dir", zap.String("dir", r.tempDir))
+	}
+	return err
+}
+
+// prefetchToLocal downloads remote files to a local temp directory using the downloader.
+// The downloader (binlogIO.Download) downloads files in parallel internally.
+// Returns the local paths (same structure as input) and the temp directory for cleanup.
+func prefetchToLocal(ctx context.Context, downloader downloaderFn, paths [][]string) (localPaths [][]string, tempDir string, err error) {
+	baseDir := "/tmp/prefetchReader"
+	if err = os.MkdirAll(baseDir, 0o755); err != nil {
+		return nil, "", err
+	}
+	tempDir, err = os.MkdirTemp(baseDir, "")
+	if err != nil {
+		return nil, "", err
+	}
+
+	localPaths = make([][]string, len(paths))
+	for i, chunk := range paths {
+		contents, err := downloader(ctx, chunk)
+		if err != nil {
+			os.RemoveAll(tempDir)
+			return nil, "", err
+		}
+
+		localPaths[i] = make([]string, len(chunk))
+		for j, content := range contents {
+			localFile := path.Join(tempDir, fmt.Sprintf("chunk_%d_%d.parquet", i, j))
+			if err := os.WriteFile(localFile, content, 0o600); err != nil {
+				os.RemoveAll(tempDir)
+				return nil, "", err
+			}
+			localPaths[i][j] = localFile
+		}
+	}
+	return localPaths, tempDir, nil
+}
+
 func NewBinlogRecordReader(ctx context.Context, binlogs []*datapb.FieldBinlog, schema *schemapb.CollectionSchema, option ...RwOption) (rr RecordReader, err error) {
 	rwOptions := DefaultReaderOptions()
 	for _, opt := range option {
@@ -308,6 +371,36 @@ func NewBinlogRecordReader(ctx context.Context, binlogs []*datapb.FieldBinlog, s
 					logPath = path.Join(bucketName, logPath)
 				}
 				paths[j] = append(paths[j], logPath)
+			}
+		}
+		// Prefetch: download all files to local temp dir first, then read locally
+		if rwOptions.prefetch && rwOptions.downloader != nil {
+			// V2 LogPath may contain bucket prefix (bucket/rootPath/insert_log/...).
+			// The downloader (ChunkManager) handles bucket internally, so we must
+			// strip the bucket prefix before passing to the downloader.
+			downloadPaths := make([][]string, len(binlogLists[0]))
+			for _, fieldBinlogs := range binlogLists {
+				for j, binlog := range fieldBinlogs {
+					logPath := binlog.GetLogPath()
+					if bucketName != "" && rwOptions.storageConfig.StorageType != "local" {
+						logPath = strings.TrimPrefix(logPath, bucketName+"/")
+					}
+					downloadPaths[j] = append(downloadPaths[j], logPath)
+				}
+			}
+			log.Ctx(ctx).Debug("prefetch: downloading V2 binlog files to local",
+				zap.Int("chunks", len(downloadPaths)),
+				zap.Int("filesPerChunk", len(downloadPaths[0])))
+			localPaths, tempDir, prefetchErr := prefetchToLocal(ctx, rwOptions.downloader, downloadPaths)
+			if prefetchErr != nil {
+				log.Ctx(ctx).Warn("prefetch failed, falling back to remote read", zap.Error(prefetchErr))
+			} else {
+				localStorageConfig := &indexpb.StorageConfig{
+					StorageType: "local",
+					RootPath:    "/",
+				}
+				innerRR := newIterativePackedRecordReader(localPaths, schema, rwOptions.bufferSize, localStorageConfig, nil)
+				return &prefetchRecordReader{inner: innerRR, tempDir: tempDir}, nil
 			}
 		}
 		// FIXME: add needed fields support
