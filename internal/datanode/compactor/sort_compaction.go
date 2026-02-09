@@ -149,6 +149,7 @@ func (t *sortCompactionTask) preCompact() error {
 		zap.Int64("partitionID", t.partitionID),
 		zap.Int64("segmentID", t.segmentID),
 		zap.Int64("storageVersion", t.storageVersion),
+		zap.Int64("segmentStorageVersion", t.segmentStorageVersion),
 		zap.Bool("useLoonFFI", t.useLoonFFI),
 		zap.Any("compactionParams", t.compactionParams),
 	)
@@ -256,6 +257,7 @@ func (t *sortCompactionTask) sortSegment(ctx context.Context) (*datapb.Compactio
 			storage.WithDownloader(t.binlogIO.Download),
 			storage.WithStorageConfig(t.compactionParams.StorageConfig),
 			storage.WithCollectionID(t.collectionID),
+			storage.WithPrefetch(),
 		)
 	}
 	if err != nil {

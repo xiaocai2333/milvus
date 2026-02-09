@@ -20,6 +20,8 @@ import (
 	"context"
 	"io"
 	"math"
+	"os"
+	"path"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -640,6 +642,17 @@ func TestRwOptionValidate(t *testing.T) {
 			},
 			expectError: false, // V2 uses storageConfig, uploader not required
 		},
+		{
+			tag: "v1_with_prefetch",
+			input: &rwOptions{
+				version:       StorageV1,
+				storageConfig: &indexpb.StorageConfig{},
+				op:            OpRead,
+				downloader:    func(ctx context.Context, paths []string) ([][]byte, error) { return nil, nil },
+				prefetch:      true,
+			},
+			expectError: false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -652,4 +665,180 @@ func TestRwOptionValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_prepareBinlogChunks(t *testing.T) {
+	t.Run("full binlogs", func(t *testing.T) {
+		binlogs := []*datapb.FieldBinlog{
+			{
+				FieldID: 102,
+				Binlogs: []*datapb.Binlog{
+					{LogPath: "x/1/1/1/102/3"},
+				},
+			},
+			{
+				FieldID: 100,
+				Binlogs: []*datapb.Binlog{
+					{LogPath: "x/1/1/1/100/1"},
+				},
+			},
+			{
+				FieldID: 101,
+				Binlogs: []*datapb.Binlog{
+					{LogPath: "x/1/1/1/101/2"},
+				},
+			},
+		}
+		chunks := prepareBinlogChunks(binlogs)
+		assert.Equal(t, [][]string{
+			{"x/1/1/1/100/1", "x/1/1/1/101/2", "x/1/1/1/102/3"},
+		}, chunks)
+	})
+
+	t.Run("added field (uneven binlogs)", func(t *testing.T) {
+		binlogs := []*datapb.FieldBinlog{
+			{
+				FieldID: 100,
+				Binlogs: []*datapb.Binlog{
+					{LogPath: "x/1/1/1/100/1"},
+					{LogPath: "x/1/1/1/100/3"},
+				},
+			},
+			{
+				FieldID: 101,
+				Binlogs: []*datapb.Binlog{
+					{LogPath: "x/1/1/1/101/2"},
+					{LogPath: "x/1/1/1/101/4"},
+				},
+			},
+			{
+				FieldID: 102,
+				Binlogs: []*datapb.Binlog{
+					{LogPath: "x/1/1/1/102/5"},
+				},
+			},
+		}
+		chunks := prepareBinlogChunks(binlogs)
+		assert.Equal(t, [][]string{
+			{"x/1/1/1/100/1", "x/1/1/1/101/2"},
+			{"x/1/1/1/100/3", "x/1/1/1/101/4", "x/1/1/1/102/5"},
+		}, chunks)
+	})
+}
+
+func Test_prefetchToLocal(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("downloads files to temp dir", func(t *testing.T) {
+		downloader := func(ctx context.Context, paths []string) ([][]byte, error) {
+			return lo.Map(paths, func(p string, _ int) []byte {
+				return []byte("data-" + p)
+			}), nil
+		}
+		paths := [][]string{
+			{"file1.parquet", "file2.parquet"},
+			{"file3.parquet"},
+		}
+		localPaths, tempDir, err := prefetchToLocal(ctx, downloader, paths)
+		assert.NoError(t, err)
+		assert.DirExists(t, tempDir)
+		assert.Contains(t, tempDir, "/tmp/prefetchReader/")
+		defer os.RemoveAll(tempDir)
+
+		// Verify structure matches input
+		assert.Equal(t, len(paths), len(localPaths))
+		assert.Equal(t, 2, len(localPaths[0]))
+		assert.Equal(t, 1, len(localPaths[1]))
+
+		// Verify paths are absolute (under tempDir)
+		assert.Equal(t, path.Join(tempDir, "chunk_0_0.parquet"), localPaths[0][0])
+		assert.Equal(t, path.Join(tempDir, "chunk_1_0.parquet"), localPaths[1][0])
+
+		// Verify file contents
+		content, err := os.ReadFile(localPaths[0][0])
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("data-file1.parquet"), content)
+
+		content, err = os.ReadFile(localPaths[1][0])
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("data-file3.parquet"), content)
+	})
+
+	t.Run("cleans up on download error", func(t *testing.T) {
+		callCount := 0
+		downloader := func(ctx context.Context, paths []string) ([][]byte, error) {
+			callCount++
+			if callCount > 1 {
+				return nil, assert.AnError
+			}
+			return lo.Map(paths, func(p string, _ int) []byte {
+				return []byte("data")
+			}), nil
+		}
+		paths := [][]string{
+			{"file1.parquet"},
+			{"file2.parquet"},
+		}
+		_, _, err := prefetchToLocal(ctx, downloader, paths)
+		assert.Error(t, err)
+		// Temp dir should have been cleaned up (we can't easily check since it's removed)
+	})
+}
+
+// mockRecordReader is a simple mock for RecordReader used in prefetchRecordReader tests.
+type mockRecordReader struct {
+	closed bool
+}
+
+func (m *mockRecordReader) Next() (Record, error) {
+	return nil, io.EOF
+}
+
+func (m *mockRecordReader) Close() error {
+	m.closed = true
+	return nil
+}
+
+func Test_prefetchRecordReader(t *testing.T) {
+	t.Run("close cleans up temp dir", func(t *testing.T) {
+		tempDir, err := os.MkdirTemp("", "test-prefetch-*")
+		assert.NoError(t, err)
+		// Verify dir exists
+		_, err = os.Stat(tempDir)
+		assert.NoError(t, err)
+
+		inner := &mockRecordReader{}
+		reader := &prefetchRecordReader{inner: inner, tempDir: tempDir}
+
+		err = reader.Close()
+		assert.NoError(t, err)
+		assert.True(t, inner.closed)
+
+		// Verify temp dir was removed
+		_, err = os.Stat(tempDir)
+		assert.True(t, os.IsNotExist(err))
+	})
+
+	t.Run("close without temp dir", func(t *testing.T) {
+		inner := &mockRecordReader{}
+		reader := &prefetchRecordReader{inner: inner, tempDir: ""}
+		err := reader.Close()
+		assert.NoError(t, err)
+		assert.True(t, inner.closed)
+	})
+
+	t.Run("next delegates to inner", func(t *testing.T) {
+		inner := &mockRecordReader{}
+		reader := &prefetchRecordReader{inner: inner}
+		_, err := reader.Next()
+		assert.Equal(t, io.EOF, err)
+	})
+}
+
+func Test_WithPrefetch(t *testing.T) {
+	opts := DefaultReaderOptions()
+	assert.False(t, opts.prefetch)
+
+	WithPrefetch()(opts)
+	assert.True(t, opts.prefetch)
 }
