@@ -1594,6 +1594,19 @@ GetFieldDatasFromManifest(
         }
 
         auto raw_column = batch->GetColumnByName(column_name);
+
+        // External files may store dense vectors as List<Float> or
+        // FixedSizeList<Float>, but Milvus expects FixedSizeBinary.
+        // Normalize before filling field data.
+        if (IsVectorDataType(data_type.value()) &&
+            !IsSparseFloatVectorDataType(data_type.value()) &&
+            !IsVectorArrayDataType(data_type.value()) &&
+            raw_column->type_id() != arrow::Type::FIXED_SIZE_BINARY) {
+            auto normalized = NormalizeVectorArraysToFixedSizeBinary(
+                {raw_column}, data_type.value(), dim);
+            raw_column = normalized[0];
+        }
+
         auto chunked_array = std::make_shared<arrow::ChunkedArray>(raw_column);
         auto field_data = CreateFieldData(data_type.value(),
                                           element_type.value(),
