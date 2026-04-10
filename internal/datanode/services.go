@@ -716,6 +716,10 @@ func (node *DataNode) CreateTask(ctx context.Context, request *workerpb.CreateTa
 	if err != nil {
 		return merr.Status(err), nil
 	}
+	clusterID, err := properties.GetClusterID()
+	if err != nil {
+		return merr.Status(err), nil
+	}
 	switch taskType {
 	case taskcommon.PreImport:
 		req := &datapb.PreImportRequest{}
@@ -776,7 +780,7 @@ func (node *DataNode) CreateTask(ctx context.Context, request *workerpb.CreateTa
 		if err := proto.Unmarshal(request.GetPayload(), req); err != nil {
 			return merr.Status(err), nil
 		}
-		return node.createExternalCollectionTask(ctx, req)
+		return node.createExternalCollectionTask(ctx, req, clusterID)
 	case taskcommon.CopySegment:
 		req := &datapb.CopySegmentRequest{}
 		if err := proto.Unmarshal(request.GetPayload(), req); err != nil {
@@ -1015,9 +1019,10 @@ func (node *DataNode) SyncFileResource(ctx context.Context, req *internalpb.Sync
 
 // createExternalCollectionTask handles updating external collection segments
 // This submits the task to the external collection manager for async execution
-func (node *DataNode) createExternalCollectionTask(ctx context.Context, req *datapb.UpdateExternalCollectionRequest) (*commonpb.Status, error) {
+func (node *DataNode) createExternalCollectionTask(ctx context.Context, req *datapb.UpdateExternalCollectionRequest, clusterID string) (*commonpb.Status, error) {
 	log := log.Ctx(ctx).With(
 		zap.Int64("taskID", req.GetTaskID()),
+		zap.String("clusterID", clusterID),
 		zap.Int64("collectionID", req.GetCollectionID()),
 	)
 
@@ -1028,8 +1033,6 @@ func (node *DataNode) createExternalCollectionTask(ctx context.Context, req *dat
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return merr.Status(err), nil
 	}
-
-	clusterID := paramtable.Get().CommonCfg.ClusterPrefix.GetValue()
 
 	// Submit task to external collection manager
 	// The task will execute asynchronously in the manager's goroutine pool
