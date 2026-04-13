@@ -197,6 +197,16 @@ SearchOnSealedColumn(const Schema& schema,
 
     CheckBruteForceSearchParam(field, search_info);
 
+    // Proxy columns (external tables) defer BuildValidRowIds to avoid S3 fetches
+    // during load when warmup=disable. Ensure the mapping is built before search:
+    // an unbuilt mapping is identity (every logical offset treated as valid), so
+    // chunk_size falls back to total_rows instead of valid_count. With compact
+    // (valid-rows-only) chunk buffers this causes GetInverseVecNorms to read
+    // total_rows * dim elements from a buffer sized valid_count * dim -> OOB.
+    if (column->IsNullable() && !column->GetOffsetMapping().IsEnabled()) {
+        column->BuildValidRowIds(op_context);
+    }
+
     // Check for nullable vector field with all null values - must be done before creating iterators
     const auto& offset_mapping = column->GetOffsetMapping();
     TargetBitmap transformed_bitset;

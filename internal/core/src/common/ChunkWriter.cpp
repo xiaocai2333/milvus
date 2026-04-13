@@ -288,7 +288,7 @@ ArrayChunkWriter::write_to_target(const arrow::ArrayVector& array_vec,
             auto str = array->GetView(i);
             ScalarFieldProto scalar_array;
             scalar_array.ParseFromArray(str.data(), str.size());
-            arrays.emplace_back(scalar_array);
+            arrays.emplace_back(Array(scalar_array));
         }
         if (nullable_) {
             null_bitmaps.emplace_back(
@@ -469,7 +469,7 @@ void
 SparseFloatVectorChunkWriter::write_to_target(
     const arrow::ArrayVector& array_vec,
     const std::shared_ptr<ChunkTarget>& target) {
-    std::vector<std::string_view> strs;
+    std::vector<std::string> strs;
     strs.reserve(row_nums_);
     std::vector<std::tuple<const uint8_t*, int64_t, int64_t>> null_bitmaps;
 
@@ -892,11 +892,8 @@ create_group_chunk(const std::vector<FieldId>& field_ids,
                             ~(ChunkTarget::ALIGNED_SIZE - 1);
         auto padding_size = aligned_size - written;
         if (padding_size > 0) {
-            // Use a stack buffer to avoid heap allocation for padding zeros.
-            // ChunkTarget::ALIGNED_SIZE is typically small (e.g. 64/512),
-            // so padding_size is always < ALIGNED_SIZE.
-            char padding[ChunkTarget::ALIGNED_SIZE] = {};
-            target->write(padding, padding_size);
+            std::string padding(padding_size, 0);
+            target->write(padding.data(), padding_size);
         }
     }
 
@@ -914,11 +911,11 @@ create_group_chunk(const std::vector<FieldId>& field_ids,
 
     std::unordered_map<FieldId, std::shared_ptr<Chunk>> chunks;
     for (size_t i = 0; i < field_ids.size(); i++) {
-        chunks[field_ids[i]] = make_chunk(field_metas[i],
-                                          final_row_nums,
-                                          data + chunk_offsets[i],
-                                          chunk_sizes[i],
-                                          chunk_mmap_guard);
+        chunks[field_ids[i]] = std::move(make_chunk(field_metas[i],
+                                                    final_row_nums,
+                                                    data + chunk_offsets[i],
+                                                    chunk_sizes[i],
+                                                    chunk_mmap_guard));
         LOG_INFO(
             "created chunk for field {} with chunk offset: {}, chunk "
             "size: {}, file path: {}",
@@ -934,9 +931,9 @@ create_group_chunk(const std::vector<FieldId>& field_ids,
 arrow::ArrayVector
 read_single_column_batches(std::shared_ptr<arrow::RecordBatchReader> reader) {
     arrow::ArrayVector array_vec;
-    for (const auto& batch : *reader) {
+    for (auto batch : *reader) {
         auto batch_data = batch.ValueOrDie();
-        array_vec.push_back(batch_data->column(0));
+        array_vec.push_back(std::move(batch_data->column(0)));
     }
     return array_vec;
 }
