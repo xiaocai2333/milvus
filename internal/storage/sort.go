@@ -30,6 +30,60 @@ import (
 	"github.com/milvus-io/milvus/pkg/v2/util/merr"
 )
 
+func logBatchOutOfOrder(component string, r Record, sortFieldIDs []int64, debug *BatchOrderDebugContext) {
+	if len(sortFieldIDs) == 0 || r == nil || r.Len() <= 1 {
+		return
+	}
+
+	fid := sortFieldIDs[0]
+	baseFields := []zap.Field{
+		zap.String("component", component),
+		zap.Int64("sortFieldID", fid),
+		zap.Int("batchLen", r.Len()),
+	}
+	if debug != nil {
+		baseFields = append(baseFields,
+			zap.Int64("planID", debug.PlanID),
+			zap.Int64("collectionID", debug.CollectionID),
+			zap.Int64("partitionID", debug.PartitionID),
+			zap.Int64("segmentID", debug.SegmentID),
+			zap.Int("readerIndex", debug.ReaderIndex),
+			zap.String("manifestPath", debug.ManifestPath),
+			zap.Int64s("inputSegmentIDs", debug.InputSegmentIDs),
+			zap.Int64s("sortFieldIDs", debug.SortFieldIDs),
+		)
+	}
+
+	switch col := r.Column(fid).(type) {
+	case *array.Int64:
+		for j := 1; j < r.Len(); j++ {
+			if col.Value(j) < col.Value(j-1) {
+				fields := append([]zap.Field{}, baseFields...)
+				fields = append(fields,
+					zap.Int("row", j),
+					zap.Int64("prev", col.Value(j-1)),
+					zap.Int64("curr", col.Value(j)),
+				)
+				log.Error("batch not sorted by sort key", fields...)
+				return
+			}
+		}
+	case *array.String:
+		for j := 1; j < r.Len(); j++ {
+			if col.Value(j) < col.Value(j-1) {
+				fields := append([]zap.Field{}, baseFields...)
+				fields = append(fields,
+					zap.Int("row", j),
+					zap.String("prev", col.Value(j-1)),
+					zap.String("curr", col.Value(j)),
+				)
+				log.Error("batch not sorted by sort key", fields...)
+				return
+			}
+		}
+	}
+}
+
 // SortTimings holds phase-level timing information from the Sort function.
 type SortTimings struct {
 	ReadCost   time.Duration
@@ -41,6 +95,7 @@ type SortTimings struct {
 
 func Sort(batchSize uint64, schema *schemapb.CollectionSchema, rr []RecordReader,
 	rw RecordWriter, predicate func(r Record, ri, i int) bool, sortByFieldIDs []int64,
+	debugContext ...*BatchOrderDebugContext,
 ) (int, *SortTimings, error) {
 	records := make([]Record, 0)
 
@@ -138,11 +193,16 @@ func Sort(batchSize uint64, schema *schemapb.CollectionSchema, rr []RecordReader
 	sortCost := time.Since(phaseStart)
 
 	phaseStart = time.Now()
+	var debug *BatchOrderDebugContext
+	if len(debugContext) > 0 {
+		debug = debugContext[0]
+	}
 	rb := NewRecordBuilder(schema)
 	writeRecord := func() error {
 		rec := rb.Build()
 		defer rec.Release()
 		if rec.Len() > 0 {
+			logBatchOutOfOrder("Sort output validation", rec, sortByFieldIDs, debug)
 			return rw.Write(rec)
 		}
 		return nil
@@ -227,6 +287,7 @@ func NewPriorityQueue[T any](less func(x, y *T) bool) *PriorityQueue[T] {
 
 func MergeSort(batchSize uint64, schema *schemapb.CollectionSchema, rr []RecordReader,
 	rw RecordWriter, predicate func(r Record, ri, i int) bool, sortedByFieldIDs []int64,
+	debugContexts ...*BatchOrderDebugContext,
 ) (numRows int, err error) {
 	// Fast path: no readers provided
 	if len(rr) == 0 {
@@ -239,6 +300,12 @@ func MergeSort(batchSize uint64, schema *schemapb.CollectionSchema, rr []RecordR
 	}
 
 	recs := make([]Record, len(rr))
+	getDebugContext := func(i int) *BatchOrderDebugContext {
+		if i < len(debugContexts) {
+			return debugContexts[i]
+		}
+		return nil
+	}
 	advanceRecord := func(i int) error {
 		rec, err := rr[i].Next()
 		recs[i] = rec // assign nil if err
@@ -329,36 +396,12 @@ func MergeSort(batchSize uint64, schema *schemapb.CollectionSchema, rr []RecordR
 			return enqueueAll(ri)
 		}
 		remainingCounts[ri] = count
-
-		// Warn if the batch is not sorted by the first sort field.
-		// MergeSort assumes each batch is pre-sorted; unsorted batches produce
-		// incorrect output order (though the remainingCounts fix prevents panics).
-		if len(sortedByFieldIDs) > 0 {
-			fid := sortedByFieldIDs[0]
-			switch col := r.Column(fid).(type) {
-			case *array.Int64:
-				for j := 1; j < r.Len(); j++ {
-					if col.Value(j) < col.Value(j-1) {
-						log.Error("MergeSort: batch not sorted by sort key, output order may be incorrect",
-							zap.Int("ri", ri), zap.Int("row", j),
-							zap.Int64("prev", col.Value(j-1)), zap.Int64("curr", col.Value(j)),
-							zap.Int("batchLen", r.Len()))
-						break
-					}
-				}
-			case *array.String:
-				for j := 1; j < r.Len(); j++ {
-					if col.Value(j) < col.Value(j-1) {
-						log.Error("MergeSort: batch not sorted by sort key, output order may be incorrect",
-							zap.Int("ri", ri), zap.Int("row", j),
-							zap.String("prev", col.Value(j-1)), zap.String("curr", col.Value(j)),
-							zap.Int("batchLen", r.Len()))
-						break
-					}
-				}
-			}
+		debug := getDebugContext(ri)
+		if debug == nil {
+			debug = &BatchOrderDebugContext{}
 		}
-
+		debug.ReaderIndex = ri
+		logBatchOutOfOrder("MergeSort input validation", r, sortedByFieldIDs, debug)
 		return nil
 	}
 

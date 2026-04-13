@@ -60,6 +60,18 @@ const (
 	OpRead  rwOp = 1
 )
 
+type BatchOrderDebugContext struct {
+	Component       string
+	PlanID          int64
+	CollectionID    int64
+	PartitionID     int64
+	SegmentID       int64
+	InputSegmentIDs []int64
+	ReaderIndex     int
+	ManifestPath    string
+	SortFieldIDs    []int64
+}
+
 type rwOptions struct {
 	version             int64
 	op                  rwOp
@@ -73,6 +85,7 @@ type rwOptions struct {
 	neededFields        typeutil.Set[int64]
 	useLoonFFI          bool
 	pluginContext       *indexcgopb.StoragePluginContext
+	debugContext        *BatchOrderDebugContext
 }
 
 func (o *rwOptions) validate() error {
@@ -184,6 +197,12 @@ func WithUseLoonFFI(useLoonFFI bool) RwOption {
 func WithPluginContext(pluginContext *indexcgopb.StoragePluginContext) RwOption {
 	return func(options *rwOptions) {
 		options.pluginContext = pluginContext
+	}
+}
+
+func WithBatchOrderDebugContext(debugContext *BatchOrderDebugContext) RwOption {
+	return func(options *rwOptions) {
+		options.debugContext = debugContext
 	}
 }
 
@@ -354,7 +373,14 @@ func NewManifestRecordReader(ctx context.Context, manifestPath string, schema *s
 			}
 		}
 	}
-	return NewRecordReaderFromManifest(manifestPath, schema, rwOptions.bufferSize, rwOptions.storageConfig, pluginContext)
+	rr, err = NewRecordReaderFromManifest(manifestPath, schema, rwOptions.bufferSize, rwOptions.storageConfig, pluginContext)
+	if err != nil {
+		return nil, err
+	}
+	if mr, ok := rr.(*ManifestReader); ok {
+		mr.debugContext = rwOptions.debugContext
+	}
+	return rr, nil
 }
 
 func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segmentID UniqueID,

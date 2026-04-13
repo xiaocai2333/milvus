@@ -154,6 +154,7 @@ type ManifestReader struct {
 	field2Col            map[FieldID]int
 	storageConfig        *indexpb.StorageConfig
 	storagePluginContext *indexcgopb.StoragePluginContext
+	debugContext         *BatchOrderDebugContext
 
 	neededColumns []string
 }
@@ -262,7 +263,13 @@ func (mr ManifestReader) Next() (Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewSimpleArrowRecord(rec, mr.field2Col), nil
+	r := NewSimpleArrowRecord(rec, mr.field2Col)
+	if mr.debugContext != nil {
+		debug := *mr.debugContext
+		debug.ManifestPath = mr.manifest
+		logBatchOutOfOrder("ManifestReader input validation", r, debug.SortFieldIDs, &debug)
+	}
+	return r, nil
 }
 
 func (mr ManifestReader) Close() error {

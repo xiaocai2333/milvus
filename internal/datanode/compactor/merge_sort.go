@@ -62,8 +62,24 @@ func mergeSortMultipleSegments(ctx context.Context,
 
 	segmentReaders := make([]storage.RecordReader, len(binlogs))
 	segmentFilters := make([]compaction.EntityFilter, len(binlogs))
+	debugContexts := make([]*storage.BatchOrderDebugContext, len(binlogs))
+	inputSegmentIDs := make([]int64, 0, len(binlogs))
+	for _, s := range binlogs {
+		inputSegmentIDs = append(inputSegmentIDs, s.GetSegmentID())
+	}
 	for i, s := range binlogs {
 		var reader storage.RecordReader
+		debugContexts[i] = &storage.BatchOrderDebugContext{
+			Component:       "MergeSort",
+			PlanID:          plan.GetPlanID(),
+			CollectionID:    collectionID,
+			PartitionID:     partitionID,
+			SegmentID:       s.GetSegmentID(),
+			InputSegmentIDs: inputSegmentIDs,
+			ReaderIndex:     i,
+			ManifestPath:    s.GetManifest(),
+			SortFieldIDs:    sortByFields,
+		}
 		if s.GetManifest() != "" {
 			reader, err = storage.NewManifestRecordReader(ctx,
 				s.GetManifest(),
@@ -72,6 +88,7 @@ func mergeSortMultipleSegments(ctx context.Context,
 				storage.WithDownloader(binlogIO.Download),
 				storage.WithVersion(s.StorageVersion),
 				storage.WithStorageConfig(compactionParams.StorageConfig),
+				storage.WithBatchOrderDebugContext(debugContexts[i]),
 			)
 		} else {
 			reader, err = storage.NewBinlogRecordReader(ctx,
@@ -134,7 +151,7 @@ func mergeSortMultipleSegments(ctx context.Context,
 		log.Warn("compaction only support int64 and varchar pk field")
 	}
 
-	if _, err = storage.MergeSort(compactionParams.BinLogMaxSize, plan.GetSchema(), segmentReaders, writer, predicate, sortByFields); err != nil {
+	if _, err = storage.MergeSort(compactionParams.BinLogMaxSize, plan.GetSchema(), segmentReaders, writer, predicate, sortByFields, debugContexts...); err != nil {
 		writer.Close()
 		return nil, err
 	}
