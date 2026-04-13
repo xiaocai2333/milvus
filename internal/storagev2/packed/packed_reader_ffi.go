@@ -199,7 +199,11 @@ func GetManifestHandle(manifestPath string, storageConfig *indexpb.StorageConfig
 	if err != nil {
 		return cManifestHandle, err
 	}
-	log.Info("GetManifest", zap.String("manifestPath", manifestPath), zap.String("basePath", basePath), zap.Int64("version", version))
+	log.Info("GetManifest",
+		zap.String("manifestPath", manifestPath),
+		zap.String("basePath", basePath),
+		zap.Int64("version", version),
+		zap.String("manifestFile", fmt.Sprintf("%s/_metadata/manifest-%d.avro", basePath, version)))
 
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
 	if err != nil {

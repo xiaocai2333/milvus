@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -46,7 +47,6 @@ type SegmentFiles struct {
 	DeltaBinlogs      []string
 	StatsBinlogs      []string
 	Bm25Binlogs       []string
-	VectorScalarIndex []string
 	TextIndex         []string
 	JSONKeyIndex      []string
 	JSONStats         []string
@@ -118,6 +118,12 @@ func transformManifestPath(
 	}
 
 	targetManifestPath := packed.MarshalManifestPath(targetBasePath, version)
+	log.Info("transform manifest path for copied segment",
+		zap.String("sourceManifestPath", manifestPath),
+		zap.String("sourceBasePath", basePath),
+		zap.Int64("sourceManifestVersion", version),
+		zap.String("targetBasePath", targetBasePath),
+		zap.String("targetManifestPath", targetManifestPath))
 	return targetManifestPath, nil
 }
 
@@ -193,6 +199,35 @@ func extractJSONFiles(jsonIndexInfos map[int64]*datapb.JsonKeyStats) ([]string, 
 	return jsonKeyFiles, jsonStatsFiles
 }
 
+func extractManifestMetadataFiles(basePath string, files []string) []string {
+	prefix := basePath + "/_metadata/manifest-"
+	result := make([]string, 0)
+	for _, f := range files {
+		if strings.HasPrefix(f, prefix) && strings.HasSuffix(f, ".avro") {
+			result = append(result, f)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func extractManifestVersions(files []string) []int64 {
+	versions := make([]int64, 0, len(files))
+	for _, f := range files {
+		idx := strings.LastIndex(f, "manifest-")
+		if idx < 0 {
+			continue
+		}
+		verStr := strings.TrimSuffix(f[idx+len("manifest-"):], ".avro")
+		ver, err := strconv.ParseInt(verStr, 10, 64)
+		if err == nil {
+			versions = append(versions, ver)
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	return versions
+}
+
 // collectSegmentFiles collects all files to copy, organized by type.
 //
 // For InsertBinlogs, the decision is based on storage_version:
@@ -216,7 +251,7 @@ func collectSegmentFiles(
 				source.GetStorageVersion(), source.GetSegmentId())
 		}
 
-		basePath, _, err := packed.UnmarshalManifestPath(manifestPath)
+		basePath, version, err := packed.UnmarshalManifestPath(manifestPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal manifest path %q for segment %d: %w", manifestPath, source.GetSegmentId(), err)
 		}
@@ -228,10 +263,16 @@ func collectSegmentFiles(
 
 		// Empty file list is OK for V3 — segment may have only deltas and no insert binlogs
 		files.InsertBinlogs = allFiles
+		metadataFiles := extractManifestMetadataFiles(basePath, allFiles)
+		metadataVersions := extractManifestVersions(metadataFiles)
 		log.Info("collected InsertBinlogs from manifest",
+			zap.String("manifestPath", manifestPath),
 			zap.String("basePath", basePath),
+			zap.Int64("manifestVersion", version),
 			zap.Int("fileCount", len(allFiles)),
-			zap.Int64("storageVersion", source.GetStorageVersion()))
+			zap.Int64("storageVersion", source.GetStorageVersion()),
+			zap.Strings("metadataManifestFiles", metadataFiles),
+			zap.Int64s("metadataManifestVersions", metadataVersions))
 	} else {
 		// StorageV1/V2: use pb paths (traditional non-packed format)
 		files.InsertBinlogs = extractFromPb(source.GetInsertBinlogs())
@@ -362,7 +403,8 @@ func CopySegmentAndIndexFiles(
 	}
 
 	log.Info("all files copied successfully",
-		zap.Int("fileCount", len(mappings)))
+		zap.Int("fileCount", len(mappings)),
+		zap.Int("copiedFileCount", len(copiedFiles)))
 
 	// Step 3.5: When manifest is used (StorageV3+), InsertBinlogs were collected from manifest
 	// (actual file paths under base_path including _data/ and _metadata/), but
@@ -433,6 +475,18 @@ func CopySegmentAndIndexFiles(
 			return nil, copiedFiles, fmt.Errorf("failed to transform manifest path: %w", err)
 		}
 		result.ManifestPath = targetManifestPath
+		targetBasePath, targetVersion, unmarshalErr := packed.UnmarshalManifestPath(targetManifestPath)
+		if unmarshalErr == nil {
+			targetMetadataFiles := extractManifestMetadataFiles(targetBasePath, copiedFiles)
+			log.Info("copied manifest files for target segment",
+				zap.String("targetManifestPath", targetManifestPath),
+				zap.String("targetBasePath", targetBasePath),
+				zap.Int64("targetManifestVersion", targetVersion),
+				zap.Strings("targetMetadataManifestFiles", targetMetadataFiles),
+				zap.Int64s("targetMetadataManifestVersions", extractManifestVersions(targetMetadataFiles)))
+		} else {
+			log.Warn("failed to unmarshal transformed manifest path", zap.String("targetManifestPath", targetManifestPath), zap.Error(unmarshalErr))
+		}
 	}
 
 	log.Info("copy segment and index files completed successfully",
