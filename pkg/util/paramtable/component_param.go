@@ -3427,7 +3427,8 @@ type queryNodeConfig struct {
 	FixedFileSizeForMmapManager         ParamItem `refreshable:"false"`
 	MaxMmapDiskPercentageForMmapManager ParamItem `refreshable:"false"`
 
-	IndexOffsetCacheEnabled ParamItem `refreshable:"true"`
+	IndexOffsetCacheEnabled            ParamItem `refreshable:"true"`
+	PreferFieldDataWhenIndexHasRawData ParamItem `refreshable:"false"`
 
 	ReadAheadPolicy     ParamItem `refreshable:"false"`
 	ChunkCacheWarmingUp ParamItem `refreshable:"true"`
@@ -4333,6 +4334,15 @@ Max read concurrency must greater than or equal to 1, and less than or equal to 
 		Export: true,
 	}
 	p.IndexOffsetCacheEnabled.Init(base.mgr)
+
+	p.PreferFieldDataWhenIndexHasRawData = ParamItem{
+		Key:          "queryNode.preferFieldDataWhenIndexHasRawData",
+		Version:      "2.7.0",
+		DefaultValue: "false",
+		Doc:          "when true, sealed retrieve prefers field data in columns over index raw data when both are available",
+		Export:       true,
+	}
+	p.PreferFieldDataWhenIndexHasRawData.Init(base.mgr)
 
 	p.DiskCapacityLimit = ParamItem{
 		Key:     "LOCAL_STORAGE_SIZE",

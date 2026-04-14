@@ -1814,7 +1814,8 @@ func estimateLogicalResourceUsageOfSegment(schema *schemapb.CollectionSchema, lo
 
 			// could skip binlog or
 			// could be missing for new field or storage v2 group 0
-			if estimateResult.HasRawData {
+			if estimateResult.HasRawData &&
+				!paramtable.Get().QueryNodeCfg.PreferFieldDataWhenIndexHasRawData.GetAsBool() {
 				delete(id2Binlogs, fieldID)
 				continue
 			}
@@ -2019,7 +2020,8 @@ func estimateLoadingResourceUsageOfSegment(schema *schemapb.CollectionSchema, lo
 
 			// could skip binlog or
 			// could be missing for new field or storage v2 group 0
-			if estimateResult.HasRawData {
+			if estimateResult.HasRawData &&
+				!paramtable.Get().QueryNodeCfg.PreferFieldDataWhenIndexHasRawData.GetAsBool() {
 				delete(id2Binlogs, fieldID)
 				continue
 			}

@@ -13,6 +13,7 @@
 
 #include <cxxabi.h>
 #include <fmt/core.h>
+#include <folly/ScopeGuard.h>
 #include <folly/Try.h>
 #include <simdjson.h>
 #include <algorithm>
@@ -95,6 +96,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/reader.h"
@@ -126,6 +128,7 @@
 #include "segcore/storagev2translator/GroupChunkTranslator.h"
 #include "segcore/storagev2translator/ManifestGroupTranslator.h"
 #include "storage/FileManager.h"
+#include "storage/KeyRetriever.h"
 #include "storage/LocalChunkManager.h"
 #include "storage/LocalChunkManagerSingleton.h"
 #include "storage/MmapManager.h"
@@ -706,38 +709,139 @@ ChunkedSegmentSealedImpl::SynthesizeExternalSystemFields() {
     }
 }
 
-std::optional<ChunkedSegmentSealedImpl::ParquetStatistics>
-parse_parquet_statistics(
-    const std::vector<std::shared_ptr<parquet::FileMetaData>>& file_metas,
-    const std::map<int64_t, milvus_storage::ColumnOffset>& field_id_mapping,
-    int64_t field_id) {
-    ChunkedSegmentSealedImpl::ParquetStatistics statistics;
-    if (file_metas.size() == 0) {
-        return std::nullopt;
-    }
-    auto it = field_id_mapping.find(field_id);
-    AssertInfo(it != field_id_mapping.end(),
-               "field id {} not found in field id mapping",
-               field_id);
-    auto offset = it->second;
+namespace {
 
-    for (auto& file_meta : file_metas) {
-        auto num_row_groups = file_meta->num_row_groups();
-        for (auto i = 0; i < num_row_groups; i++) {
-            auto row_group = file_meta->RowGroup(i);
-            auto column_chunk = row_group->ColumnChunk(offset.col_index);
-            if (!column_chunk->is_stats_set()) {
-                AssertInfo(statistics.size() == 0,
-                           "Statistics is not set for some column chunks "
-                           "for field {}",
-                           field_id);
+struct FileMetadataLoadResult {
+    milvus_storage::RowGroupMetadataVector row_group_meta;
+    ParquetStatisticsByField parquet_stats_by_field;
+};
+
+void
+AppendParquetStatistics(const std::shared_ptr<parquet::FileMetaData>& file_meta,
+                        int64_t field_id,
+                        const milvus_storage::ColumnOffset& offset,
+                        ChunkedSegmentSealedImpl::ParquetStatistics& stats) {
+    auto num_row_groups = file_meta->num_row_groups();
+    for (int i = 0; i < num_row_groups; ++i) {
+        auto row_group = file_meta->RowGroup(i);
+        auto column_chunk = row_group->ColumnChunk(offset.col_index);
+        if (!column_chunk->is_stats_set()) {
+            AssertInfo(stats.empty(),
+                       "Statistics is not set for some column chunks for "
+                       "field {}",
+                       field_id);
+            continue;
+        }
+        stats.push_back(column_chunk->statistics());
+    }
+}
+
+}  // namespace
+
+LoadedGroupChunkMetadata
+LoadGroupChunkMetadata(const std::vector<std::string>& insert_files,
+                       const std::vector<FieldId>& field_ids_for_stats,
+                       const std::string& debug_key) {
+    auto fs = milvus_storage::ArrowFileSystemSingleton::GetInstance()
+                  .GetArrowFileSystem();
+    auto& pool = ThreadPools::GetThreadPool(ThreadPoolPriority::HIGH);
+
+    std::vector<std::future<FileMetadataLoadResult>> futures;
+    futures.reserve(insert_files.size());
+    for (const auto& file : insert_files) {
+        // Futures are always joined below before this function returns, so
+        // capturing loader inputs by reference is safe here.
+        futures.push_back(
+            pool.Submit([&fs, file, &field_ids_for_stats, &debug_key]() {
+                auto result = milvus_storage::FileRowGroupReader::Make(
+                    fs,
+                    file,
+                    milvus_storage::DEFAULT_READ_BUFFER_SIZE,
+                    storage::GetReaderProperties());
+                AssertInfo(
+                    result.ok(),
+                    "[StorageV2] Failed to create file row group reader: " +
+                        result.status().ToString());
+
+                auto reader = result.ValueOrDie();
+                auto reader_guard = folly::makeGuard([&]() {
+                    auto status = reader->Close();
+                    AssertInfo(status.ok(),
+                               "[StorageV2] metadata loader {} failed to "
+                               "close file reader for {} with error {}",
+                               debug_key,
+                               file,
+                               status.ToString());
+                });
+
+                FileMetadataLoadResult load_result;
+                auto file_metadata = reader->file_metadata();
+                load_result.row_group_meta =
+                    file_metadata->GetRowGroupMetadataVector();
+
+                if (!field_ids_for_stats.empty()) {
+                    auto field_id_mapping = file_metadata->GetFieldIDMapping();
+                    auto parquet_metadata = file_metadata->GetParquetMetadata();
+                    for (const auto& field_id : field_ids_for_stats) {
+                        auto it = field_id_mapping.find(field_id.get());
+                        AssertInfo(it != field_id_mapping.end(),
+                                   "field id {} not found in field id mapping",
+                                   field_id.get());
+                        ChunkedSegmentSealedImpl::ParquetStatistics stats;
+                        AppendParquetStatistics(parquet_metadata,
+                                                field_id.get(),
+                                                it->second,
+                                                stats);
+                        if (!stats.empty()) {
+                            load_result.parquet_stats_by_field.emplace(
+                                field_id.get(), std::move(stats));
+                        }
+                    }
+                }
+
+                return load_result;
+            }));
+    }
+
+    auto futures_guard = folly::makeGuard([&futures]() {
+        for (auto& future : futures) {
+            if (future.valid()) {
+                try {
+                    future.get();
+                } catch (...) {
+                }
+            }
+        }
+    });
+
+    LoadedGroupChunkMetadata metadata;
+    metadata.row_group_meta_list.reserve(insert_files.size());
+    std::map<int64_t, bool> seen_stats_by_field;
+
+    for (auto& future : futures) {
+        auto load_result = future.get();
+        metadata.row_group_meta_list.push_back(
+            std::move(load_result.row_group_meta));
+        for (const auto& field_id : field_ids_for_stats) {
+            auto it = load_result.parquet_stats_by_field.find(field_id.get());
+            if (it == load_result.parquet_stats_by_field.end()) {
+                AssertInfo(!seen_stats_by_field[field_id.get()],
+                           "Statistics is not set for some column chunks for "
+                           "field {}",
+                           field_id.get());
                 continue;
             }
-            auto stats = column_chunk->statistics();
-            statistics.push_back(stats);
+
+            seen_stats_by_field[field_id.get()] = true;
+            auto& all_stats = metadata.parquet_stats_by_field[field_id.get()];
+            auto& stats = it->second;
+            all_stats.insert(all_stats.end(),
+                             std::make_move_iterator(stats.begin()),
+                             std::make_move_iterator(stats.end()));
         }
     }
-    return statistics;
+
+    return metadata;
 }
 
 void
@@ -801,6 +905,14 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
             mmap_dir_path);
 
         auto field_metas = schema_->get_field_metas(milvus_field_ids);
+        auto metadata = LoadGroupChunkMetadata(
+            insert_files,
+            ENABLE_PARQUET_STATS_SKIP_INDEX ? milvus_field_ids
+                                            : std::vector<FieldId>{},
+            fmt::format(
+                "seg_{}_cg_{}", get_segment_id(), column_group_id.get()));
+        auto parquet_stats_by_field =
+            std::move(metadata.parquet_stats_by_field);
 
         auto translator =
             std::make_unique<storagev2translator::GroupChunkTranslator>(
@@ -809,14 +921,12 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
                 field_metas,
                 column_group_info,
                 insert_files,
+                std::move(metadata.row_group_meta_list),
                 info.enable_mmap,
                 mmap_config.GetMmapPopulate(),
                 milvus_field_ids.size(),
                 load_info.load_priority,
                 info.warmup_policy);
-
-        auto file_metas = translator->parquet_file_metas();
-        auto field_id_mapping = translator->field_id_mapping();
         auto chunked_column_group =
             std::make_shared<ChunkedColumnGroup>(std::move(translator));
 
@@ -828,8 +938,15 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
             auto data_type = field_meta.get_data_type();
             std::optional<ParquetStatistics> statistics_opt;
             if (ENABLE_PARQUET_STATS_SKIP_INDEX) {
-                statistics_opt = parse_parquet_statistics(
-                    file_metas, field_id_mapping, field_id.get());
+                auto it = parquet_stats_by_field.find(field_id.get());
+                if (it != parquet_stats_by_field.end()) {
+                    statistics_opt = it->second;
+                } else {
+                    // Missing key means no parquet stats were collected for this
+                    // field; treat it as an empty statistics set to match the
+                    // previous parse_parquet_statistics() behavior.
+                    statistics_opt = ParquetStatistics{};
+                }
             }
 
             load_field_data_common(
@@ -2855,20 +2972,27 @@ ChunkedSegmentSealedImpl::bulk_subscript(milvus::OpContext* op_ctx,
         return ret;
     }
 
+    auto prefer_field_data =
+        SegcoreConfig::default_config()
+            .get_prefer_field_data_when_index_has_raw_data();
+
     if (!IsVectorDataType(field_meta.get_data_type())) {
         // === Scalar field ===
-        // Try index first: if scalar index exists and has raw data, read from index
-        PinWrapper<const index::IndexBase*> pin_scalar_index_ptr;
-        auto scalar_indexes = PinIndex(op_ctx, field_id);
-        if (!scalar_indexes.empty()) {
-            pin_scalar_index_ptr = std::move(scalar_indexes[0]);
-            if (IndexHasRawData(field_id)) {
-                return ReverseDataFromIndex(
-                    pin_scalar_index_ptr.get(), seg_offsets, count, field_meta);
+        auto [field, exist] = GetFieldDataIfExist(field_id);
+        if (!prefer_field_data || !exist) {
+            // Try index first: if scalar index exists and has raw data, read from index
+            PinWrapper<const index::IndexBase*> pin_scalar_index_ptr;
+            auto scalar_indexes = PinIndex(op_ctx, field_id);
+            if (!scalar_indexes.empty()) {
+                pin_scalar_index_ptr = std::move(scalar_indexes[0]);
+                if (IndexHasRawData(field_id)) {
+                    return ReverseDataFromIndex(pin_scalar_index_ptr.get(),
+                                                seg_offsets,
+                                                count,
+                                                field_meta);
+                }
             }
         }
-        // Fallback to field data
-        auto [field, exist] = GetFieldDataIfExist(field_id);
         return get_raw_data(op_ctx, field_id, field_meta, seg_offsets, count);
     }
 
@@ -2878,11 +3002,15 @@ ChunkedSegmentSealedImpl::bulk_subscript(milvus::OpContext* op_ctx,
 
     std::unique_ptr<DataArray> vector{nullptr};
     // Try index first: if vector index exists and has raw data, read from index
-    if (IndexHasRawData(field_id)) {
-        vector = get_vector(op_ctx, field_id, seg_offsets, count);
+    auto [field, exist] = GetFieldDataIfExist(field_id);
+    if (!prefer_field_data || !exist) {
+        if (IndexHasRawData(field_id)) {
+            vector = get_vector(op_ctx, field_id, seg_offsets, count);
+        } else {
+            vector =
+                get_raw_data(op_ctx, field_id, field_meta, seg_offsets, count);
+        }
     } else {
-        // Fallback to field data
-        auto [field, exist] = GetFieldDataIfExist(field_id);
         vector = get_raw_data(op_ctx, field_id, field_meta, seg_offsets, count);
     }
 
