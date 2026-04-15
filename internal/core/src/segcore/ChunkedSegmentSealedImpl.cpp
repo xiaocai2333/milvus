@@ -3178,20 +3178,27 @@ ChunkedSegmentSealedImpl::bulk_subscript(milvus::OpContext* op_ctx,
         return ret;
     }
 
+    auto prefer_field_data =
+        SegcoreConfig::default_config()
+            .get_prefer_field_data_when_index_has_raw_data();
+
     if (!IsVectorDataType(field_meta.get_data_type())) {
         // === Scalar field ===
-        // Try index first: if scalar index exists and has raw data, read from index
-        PinWrapper<const index::IndexBase*> pin_scalar_index_ptr;
-        auto scalar_indexes = PinIndex(op_ctx, field_id);
-        if (!scalar_indexes.empty()) {
-            pin_scalar_index_ptr = std::move(scalar_indexes[0]);
-            if (IndexHasRawData(field_id)) {
-                return ReverseDataFromIndex(
-                    pin_scalar_index_ptr.get(), seg_offsets, count, field_meta);
+        auto [field, exist] = GetFieldDataIfExist(field_id);
+        if (!prefer_field_data || !exist) {
+            // Try index first: if scalar index exists and has raw data, read from index
+            PinWrapper<const index::IndexBase*> pin_scalar_index_ptr;
+            auto scalar_indexes = PinIndex(op_ctx, field_id);
+            if (!scalar_indexes.empty()) {
+                pin_scalar_index_ptr = std::move(scalar_indexes[0]);
+                if (IndexHasRawData(field_id)) {
+                    return ReverseDataFromIndex(pin_scalar_index_ptr.get(),
+                                                seg_offsets,
+                                                count,
+                                                field_meta);
+                }
             }
         }
-        // Fallback to field data
-        auto [field, exist] = GetFieldDataIfExist(field_id);
         return get_raw_data(op_ctx, field_id, field_meta, seg_offsets, count);
     }
 
@@ -3201,11 +3208,15 @@ ChunkedSegmentSealedImpl::bulk_subscript(milvus::OpContext* op_ctx,
 
     std::unique_ptr<DataArray> vector{nullptr};
     // Try index first: if vector index exists and has raw data, read from index
-    if (IndexHasRawData(field_id)) {
-        vector = get_vector(op_ctx, field_id, seg_offsets, count);
+    auto [field, exist] = GetFieldDataIfExist(field_id);
+    if (!prefer_field_data || !exist) {
+        if (IndexHasRawData(field_id)) {
+            vector = get_vector(op_ctx, field_id, seg_offsets, count);
+        } else {
+            vector =
+                get_raw_data(op_ctx, field_id, field_meta, seg_offsets, count);
+        }
     } else {
-        // Fallback to field data
-        auto [field, exist] = GetFieldDataIfExist(field_id);
         vector = get_raw_data(op_ctx, field_id, field_meta, seg_offsets, count);
     }
 
