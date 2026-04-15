@@ -84,6 +84,9 @@ func doInitQueryNodeOnce(ctx context.Context) error {
 		log.Warn("visibilityFilterEnabled=false with bloomFilterEnabled=true: deletes are forwarded via bloom filter but never applied — consider disabling bloom filter to save memory")
 	}
 
+	cPreferFieldDataWhenIndexHasRawData := C.bool(paramtable.Get().QueryNodeCfg.PreferFieldDataWhenIndexHasRawData.GetAsBool())
+	C.SegcoreSetPreferFieldDataWhenIndexHasRawData(cPreferFieldDataWhenIndexHasRawData)
+
 	cKnowhereThreadPoolSize := C.uint32_t(paramtable.Get().QueryNodeCfg.KnowhereThreadPoolSize.GetAsUint32())
 	C.SegcoreSetKnowhereSearchThreadPoolNum(cKnowhereThreadPoolSize)
 
