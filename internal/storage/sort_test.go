@@ -27,9 +27,12 @@ import (
 	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/v2/common"
+	milvuslog "github.com/milvus-io/milvus/pkg/v2/log"
 )
 
 func TestSort(t *testing.T) {
@@ -766,4 +769,45 @@ func TestMergeSortSmallBatchSize(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 5, numRows)
 	assert.Equal(t, []int64{10, 20, 30, 40, 50}, outputRows)
+}
+
+func TestLogBatchOutOfOrderEmitsVersionAndHexContext(t *testing.T) {
+	oldLogger := milvuslog.L()
+	oldProps := &milvuslog.ZapProperties{Level: zap.NewAtomicLevelAt(milvuslog.GetLevel())}
+
+	core, observed := observer.New(zap.ErrorLevel)
+	milvuslog.ReplaceGlobals(zap.New(core), &milvuslog.ZapProperties{Level: zap.NewAtomicLevelAt(zap.DebugLevel)})
+	defer milvuslog.ReplaceGlobals(oldLogger, oldProps)
+
+	rec := makeRecord([]int64{1, 2}, []int64{1776157314912370, 177615732280849})
+	defer rec.Release()
+
+	debug := &BatchOrderDebugContext{
+		Component:             "SortCompaction",
+		PlanID:                1001,
+		CollectionID:          2001,
+		PartitionID:           3001,
+		SegmentID:             4001,
+		SegmentStorageVersion: 3,
+		PlanStorageVersion:    2,
+		InputSegmentIDs:       []int64{4001, 4002},
+		ReaderIndex:           1,
+		ManifestPath:          "s3://bucket/root/_metadata/manifest-1.avro",
+		SortFieldIDs:          []int64{101},
+	}
+
+	logBatchOutOfOrder("Sort output validation", rec, []int64{101}, debug)
+
+	entries := observed.All()
+	assert.Len(t, entries, 1)
+	assert.Equal(t, "batch not sorted by sort key", entries[0].Message)
+
+	ctx := entries[0].ContextMap()
+	assert.Equal(t, "SortCompaction", ctx["debugComponent"])
+	assert.EqualValues(t, 3, ctx["segmentStorageVersion"])
+	assert.EqualValues(t, 2, ctx["planStorageVersion"])
+	assert.Equal(t, "0x00064f67d9d21072", ctx["prevHex"])
+	assert.Equal(t, "0x0000a18a62a10e11", ctx["currHex"])
+	assert.EqualValues(t, 16, ctx["prevDigits"])
+	assert.EqualValues(t, 15, ctx["currDigits"])
 }

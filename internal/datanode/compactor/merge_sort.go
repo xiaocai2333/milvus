@@ -70,15 +70,17 @@ func mergeSortMultipleSegments(ctx context.Context,
 	for i, s := range binlogs {
 		var reader storage.RecordReader
 		debugContexts[i] = &storage.BatchOrderDebugContext{
-			Component:       "MergeSort",
-			PlanID:          plan.GetPlanID(),
-			CollectionID:    collectionID,
-			PartitionID:     partitionID,
-			SegmentID:       s.GetSegmentID(),
-			InputSegmentIDs: inputSegmentIDs,
-			ReaderIndex:     i,
-			ManifestPath:    s.GetManifest(),
-			SortFieldIDs:    sortByFields,
+			Component:             "MergeSort",
+			PlanID:                plan.GetPlanID(),
+			CollectionID:          collectionID,
+			PartitionID:           partitionID,
+			SegmentID:             s.GetSegmentID(),
+			SegmentStorageVersion: s.GetStorageVersion(),
+			PlanStorageVersion:    compactionParams.StorageVersion,
+			InputSegmentIDs:       inputSegmentIDs,
+			ReaderIndex:           i,
+			ManifestPath:          s.GetManifest(),
+			SortFieldIDs:          sortByFields,
 		}
 		if s.GetManifest() != "" {
 			reader, err = storage.NewManifestRecordReader(ctx,

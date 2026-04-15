@@ -61,15 +61,17 @@ const (
 )
 
 type BatchOrderDebugContext struct {
-	Component       string
-	PlanID          int64
-	CollectionID    int64
-	PartitionID     int64
-	SegmentID       int64
-	InputSegmentIDs []int64
-	ReaderIndex     int
-	ManifestPath    string
-	SortFieldIDs    []int64
+	Component             string
+	PlanID                int64
+	CollectionID          int64
+	PartitionID           int64
+	SegmentID             int64
+	SegmentStorageVersion int64
+	PlanStorageVersion    int64
+	InputSegmentIDs       []int64
+	ReaderIndex           int
+	ManifestPath          string
+	SortFieldIDs          []int64
 }
 
 type rwOptions struct {

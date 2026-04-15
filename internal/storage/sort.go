@@ -18,6 +18,7 @@ package storage
 
 import (
 	"container/heap"
+	"fmt"
 	"io"
 	"sort"
 	"time"
@@ -43,10 +44,13 @@ func logBatchOutOfOrder(component string, r Record, sortFieldIDs []int64, debug 
 	}
 	if debug != nil {
 		baseFields = append(baseFields,
+			zap.String("debugComponent", debug.Component),
 			zap.Int64("planID", debug.PlanID),
 			zap.Int64("collectionID", debug.CollectionID),
 			zap.Int64("partitionID", debug.PartitionID),
 			zap.Int64("segmentID", debug.SegmentID),
+			zap.Int64("segmentStorageVersion", debug.SegmentStorageVersion),
+			zap.Int64("planStorageVersion", debug.PlanStorageVersion),
 			zap.Int("readerIndex", debug.ReaderIndex),
 			zap.String("manifestPath", debug.ManifestPath),
 			zap.Int64s("inputSegmentIDs", debug.InputSegmentIDs),
@@ -63,6 +67,11 @@ func logBatchOutOfOrder(component string, r Record, sortFieldIDs []int64, debug 
 					zap.Int("row", j),
 					zap.Int64("prev", col.Value(j-1)),
 					zap.Int64("curr", col.Value(j)),
+					zap.Int64("delta", col.Value(j)-col.Value(j-1)),
+					zap.String("prevHex", fmt.Sprintf("0x%016x", uint64(col.Value(j-1)))),
+					zap.String("currHex", fmt.Sprintf("0x%016x", uint64(col.Value(j)))),
+					zap.Int("prevDigits", len(fmt.Sprintf("%d", col.Value(j-1)))),
+					zap.Int("currDigits", len(fmt.Sprintf("%d", col.Value(j)))),
 				)
 				log.Error("batch not sorted by sort key", fields...)
 				return

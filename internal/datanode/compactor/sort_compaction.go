@@ -253,13 +253,16 @@ func (t *sortCompactionTask) sortSegment(ctx context.Context) (*datapb.Compactio
 			storage.WithStorageConfig(t.compactionParams.StorageConfig),
 			storage.WithCollectionID(t.collectionID),
 			storage.WithBatchOrderDebugContext(&storage.BatchOrderDebugContext{
-				Component:    "SortCompaction input reader",
-				PlanID:       t.plan.GetPlanID(),
-				CollectionID: t.collectionID,
-				PartitionID:  t.partitionID,
-				SegmentID:    t.segmentID,
-				ManifestPath: t.manifest,
-				SortFieldIDs: t.sortByFieldIDs,
+				Component:             "SortCompaction input reader",
+				PlanID:                t.plan.GetPlanID(),
+				CollectionID:          t.collectionID,
+				PartitionID:           t.partitionID,
+				SegmentID:             t.segmentID,
+				SegmentStorageVersion: t.segmentStorageVersion,
+				PlanStorageVersion:    t.storageVersion,
+				InputSegmentIDs:       []int64{t.segmentID},
+				ManifestPath:          t.manifest,
+				SortFieldIDs:          t.sortByFieldIDs,
 			}),
 		)
 	} else {
@@ -281,12 +284,15 @@ func (t *sortCompactionTask) sortSegment(ctx context.Context) (*datapb.Compactio
 	rrs := []storage.RecordReader{rr}
 	numValidRows, sortTimings, err := storage.Sort(t.compactionParams.BinLogMaxSize, t.plan.GetSchema(), rrs, srw, predicate, t.sortByFieldIDs,
 		&storage.BatchOrderDebugContext{
-			Component:    "SortCompaction",
-			PlanID:       t.plan.GetPlanID(),
-			CollectionID: t.collectionID,
-			PartitionID:  t.partitionID,
-			SegmentID:    targetSegmentID,
-			SortFieldIDs: t.sortByFieldIDs,
+			Component:             "SortCompaction",
+			PlanID:                t.plan.GetPlanID(),
+			CollectionID:          t.collectionID,
+			PartitionID:           t.partitionID,
+			SegmentID:             targetSegmentID,
+			SegmentStorageVersion: t.storageVersion,
+			PlanStorageVersion:    t.storageVersion,
+			InputSegmentIDs:       []int64{t.segmentID},
+			SortFieldIDs:          t.sortByFieldIDs,
 		})
 	if err != nil {
 		log.Warn("sort failed", zap.Error(err))
