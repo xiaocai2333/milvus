@@ -15,7 +15,7 @@
 milvus_add_pkg_config("milvus-storage")
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY INCLUDE_DIRECTORIES "")
 
-set( milvus-storage_VERSION 4351a0c)
+set( milvus-storage_VERSION fd3757b)
 set( GIT_REPOSITORY  "https://github.com/milvus-io/milvus-storage.git")
 message(STATUS "milvus-storage repo: ${GIT_REPOSITORY}")
 message(STATUS "milvus-storage version: ${milvus-storage_VERSION}")
@@ -31,6 +31,27 @@ endif ()
 
 # Disable benchmark for milvus-storage (we don't need it and it may have missing deps)
 set(WITH_BENCHMARK OFF CACHE BOOL "" FORCE)
+
+# milvus-storage uses find_package(Azure REQUIRED) which relies on Arrow's FindAzure.cmake.
+# FindAzure.cmake searches for native cmake config files that Conan intentionally removes
+# (rmdir share/ in package()). Even if config files are found, directly linking azure .a
+# files causes ABI issues (___cxa_init_primary_exception) with local clang.
+# Workaround: pre-find azure-sdk via Conan's Find module (creates INTERFACE IMPORTED targets
+# that link through Arrow's transitive deps, avoiding ABI issues), then write a stub
+# FindAzure.cmake so milvus-storage's find_package(Azure) succeeds.
+find_package(azure-sdk-for-cpp QUIET)
+if(azure-sdk-for-cpp_FOUND)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/FindAzure.cmake"
+        "set(Azure_FOUND TRUE)\n"
+        "set(azure-core-cpp_FOUND TRUE)\n"
+        "set(azure-identity-cpp_FOUND TRUE)\n"
+        "set(azure-storage-blobs-cpp_FOUND TRUE)\n"
+        "set(azure-storage-common-cpp_FOUND TRUE)\n"
+        "set(azure-storage-files-datalake-cpp_FOUND TRUE)\n"
+    )
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
 
 # Conan 2.x: CMAKE_PREFIX_PATH is set by conan_toolchain.cmake.
 # find_package(Protobuf) sets Protobuf_PROTOC_EXECUTABLE automatically.
