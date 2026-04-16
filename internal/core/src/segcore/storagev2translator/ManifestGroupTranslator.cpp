@@ -71,7 +71,8 @@ ManifestGroupTranslator::ManifestGroupTranslator(
     milvus::proto::common::LoadPriority load_priority,
     bool eager_load,
     const std::string& warmup_policy,
-    const std::string& cache_key_suffix)
+    const std::string& cache_key_suffix,
+    int64_t fallback_bytes_per_row)
     : segment_id_(segment_id),
       group_chunk_type_(group_chunk_type),
       column_group_index_(column_group_index),
@@ -155,9 +156,32 @@ ManifestGroupTranslator::ManifestGroupTranslator(
     for (size_t cell_id = 0; cell_id < num_cells; ++cell_id) {
         auto [start, end] = meta_.get_row_group_range(cell_id);
         int64_t cell_size = 0;
+        int64_t cell_rows = 0;
         for (size_t i = start; i < end; ++i) {
+            cell_rows += static_cast<int64_t>(row_group_rows[i]);
             cumulative_rows += static_cast<int64_t>(row_group_rows[i]);
             cell_size += static_cast<int64_t>(row_group_sizes[i]);
+        }
+        // Some formats (e.g. Vortex) report memory_size=0 when their
+        // metadata lacks uncompressed size statistics.  Use the sampled
+        // avg bytes/row from the Take API (passed via SegmentLoadInfo)
+        // as a data-driven fallback; fall back to 4KB/row only if no
+        // sampling data is available.
+        if (cell_size == 0 && cell_rows > 0) {
+            constexpr int64_t kLastResortBytesPerRow = 4096;
+            int64_t bpr = fallback_bytes_per_row > 0 ? fallback_bytes_per_row
+                                                     : kLastResortBytesPerRow;
+            cell_size = cell_rows * bpr;
+            LOG_WARN(
+                "[StorageV2] translator {} cell {} has zero memory_size "
+                "from format metadata, estimating {} bytes "
+                "({} rows * {} bytes/row, sampled={})",
+                key_,
+                cell_id,
+                cell_size,
+                cell_rows,
+                bpr,
+                fallback_bytes_per_row > 0);
         }
         meta_.num_rows_until_chunk_.push_back(cumulative_rows);
         meta_.chunk_memory_size_.push_back(cell_size);

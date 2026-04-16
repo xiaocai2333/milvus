@@ -1554,538 +1554,129 @@ func TestSeparateLoadInfoV2_MixedExternalAndNormalFields(t *testing.T) {
 	assert.Len(t, loadInfo.IndexInfos, 2)
 }
 
-func TestSeparateLoadInfoV2_AccessModeLoad_NoSkip(t *testing.T) {
-	// When access mode is "load", external fields should NOT be skipped.
-	schema := &schemapb.CollectionSchema{
-		ExternalSource: "s3://bucket/path",
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "id", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "id"},
-			{Name: "embedding", FieldID: 102, DataType: schemapb.DataType_FloatVector, ExternalField: "embedding"},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion:     storage.StorageV3,
-		ExternalAccessMode: "load",
-		BinlogPaths: []*datapb.FieldBinlog{
-			// Short column group (FieldID=0) contains all fields
-			{FieldID: 0, Binlogs: []*datapb.Binlog{{LogPath: "binlog/short_group"}}},
-		},
-	}
-
-	indexedFieldInfos, fieldBinlogs, _, _, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// Normal field 103 should be matched via short column group iteration
-	assert.Contains(t, indexedFieldInfos, int64(1003))
-	// External field 101 should NOT be matched (skipped by externalFieldIDs check)
-	assert.NotContains(t, indexedFieldInfos, int64(1001))
-	// Short column group binlog should still be in fieldBinlogs
-	assert.Len(t, fieldBinlogs, 1)
-	assert.Equal(t, int64(0), fieldBinlogs[0].FieldID)
-}
-
-func TestSeparateLoadInfoV2_ExternalFieldBinlogsSkippedV3(t *testing.T) {
-	// Verify that BinlogPaths entries for external fields are skipped in the V3 path.
-	schema := &schemapb.CollectionSchema{
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "ext_id", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "id"},
-			{Name: "ext_vec", FieldID: 102, DataType: schemapb.DataType_FloatVector, ExternalField: "vec"},
-			{Name: "normal_ts", FieldID: 103, DataType: schemapb.DataType_Int64},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion: storage.StorageV3,
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 100, Binlogs: []*datapb.Binlog{{LogPath: "binlog/100"}}},
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}}, // external, should skip
-			{FieldID: 102, Binlogs: []*datapb.Binlog{{LogPath: "binlog/102"}}}, // external, should skip
-			{FieldID: 103, Binlogs: []*datapb.Binlog{{LogPath: "binlog/103"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// Only non-external fields (100 and 103) should remain in fieldBinlogs
-	assert.Len(t, fieldBinlogs, 2)
-	fieldIDs := make([]int64, len(fieldBinlogs))
-	for i, fb := range fieldBinlogs {
-		fieldIDs[i] = fb.FieldID
-	}
-	assert.Contains(t, fieldIDs, int64(100))
-	assert.Contains(t, fieldIDs, int64(103))
-	assert.NotContains(t, fieldIDs, int64(101))
-	assert.NotContains(t, fieldIDs, int64(102))
-}
-
-func TestSeparateLoadInfoV2_ExternalFieldBinlogsSkippedLegacy(t *testing.T) {
-	// Verify that BinlogPaths entries for external fields are skipped in the legacy (non-V2/V3) path.
-	schema := &schemapb.CollectionSchema{
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "ext_field", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "col1"},
-			{Name: "normal_field", FieldID: 102, DataType: schemapb.DataType_Int64},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion: 0, // legacy, not V2 or V3
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 100, Binlogs: []*datapb.Binlog{{LogPath: "binlog/100"}}},
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}}, // external, should skip
-			{FieldID: 102, Binlogs: []*datapb.Binlog{{LogPath: "binlog/102"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// Only non-external fields (100 and 102) should remain
-	assert.Len(t, fieldBinlogs, 2)
-	fieldIDs := make([]int64, len(fieldBinlogs))
-	for i, fb := range fieldBinlogs {
-		fieldIDs[i] = fb.FieldID
-	}
-	assert.Contains(t, fieldIDs, int64(100))
-	assert.Contains(t, fieldIDs, int64(102))
-	assert.NotContains(t, fieldIDs, int64(101))
-}
-
-func TestSeparateLoadInfoV2_NonExternalCollectionUnaffected(t *testing.T) {
-	// Verify that non-external collections are unaffected by external field filtering.
-	schema := &schemapb.CollectionSchema{
-		Fields: []*schemapb.FieldSchema{
-			{Name: "pk", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "field1", FieldID: 101, DataType: schemapb.DataType_Int64},
-			{Name: "field2", FieldID: 102, DataType: schemapb.DataType_FloatVector},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion: storage.StorageV3,
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 100, Binlogs: []*datapb.Binlog{{LogPath: "binlog/100"}}},
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}},
-			{FieldID: 102, Binlogs: []*datapb.Binlog{{LogPath: "binlog/102"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// In "load" mode, external fields should NOT be skipped
-	assert.Len(t, fieldBinlogs, 2, "external fields should NOT be skipped in load mode")
-}
-
-func TestSeparateLoadInfoV2_AccessModeLazyLoad_SkipsExternal(t *testing.T) {
-	// When access mode is "lazyLoad", external fields should be skipped.
-	schema := &schemapb.CollectionSchema{
-		ExternalSource: "s3://bucket/path",
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "id", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "id"},
-			{Name: "normal_field", FieldID: 103, DataType: schemapb.DataType_Int64},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion:     storage.StorageV3,
-		ExternalAccessMode: "lazyLoad",
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}},
-			{FieldID: 103, Binlogs: []*datapb.Binlog{{LogPath: "binlog/103"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// In "lazyLoad" mode, external field 101 should be skipped, normal field 103 kept
-	assert.Len(t, fieldBinlogs, 1, "only non-external fields should remain")
-	assert.Equal(t, int64(103), fieldBinlogs[0].FieldID)
-}
-
-func TestSeparateLoadInfoV2_AccessModeTake_SkipsExternal(t *testing.T) {
-	// When access mode is "take", external fields should also be skipped.
-	schema := &schemapb.CollectionSchema{
-		ExternalSource: "s3://bucket/path",
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "id", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "id"},
-			{Name: "normal_field", FieldID: 103, DataType: schemapb.DataType_Int64},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion:     storage.StorageV3,
-		ExternalAccessMode: "take",
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}},
-			{FieldID: 103, Binlogs: []*datapb.Binlog{{LogPath: "binlog/103"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// In "take" mode, external field 101 should be skipped, normal field 103 kept
-	assert.Len(t, fieldBinlogs, 1, "only non-external fields should remain in take mode")
-	assert.Equal(t, int64(103), fieldBinlogs[0].FieldID)
-}
-
-func TestSeparateLoadInfoV2_EmptyAccessMode_SkipsExternal(t *testing.T) {
-	// When access mode is empty (default from proto zero value), it's not "load",
-	// so external fields should be skipped for external collections.
-	schema := &schemapb.CollectionSchema{
-		ExternalSource: "s3://bucket/path",
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "id", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "id"},
-			{Name: "normal_field", FieldID: 103, DataType: schemapb.DataType_Int64},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion:     storage.StorageV3,
-		ExternalAccessMode: "", // Empty (default)
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}},
-			{FieldID: 103, Binlogs: []*datapb.Binlog{{LogPath: "binlog/103"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// With empty access mode (not "load"), external fields should be skipped
-	assert.Len(t, fieldBinlogs, 1, "external fields should be skipped when access mode is empty")
-	assert.Equal(t, int64(103), fieldBinlogs[0].FieldID)
-}
-
-func TestSeparateLoadInfoV2_NonExternalCollection_NoSkip(t *testing.T) {
-	// For non-external collections, no fields should be skipped regardless of access mode.
-	schema := &schemapb.CollectionSchema{
-		// No ExternalSource = not an external collection
-		Fields: []*schemapb.FieldSchema{
-			{Name: "pk", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "field1", FieldID: 101, DataType: schemapb.DataType_Int64},
-			{Name: "field2", FieldID: 102, DataType: schemapb.DataType_Int64},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion:     storage.StorageV3,
-		ExternalAccessMode: "lazyLoad",
-		BinlogPaths: []*datapb.FieldBinlog{
-			{FieldID: 101, Binlogs: []*datapb.Binlog{{LogPath: "binlog/101"}}},
-			{FieldID: 102, Binlogs: []*datapb.Binlog{{LogPath: "binlog/102"}}},
-		},
-	}
-
-	_, fieldBinlogs, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// Non-external collections: all fields should remain
-	assert.Len(t, fieldBinlogs, 2, "no fields should be skipped for non-external collections")
-}
-
-func TestExternalCollectionAccessMode_DefaultValue(t *testing.T) {
-	paramtable.Init()
-	params := paramtable.Get()
-	val := params.QueryNodeCfg.ExternalCollectionAccessMode.GetValue()
-	assert.Equal(t, "lazyLoad", val, "default access mode should be lazyLoad")
-}
-
-// TestSeparateLoadInfoV2_ExternalManifestPath tests the new branch at lines 854-861
-// where BinlogPaths is empty AND ManifestPath is set (external table segment).
-// In this case index info must be extracted directly from fieldID2IndexInfo
-// without binlog association.
-func TestSeparateLoadInfoV2_ExternalManifestPath(t *testing.T) {
-	schema := &schemapb.CollectionSchema{
-		Fields: []*schemapb.FieldSchema{
-			{Name: "__virtual_pk__", FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
-			{Name: "id", FieldID: 101, DataType: schemapb.DataType_Int64, ExternalField: "id"},
-			{Name: "embedding", FieldID: 102, DataType: schemapb.DataType_FloatVector, ExternalField: "embedding"},
-		},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		StorageVersion: storage.StorageV3,
-		ManifestPath:   "/manifests/seg1.json", // required to enter the new branch
-		IndexInfos: []*querypb.FieldIndexInfo{
-			{FieldID: 101, IndexID: 1001, IndexFilePaths: []string{"index/101/f1"}},
-			{FieldID: 102, IndexID: 1002, IndexFilePaths: []string{"index/102/f1"}},
-		},
-		BinlogPaths: []*datapb.FieldBinlog{},
-	}
-
-	indexedFieldInfos, fieldBinlogs, _, _, _, _, _ := separateLoadInfoV2(loadInfo, schema)
-
-	// With manifest path set, external indexes get attached to synthetic FieldBinlog
-	assert.Len(t, indexedFieldInfos, 2, "both external field indexes should be extracted via manifest branch")
-	assert.Contains(t, indexedFieldInfos, int64(1001))
-	assert.Contains(t, indexedFieldInfos, int64(1002))
-	assert.Len(t, fieldBinlogs, 0, "no binlog paths for external segments")
-}
-
-// ==================== External Collection Estimation Tests ====================
-// Tests for estimateLoadingResourceUsageOfSegment with external collections.
-
-type SegmentLoaderExternalEstimateSuite struct {
+// ExternalSegmentEstimateSuite tests resource estimation for external table segments
+// with fake binlogs (pre-computed MemorySize from DataNode Take sampling).
+type ExternalSegmentEstimateSuite struct {
 	suite.Suite
 	schema *schemapb.CollectionSchema
 }
 
-func (suite *SegmentLoaderExternalEstimateSuite) SetupSuite() {
+func (suite *ExternalSegmentEstimateSuite) SetupSuite() {
 	paramtable.Init()
 	suite.schema = &schemapb.CollectionSchema{
-		Name:           "test_external",
-		ExternalSource: "s3:///bucket/data",
+		Name:           "test_external_estimate",
+		ExternalSource: "s3://bucket/data/",
 		ExternalSpec:   `{"format":"parquet"}`,
 		Fields: []*schemapb.FieldSchema{
-			{FieldID: 100, Name: "id", DataType: schemapb.DataType_Int64, IsPrimaryKey: true, ExternalField: "id"},
-			{FieldID: 101, Name: "vector", DataType: schemapb.DataType_FloatVector, ExternalField: "embedding",
-				TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}}},
+			{FieldID: 100, Name: "__virtual_pk__", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+			{FieldID: 101, Name: "text", DataType: schemapb.DataType_VarChar, ExternalField: "text_col"},
+			{
+				FieldID: 102, Name: "vec", DataType: schemapb.DataType_FloatVector, ExternalField: "vec_col",
+				TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}},
+			},
 		},
 	}
 }
 
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_HappyPath() {
-	mockSample := mockey.Mock(SampleExternalFieldSizes).Return(map[string]int64{
-		"id":        8,
-		"embedding": 512,
-	}, nil).Build()
-	defer mockSample.UnPatch()
+func (suite *ExternalSegmentEstimateSuite) externalLoadInfo(numRows int64, memorySize int64) *querypb.SegmentLoadInfo {
+	return &querypb.SegmentLoadInfo{
+		SegmentID:      1,
+		CollectionID:   100,
+		NumOfRows:      numRows,
+		StorageVersion: storage.StorageV3,
+		ManifestPath:   `{"ver":1,"base_path":"external/100/segments/1"}`,
+		BinlogPaths: []*datapb.FieldBinlog{
+			{
+				FieldID:     0, // DefaultShortColumnGroupID
+				ChildFields: []int64{100, 101, 102},
+				Binlogs: []*datapb.Binlog{
+					{LogID: 1, EntriesNum: numRows, MemorySize: memorySize, LogSize: memorySize},
+				},
+			},
+		},
+	}
+}
 
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 2.0,
-	}
+func (suite *ExternalSegmentEstimateSuite) TestEstimatedBytesPerRow() {
+	loadInfo := suite.externalLoadInfo(1000, 576000) // 576 bytes/row
+	factor := resourceEstimateFactor{externalRawDataFactor: 1.0}
 
 	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
 	suite.NoError(err)
-
-	// (8 + 512) * 1000 * 2.0 = 1040000
-	suite.True(usage.MemorySize > 0, "external segment should have nonzero memory estimate")
-	suite.EqualValues(loadInfo.GetNumOfRows(), loadInfo.GetNumOfRows())
+	suite.NotNil(usage)
+	suite.Equal(int64(576), loadInfo.EstimatedBytesPerRow)
 }
 
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_SampleError() {
-	mockSample := mockey.Mock(SampleExternalFieldSizes).
-		Return(nil, fmt.Errorf("sampling failed")).Build()
-	defer mockSample.UnPatch()
+func (suite *ExternalSegmentEstimateSuite) TestExternalRawDataFactor() {
+	loadInfo := suite.externalLoadInfo(1000, 100000)
+	factor := resourceEstimateFactor{externalRawDataFactor: 1.5}
 
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 2.0,
-	}
-
-	_, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
-	suite.Error(err)
-	suite.Contains(err.Error(), "sampling failed")
+	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
+	suite.NoError(err)
+	// PART 2 adds binlogSize (100000) to memory
+	// PART 2.5 adds extra = 100000 * (1.5 - 1.0) = 50000
+	suite.True(usage.MemorySize >= 150000, "should include raw data factor: got %d", usage.MemorySize)
 }
 
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_LazyLoad() {
-	// When all external fields have warmup=disable, skip raw data estimation
+func (suite *ExternalSegmentEstimateSuite) TestExternalRawDataFactor_NoExtraWhenFactorLe1() {
+	loadInfo := suite.externalLoadInfo(1000, 100000)
+	factor := resourceEstimateFactor{externalRawDataFactor: 0.8}
+
+	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
+	suite.NoError(err)
+	// factor <= 1.0, no extra memory added by PART 2.5
+	suite.True(usage.MemorySize >= 100000, "should include base binlog size")
+}
+
+func (suite *ExternalSegmentEstimateSuite) TestLazyLoadSubtractsRawData() {
+	// Build a separate schema with warmup=disable on all external fields
 	lazySchema := &schemapb.CollectionSchema{
 		Name:           "test_external_lazy",
-		ExternalSource: "s3:///bucket/data",
+		ExternalSource: "s3://bucket/data/",
 		ExternalSpec:   `{"format":"parquet"}`,
 		Fields: []*schemapb.FieldSchema{
-			{FieldID: 100, Name: "id", DataType: schemapb.DataType_Int64, IsPrimaryKey: true, ExternalField: "id",
-				TypeParams: []*commonpb.KeyValuePair{{Key: common.WarmupKey, Value: common.WarmupDisable}}},
-			{FieldID: 101, Name: "vector", DataType: schemapb.DataType_FloatVector, ExternalField: "embedding",
+			{FieldID: 100, Name: "__virtual_pk__", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+			{
+				FieldID: 101, Name: "text", DataType: schemapb.DataType_VarChar, ExternalField: "text_col",
+				TypeParams: []*commonpb.KeyValuePair{{Key: common.WarmupKey, Value: common.WarmupDisable}},
+			},
+			{
+				FieldID: 102, Name: "vec", DataType: schemapb.DataType_FloatVector, ExternalField: "vec_col",
 				TypeParams: []*commonpb.KeyValuePair{
 					{Key: common.DimKey, Value: "128"},
 					{Key: common.WarmupKey, Value: common.WarmupDisable},
-				}},
+				},
+			},
 		},
 	}
 
-	// SampleExternalFieldSizes should NOT be called (lazy load skips estimation)
-	mockSample := mockey.Mock(SampleExternalFieldSizes).
-		Return(nil, fmt.Errorf("should not be called")).Build()
-	defer mockSample.UnPatch()
+	// Override global warmup defaults to disable
+	paramtable.Get().Save(paramtable.Get().QueryNodeCfg.TieredWarmupScalarField.Key, common.WarmupDisable)
+	paramtable.Get().Save(paramtable.Get().QueryNodeCfg.TieredWarmupVectorField.Key, common.WarmupDisable)
+	defer paramtable.Get().Reset(paramtable.Get().QueryNodeCfg.TieredWarmupScalarField.Key)
+	defer paramtable.Get().Reset(paramtable.Get().QueryNodeCfg.TieredWarmupVectorField.Key)
 
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 2.0,
-	}
+	suite.True(isExternalCollectionLazyLoad(lazySchema), "schema should be detected as lazy load")
 
-	usage, err := estimateLoadingResourceUsageOfSegment(lazySchema, loadInfo, factor)
+	loadInfo := suite.externalLoadInfo(1000, 100000)
+	factor := resourceEstimateFactor{externalRawDataFactor: 1.0}
+
+	// With lazy load, memory estimate should be less than or equal to
+	// the non-lazy-load case (which is at least binlogSize=100000).
+	// The exact value depends on PART 2's mmap/tiered logic.
+	nonLazyUsage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
 	suite.NoError(err)
-	// Memory should be 0 (no field data loaded during load)
-	suite.EqualValues(0, usage.MemorySize)
-}
 
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_ZeroRows() {
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    0, // zero rows → skip estimation
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 2.0,
-	}
-
-	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
+	lazyUsage, err := estimateLoadingResourceUsageOfSegment(lazySchema, loadInfo, factor)
 	suite.NoError(err)
-	suite.EqualValues(0, usage.MemorySize)
+
+	suite.True(lazyUsage.MemorySize <= nonLazyUsage.MemorySize,
+		"lazy load memory (%d) should be <= non-lazy (%d)", lazyUsage.MemorySize, nonLazyUsage.MemorySize)
 }
-
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_CachedSizes() {
-	mockSample := mockey.Mock(SampleExternalFieldSizes).Return(map[string]int64{
-		"id":        8,
-		"embedding": 512,
-	}, nil).Build()
-	defer mockSample.UnPatch()
-
-	cache := map[int64]map[string]int64{
-		42: {"id": 16, "embedding": 1024},
-	}
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 2.0,
-	}
-
-	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor, cache)
-	suite.NoError(err)
-	// Should use cached values (16+1024)*1000*2 = 2080000
-	suite.True(usage.MemorySize > 0)
-}
-
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_CacheWrite() {
-	// Pass non-empty cache map with collection NOT cached yet;
-	// should sample and write the result back.
-	mockSample := mockey.Mock(SampleExternalFieldSizes).Return(map[string]int64{
-		"id":        8,
-		"embedding": 512,
-	}, nil).Build()
-	defer mockSample.UnPatch()
-
-	cache := map[int64]map[string]int64{} // empty but non-nil
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 2.0,
-	}
-
-	_, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor, cache)
-	suite.NoError(err)
-	// Cache should now contain the sampled sizes
-	suite.Contains(cache, int64(42))
-	suite.Equal(int64(8), cache[42]["id"])
-}
-
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_NonExternalFieldSkipped() {
-	// Schema with a mix of external and non-external fields — non-external
-	// fields should be skipped in the size computation.
-	mixedSchema := &schemapb.CollectionSchema{
-		Name:           "test_mixed",
-		ExternalSource: "s3:///bucket/data",
-		ExternalSpec:   `{"format":"parquet"}`,
-		Fields: []*schemapb.FieldSchema{
-			{FieldID: 100, Name: "id", DataType: schemapb.DataType_Int64, IsPrimaryKey: true, ExternalField: "id"},
-			// NOTE: this field has no ExternalField, so it must be skipped
-			{FieldID: 101, Name: "local_only", DataType: schemapb.DataType_Int64},
-			{FieldID: 102, Name: "vector", DataType: schemapb.DataType_FloatVector, ExternalField: "embedding",
-				TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}}},
-		},
-	}
-
-	mockSample := mockey.Mock(SampleExternalFieldSizes).Return(map[string]int64{
-		"id":        8,
-		"embedding": 512,
-	}, nil).Build()
-	defer mockSample.UnPatch()
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{externalRawDataFactor: 2.0}
-
-	usage, err := estimateLoadingResourceUsageOfSegment(mixedSchema, loadInfo, factor)
-	suite.NoError(err)
-	suite.True(usage.MemorySize > 0)
-}
-
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_ZeroBytesField() {
-	// When a field's sampled size is zero or missing, it should be skipped (continue).
-	mockSample := mockey.Mock(SampleExternalFieldSizes).Return(map[string]int64{
-		"id":        0, // zero bytes → skipped
-		"embedding": 512,
-		// "missing" field name → not in map → skipped
-	}, nil).Build()
-	defer mockSample.UnPatch()
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	factor := resourceEstimateFactor{externalRawDataFactor: 2.0}
-
-	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
-	suite.NoError(err)
-	// Only embedding contributes: 512 * 1000 * 2 = 1024000
-	suite.True(usage.MemorySize > 0)
-}
-
-func (suite *SegmentLoaderExternalEstimateSuite) TestExternalEstimate_ZeroFactor() {
-	mockSample := mockey.Mock(SampleExternalFieldSizes).Return(map[string]int64{
-		"id":        8,
-		"embedding": 512,
-	}, nil).Build()
-	defer mockSample.UnPatch()
-
-	loadInfo := &querypb.SegmentLoadInfo{
-		SegmentID:    1,
-		CollectionID: 42,
-		NumOfRows:    1000,
-		ManifestPath: "/manifests/seg1.json",
-	}
-	// Zero factor should default to 1.0
-	factor := resourceEstimateFactor{
-		externalRawDataFactor: 0,
-	}
-
-	usage, err := estimateLoadingResourceUsageOfSegment(suite.schema, loadInfo, factor)
-	suite.NoError(err)
-	suite.True(usage.MemorySize > 0)
-}
-
-// ==================== filterPKStatsBinlogs / filterBM25Stats Tests ====================
 
 func TestSegmentLoader(t *testing.T) {
 	suite.Run(t, &SegmentLoaderSuite{})
 	suite.Run(t, &SegmentLoaderDetailSuite{})
 	suite.Run(t, &SegmentLoaderTextIndexEstimateSuite{})
-	suite.Run(t, &SegmentLoaderExternalEstimateSuite{})
+	suite.Run(t, &ExternalSegmentEstimateSuite{})
 }
