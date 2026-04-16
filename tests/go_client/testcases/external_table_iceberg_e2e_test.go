@@ -52,6 +52,8 @@ func toMilvusURI(icebergURI, host string) string {
 //
 //	go test -v -run TestExternalTableIcebergE2E -timeout 30m -tags dynamic,test
 func TestExternalTableIcebergE2E(t *testing.T) {
+	skipIfPythonDepsMissing(t, "pyarrow", "pyiceberg")
+
 	minioEndpoint := icebergEnvOrDefault("ICEBERG_MINIO_ENDPOINT", "http://localhost:9000")
 	minioAccessKey := icebergEnvOrDefault("ICEBERG_MINIO_ACCESS_KEY", "minioadmin")
 	minioSecretKey := icebergEnvOrDefault("ICEBERG_MINIO_SECRET_KEY", "minioadmin")
@@ -239,4 +241,21 @@ func icebergEnvOrDefault(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// skipIfPythonDepsMissing skips the test if python3 or any of the required
+// Python modules are unavailable. The Iceberg table bootstrap uses a Python
+// script that needs pyarrow and pyiceberg; CI images without those deps should
+// skip rather than fail so unrelated test runs are not red.
+func skipIfPythonDepsMissing(t *testing.T, modules ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("skipping: python3 not available: %v", err)
+	}
+	for _, m := range modules {
+		// #nosec G204 -- module names are hard-coded test literals.
+		if err := exec.Command("python3", "-c", fmt.Sprintf("import %s", m)).Run(); err != nil {
+			t.Skipf("skipping: python module %q not importable: %v", m, err)
+		}
+	}
 }
