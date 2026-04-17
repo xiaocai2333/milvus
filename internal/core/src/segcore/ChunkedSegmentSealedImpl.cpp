@@ -1594,6 +1594,16 @@ ChunkedSegmentSealedImpl::FilterVectorValidOffsets(milvus::OpContext* op_ctx,
     } else {
         auto column = get_column(field_id);
         if (column != nullptr && column->IsNullable()) {
+            // Proxy columns (external tables) defer BuildValidRowIds to avoid
+            // triggering S3 data fetches during load when warmup=disable.
+            // Ensure the offset mapping is built before translating offsets —
+            // an unbuilt mapping treats every logical offset as valid and
+            // returns it as-is (identity), causing OOB reads into compact
+            // (valid-rows-only) chunk buffers.
+            if (!column->GetOffsetMapping().IsEnabled()) {
+                column->BuildValidRowIds(op_ctx);
+            }
+
             result.valid_data = std::make_unique<bool[]>(count);
             result.valid_offsets.reserve(count);
 
