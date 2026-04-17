@@ -37,8 +37,13 @@ set(WITH_BENCHMARK OFF CACHE BOOL "" FORCE)
 # Fallback: search CMAKE_BINARY_DIR/bin for protoc installed by conan imports.
 
 # milvus-storage uses find_package(Azure REQUIRED) which relies on Arrow's FindAzure.cmake.
-# Workaround: pre-find azure-sdk via Conan's Find module, then write a stub FindAzure.cmake.
-find_package(azure-sdk-for-cpp QUIET)
+# Workaround: pre-find azure-sdk via Conan's CONFIG package, write a stub FindAzure.cmake
+# to satisfy milvus-storage's find_package(Azure REQUIRED), AND propagate azure-sdk-for-cpp
+# component include directories globally so azurefs.cc can locate <azure/identity.hpp>.
+# The aggregate target azure-sdk-for-cpp::azure-sdk-for-cpp that milvus-storage links
+# against doesn't always propagate INTERFACE_INCLUDE_DIRECTORIES through Conan 2.x
+# CMakeDeps, so we inject includes at directory scope before add_subdirectory.
+find_package(azure-sdk-for-cpp CONFIG QUIET)
 if(azure-sdk-for-cpp_FOUND)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/FindAzure.cmake"
         "set(Azure_FOUND TRUE)\n"
@@ -49,6 +54,19 @@ if(azure-sdk-for-cpp_FOUND)
         "set(azure-storage-files-datalake-cpp_FOUND TRUE)\n"
     )
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
+
+    # Propagate azure include dirs from Conan component targets to directory scope
+    # so milvus-storage's azurefs.cc can find <azure/identity.hpp> etc.
+    foreach(_comp Azure::azure-core Azure::azure-identity Azure::azure-storage-blobs
+                  Azure::azure-storage-common Azure::azure-storage-files-datalake
+                  azure-sdk-for-cpp::azure-sdk-for-cpp)
+        if(TARGET ${_comp})
+            get_target_property(_azure_inc ${_comp} INTERFACE_INCLUDE_DIRECTORIES)
+            if(_azure_inc)
+                include_directories(SYSTEM ${_azure_inc})
+            endif()
+        endif()
+    endforeach()
 endif()
 find_program(_PROTOC_PROGRAM protoc
     PATHS "${CMAKE_BINARY_DIR}/bin"
@@ -98,6 +116,17 @@ if ( NOT milvus-storage_POPULATED )
     # On macOS, aws-c-io uses Apple's Network.framework for socket operations
     if(APPLE)
         target_link_libraries(milvus-storage PUBLIC "-framework Network")
+    endif()
+
+    # Belt-and-suspenders: explicitly attach azure-sdk include dirs to milvus-storage
+    # target in case directory-scope include_directories didn't propagate.
+    if(azure-sdk-for-cpp_FOUND)
+        foreach(_comp Azure::azure-core Azure::azure-identity Azure::azure-storage-blobs
+                      Azure::azure-storage-common Azure::azure-storage-files-datalake)
+            if(TARGET ${_comp})
+                target_link_libraries(milvus-storage PRIVATE ${_comp})
+            endif()
+        endforeach()
     endif()
 endif()
 
