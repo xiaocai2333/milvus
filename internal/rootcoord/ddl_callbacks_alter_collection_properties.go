@@ -21,6 +21,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v2/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v2/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v2/streaming/util/message/ce"
+	"github.com/milvus-io/milvus/pkg/v2/util/externalspec"
 	"github.com/milvus-io/milvus/pkg/v2/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v2/util/merr"
 	"github.com/milvus-io/milvus/pkg/v2/util/timestamptz"
@@ -128,6 +129,42 @@ func (c *Core) broadcastAlterCollectionForAlterCollection(ctx context.Context, r
 	}
 	for _, deleteKey := range req.GetDeleteKeys() {
 		delete(newProperties, deleteKey)
+	}
+
+	// Normalize ExternalSource into the canonical Milvus form whenever either
+	// ExternalSource or ExternalSpec is being altered. The normalization uses
+	// the final (post-alter) pair — if one side is omitted in this request,
+	// we fall back to the stored value so a lone `extfs.address` update still
+	// rewrites the previously-persisted AWS-style URI. Downstream consumers
+	// (DataCoord explore, DataNode fetch, QueryNode LoadColumnGroups, C++
+	// InjectExtfsProperties) all parse the persisted URI as Milvus form.
+	//
+	// Only write back to udpates.Schema.ExternalSource when the normalized
+	// value actually differs from the incoming request or the stored URI.
+	// Writing a same-valued string into the update path would mark the field
+	// as "changed" in downstream diff/audit logic even though nothing moved.
+	if udpates.Schema != nil &&
+		(udpates.Schema.ExternalSource != "" || udpates.Schema.ExternalSpec != "") {
+		effectiveSource := udpates.Schema.ExternalSource
+		if effectiveSource == "" {
+			effectiveSource = coll.ExternalSource
+		}
+		effectiveSpec := udpates.Schema.ExternalSpec
+		if effectiveSpec == "" {
+			effectiveSpec = coll.ExternalSpec
+		}
+		normalizedSource := externalspec.NormalizeExternalSource(effectiveSource, effectiveSpec)
+		switch {
+		case udpates.Schema.ExternalSource != "" && normalizedSource != udpates.Schema.ExternalSource:
+			// Caller provided a new source and normalization actually changed
+			// it — replace the request value so the persisted URI is canonical.
+			udpates.Schema.ExternalSource = normalizedSource
+		case udpates.Schema.ExternalSource == "" && normalizedSource != coll.ExternalSource:
+			// Caller only changed spec; the stored source needs rewriting to
+			// match the new endpoint. Write only in this case to avoid
+			// spuriously marking ExternalSource as altered otherwise.
+			udpates.Schema.ExternalSource = normalizedSource
+		}
 	}
 
 	// Check if the properties are changed.

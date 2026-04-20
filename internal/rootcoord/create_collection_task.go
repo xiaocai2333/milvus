@@ -194,6 +194,14 @@ func (t *createCollectionTask) validateSchema(ctx context.Context, schema *schem
 		if err := externalspec.ValidateSourceAndSpec(schema.GetExternalSource(), schema.GetExternalSpec()); err != nil {
 			return err
 		}
+		// Normalize AWS-style URIs (`s3://bucket/key` with spec.extfs.address)
+		// into the canonical Milvus form before persisting the schema. Every
+		// downstream consumer — DataCoord explore, DataNode fetch, QueryNode
+		// LoadColumnGroups, C++ InjectExtfsProperties — parses the persisted
+		// URI assuming Milvus form (host = endpoint, path[0] = bucket); leaving
+		// an AWS-style URI in etcd would produce the wrong bucket at load time.
+		schema.ExternalSource = externalspec.NormalizeExternalSource(
+			schema.GetExternalSource(), schema.GetExternalSpec())
 	}
 
 	if hasSystemFields(schema, []string{RowIDFieldName, TimeStampFieldName, MetaFieldName, NamespaceFieldName}) {

@@ -571,6 +571,307 @@ func TestExtfsPrefixForCollection(t *testing.T) {
 	assert.Equal(t, "extfs.0.", ExtfsPrefixForCollection(0))
 }
 
+func TestBuildExtfsOverrides_AWSStyleURI(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(7)
+	config := &indexpb.StorageConfig{
+		Address:    "localhost:9000",
+		BucketName: "milvus-internal",
+		UseSSL:     false,
+	}
+	// spec.extfs.address is the flip: URI must then be interpreted AWS-style.
+	specExtfs := map[string]string{
+		prefix + "address":          "https://s3.us-west-2.amazonaws.com",
+		prefix + "access_key_id":    "AK",
+		prefix + "access_key_value": "SK",
+	}
+	got := BuildExtfsOverrides("s3://user-bucket/data/prefix", config, prefix, specExtfs)
+	require.NotNil(t, got)
+
+	// URI host was treated as bucket.
+	assert.Equal(t, "user-bucket", got[prefix+"bucket_name"])
+	// Endpoint came from spec, not URI host.
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com", got[prefix+"address"])
+	assert.Equal(t, "AK", got[prefix+"access_key_id"])
+	assert.Equal(t, "SK", got[prefix+"access_key_value"])
+}
+
+func TestBuildExtfsOverrides_AWSStyle_SpecBucketOverrides(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(8)
+	config := &indexpb.StorageConfig{BucketName: "orig", UseSSL: false}
+	specExtfs := map[string]string{
+		prefix + "address":     "https://s3.amazonaws.com",
+		prefix + "bucket_name": "explicit-bucket",
+	}
+	got := BuildExtfsOverrides("s3://from-uri/data", config, prefix, specExtfs)
+	// spec.bucket_name wins over URI-derived bucket.
+	assert.Equal(t, "explicit-bucket", got[prefix+"bucket_name"])
+}
+
+func TestBuildExtfsOverrides_MilvusFormUnchangedWhenNoSpecAddress(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(9)
+	config := &indexpb.StorageConfig{UseSSL: false}
+	// No spec.address → Milvus-form interpretation (host=endpoint, path[0]=bucket).
+	got := BuildExtfsOverrides("s3://minio:9000/external-bucket/prefix", config, prefix, nil)
+	assert.Equal(t, "external-bucket", got[prefix+"bucket_name"])
+	assert.Equal(t, "http://minio:9000", got[prefix+"address"])
+}
+
+func TestNormalizeExternalSource(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(1)
+	specWithAddr := map[string]string{
+		prefix + "address": "https://s3.us-west-2.amazonaws.com",
+	}
+	specWithBareAddr := map[string]string{
+		prefix + "address": "minio:9000",
+	}
+	tests := []struct {
+		name       string
+		source     string
+		specExtfs  map[string]string
+		wantResult string
+	}{
+		{
+			name:       "no spec address keeps source unchanged (Milvus form)",
+			source:     "s3://endpoint/bucket/key",
+			specExtfs:  nil,
+			wantResult: "s3://endpoint/bucket/key",
+		},
+		{
+			name:       "relative path is returned unchanged even with spec address",
+			source:     "path/to/data",
+			specExtfs:  specWithAddr,
+			wantResult: "path/to/data",
+		},
+		{
+			name:       "empty-host URI returned unchanged (already same-endpoint form)",
+			source:     "s3:///bucket/key",
+			specExtfs:  specWithAddr,
+			wantResult: "s3:///bucket/key",
+		},
+		{
+			name:       "AWS-style URI rewritten to Milvus form using spec address (stripped of scheme)",
+			source:     "s3://my-bucket/data/v1",
+			specExtfs:  specWithAddr,
+			wantResult: "s3://s3.us-west-2.amazonaws.com/my-bucket/data/v1",
+		},
+		{
+			name:       "AWS-style URI with bare host:port spec address",
+			source:     "s3://my-bucket/data",
+			specExtfs:  specWithBareAddr,
+			wantResult: "s3://minio:9000/my-bucket/data",
+		},
+		{
+			name:       "AWS-style URI with only bucket (empty path)",
+			source:     "s3://just-bucket",
+			specExtfs:  specWithAddr,
+			wantResult: "s3://s3.us-west-2.amazonaws.com/just-bucket",
+		},
+		{
+			name:       "AWS-style URI with trailing slash",
+			source:     "s3://my-bucket/",
+			specExtfs:  specWithAddr,
+			wantResult: "s3://s3.us-west-2.amazonaws.com/my-bucket/",
+		},
+		{
+			name:       "invalid URL returned unchanged",
+			source:     "://bad",
+			specExtfs:  specWithAddr,
+			wantResult: "://bad",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantResult, NormalizeExternalSource(tt.source, tt.specExtfs, prefix))
+		})
+	}
+}
+
+func TestStripURLScheme(t *testing.T) {
+	assert.Equal(t, "host:9000", stripURLScheme("http://host:9000"))
+	assert.Equal(t, "s3.amazonaws.com", stripURLScheme("https://s3.amazonaws.com"))
+	assert.Equal(t, "minio:9000", stripURLScheme("minio:9000"))
+	assert.Equal(t, "", stripURLScheme(""))
+	// Non-http schemes must be preserved — stripping them would silently
+	// rewrite a user-supplied hostname.
+	assert.Equal(t, "s3://x", stripURLScheme("s3://x"))
+	assert.Equal(t, "ftp://host", stripURLScheme("ftp://host"))
+}
+
+func TestIsSafeURIHost(t *testing.T) {
+	assert.True(t, isSafeURIHost("host"))
+	assert.True(t, isSafeURIHost("host:9000"))
+	assert.True(t, isSafeURIHost("bucket-name.s3.amazonaws.com"))
+	assert.False(t, isSafeURIHost(""))
+	assert.False(t, isSafeURIHost("user@host"))
+	assert.False(t, isSafeURIHost("[::1]"))
+	assert.False(t, isSafeURIHost("host with space"))
+	assert.False(t, isSafeURIHost("host/path"))
+	assert.False(t, isSafeURIHost("host?query"))
+	assert.False(t, isSafeURIHost("host#frag"))
+}
+
+func TestNormalizeExternalSource_RejectsUnsafeHost(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(11)
+	spec := map[string]string{prefix + "address": "https://s3.amazonaws.com"}
+	// IPv6-bracket form as host is not a valid bucket name and must not be
+	// reassembled into a normalized URI — return the source unchanged so the
+	// caller can surface a clear error downstream.
+	src := "s3://[::1]/key"
+	assert.Equal(t, src, NormalizeExternalSource(src, spec, prefix))
+}
+
+func TestSpecHasAddress(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(3)
+	assert.False(t, specHasAddress(nil, prefix))
+	assert.False(t, specHasAddress(map[string]string{prefix + "region": "us-east-1"}, prefix))
+	assert.False(t, specHasAddress(map[string]string{prefix + "address": ""}, prefix))
+	assert.True(t, specHasAddress(map[string]string{prefix + "address": "host:9000"}, prefix))
+}
+
+func TestEffectiveSpecAddress(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(12)
+	// Tier 1: explicit address wins over derivation.
+	assert.Equal(t, "https://custom.example.com",
+		effectiveSpecAddress(map[string]string{
+			prefix + "address":        "https://custom.example.com",
+			prefix + "cloud_provider": "aws",
+			prefix + "region":         "us-west-2",
+		}, prefix))
+	// Tier 2: derive from provider+region when address absent.
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com",
+		effectiveSpecAddress(map[string]string{
+			prefix + "cloud_provider": "aws",
+			prefix + "region":         "us-west-2",
+		}, prefix))
+	// Tier 2 GCP: region-less derivation.
+	assert.Equal(t, "https://storage.googleapis.com",
+		effectiveSpecAddress(map[string]string{
+			prefix + "cloud_provider": "gcp",
+		}, prefix))
+	// Tier 3: no tier matches → empty.
+	assert.Equal(t, "",
+		effectiveSpecAddress(map[string]string{
+			prefix + "cloud_provider": "azure", // not derivable
+			prefix + "region":         "eastus",
+		}, prefix))
+	assert.Equal(t, "", effectiveSpecAddress(nil, prefix))
+}
+
+func TestBuildExtfsOverrides_AWSStyle_DerivedFromProviderRegion(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(13)
+	config := &indexpb.StorageConfig{UseSSL: false}
+	// No explicit address; cloud_provider+region should drive derivation.
+	specExtfs := map[string]string{
+		prefix + "cloud_provider": "aws",
+		prefix + "region":         "us-west-2",
+	}
+	got := BuildExtfsOverrides("s3://my-bucket/data", config, prefix, specExtfs)
+	assert.Equal(t, "my-bucket", got[prefix+"bucket_name"])
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com", got[prefix+"address"])
+}
+
+func TestBuildExtfsOverrides_EmptyHostWithEffectiveAddrFallsToMilvusForm(t *testing.T) {
+	// Regression: a URI with empty host (`s3:///bucket/key`, the "same-endpoint
+	// shorthand" shape) combined with a non-empty effective endpoint must NOT
+	// enter the AWS-style branch — otherwise `u.Host == ""` would skip the
+	// bucket override and the bucket in path[0] would be silently dropped,
+	// leaving the baseline storageConfig bucket in place.
+	prefix := ExtfsPrefixForCollection(18)
+	config := &indexpb.StorageConfig{
+		BucketName: "baseline-bucket", // must be overridden by the URI path
+		UseSSL:     false,
+	}
+	specExtfs := map[string]string{
+		prefix + "address": "https://s3.us-west-2.amazonaws.com",
+	}
+	got := BuildExtfsOverrides("s3:///external-bucket/data", config, prefix, specExtfs)
+	// URI path[0] MUST win over the storageConfig baseline.
+	assert.Equal(t, "external-bucket", got[prefix+"bucket_name"])
+	// Address comes from the spec merge step (Milvus form writes no address
+	// because u.Host is empty, and the spec extfs merge writes the explicit
+	// address). End result: bucket from URI path, address from spec.
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com", got[prefix+"address"])
+}
+
+func TestBuildExtfsOverrides_EmptyAddressDoesNotClobberDerived(t *testing.T) {
+	// Regression: a present-but-empty `extfs.<id>.address` key must not erase
+	// the Tier-2 derived endpoint during the spec-override merge step.
+	prefix := ExtfsPrefixForCollection(16)
+	config := &indexpb.StorageConfig{UseSSL: false}
+	specExtfs := map[string]string{
+		prefix + "address":        "", // empty — user serialized absent field
+		prefix + "cloud_provider": "aws",
+		prefix + "region":         "us-west-2",
+	}
+	got := BuildExtfsOverrides("s3://my-bucket/data", config, prefix, specExtfs)
+	assert.Equal(t, "my-bucket", got[prefix+"bucket_name"])
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com", got[prefix+"address"])
+}
+
+func TestBuildExtfsOverrides_EmptyValueDoesNotClobberBaseline(t *testing.T) {
+	// Symmetric case: empty bucket_name must not erase the storageConfig
+	// baseline copied via copyStorageConfigToExtfs.
+	prefix := ExtfsPrefixForCollection(17)
+	config := &indexpb.StorageConfig{
+		BucketName: "baseline-bucket",
+		Address:    "localhost:9000",
+		UseSSL:     false,
+	}
+	specExtfs := map[string]string{
+		prefix + "bucket_name": "", // empty — must be ignored
+	}
+	// Relative source → no URI-derived override; baseline preserved.
+	got := BuildExtfsOverrides("data/", config, prefix, specExtfs)
+	assert.Equal(t, "baseline-bucket", got[prefix+"bucket_name"])
+	assert.Equal(t, "http://localhost:9000", got[prefix+"address"])
+}
+
+func TestBuildExtfsOverrides_AWSStyle_EqualityGuardFallsBackToMilvusForm(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(14)
+	config := &indexpb.StorageConfig{UseSSL: false}
+	// URI host matches what derivation would produce → treat as Milvus form:
+	// host is endpoint, path[0] is bucket. ensureHTTPScheme prepends http://
+	// (useSSL=false) when the host has no scheme prefix.
+	specExtfs := map[string]string{
+		prefix + "cloud_provider": "aws",
+		prefix + "region":         "us-west-2",
+	}
+	got := BuildExtfsOverrides(
+		"s3://s3.us-west-2.amazonaws.com/real-bucket/data",
+		config, prefix, specExtfs,
+	)
+	assert.Equal(t, "real-bucket", got[prefix+"bucket_name"])
+	assert.Equal(t, "http://s3.us-west-2.amazonaws.com", got[prefix+"address"])
+}
+
+func TestNormalizeExternalSource_Tier2_DerivedEndpoint(t *testing.T) {
+	prefix := ExtfsPrefixForCollection(15)
+	// Derived AWS endpoint rewrites bucket-style URI.
+	spec := map[string]string{
+		prefix + "cloud_provider": "aws",
+		prefix + "region":         "us-west-2",
+	}
+	assert.Equal(t,
+		"s3://s3.us-west-2.amazonaws.com/my-bucket/key",
+		NormalizeExternalSource("s3://my-bucket/key", spec, prefix))
+
+	// Equality guard: URI host already equals the derived endpoint → leave
+	// unchanged so the Milvus-form path downstream interprets correctly.
+	assert.Equal(t,
+		"s3://s3.us-west-2.amazonaws.com/real-bucket/data",
+		NormalizeExternalSource(
+			"s3://s3.us-west-2.amazonaws.com/real-bucket/data", spec, prefix))
+
+	// Azure → not derivable → no rewrite (Tier 3).
+	specAzure := map[string]string{
+		prefix + "cloud_provider": "azure",
+		prefix + "region":         "eastus",
+	}
+	assert.Equal(t,
+		"s3://my-bucket/key",
+		NormalizeExternalSource("s3://my-bucket/key", specAzure, prefix))
+}
+
 func TestFilterFileInfosByFormat(t *testing.T) {
 	files := []FileInfo{
 		{FilePath: "data/file1.parquet", NumRows: 100},

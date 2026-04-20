@@ -55,6 +55,22 @@ var supportedFormats = map[string]bool{
 // allowedExtfsKeys lists extfs configuration keys that can be passed via ExternalSpec.
 // Credential keys are allowed because cross-bucket scenarios require different
 // authentication from the main Milvus storage (e.g., local MinIO vs external AWS S3).
+// `address` and `bucket_name` are allowed so users can write standard AWS-style
+// URIs (`s3://<bucket>/<key>`) and let the endpoint come from extfs instead of
+// the URI host. When `address` is present in extfs, BuildExtfsOverrides flips
+// to AWS-style URI interpretation (URI host = bucket).
+//
+// AWS-style activation: URI interpretation switches to AWS-style whenever
+// there is an effective endpoint (see EffectiveAddressFromExtfs). That means
+// `cloud_provider` + `region` alone — without an explicit `address` — also
+// activate the flip, via Tier-2 derivation. Users who write a Milvus-form
+// URI (`s3://<endpoint>/<bucket>/...`) alongside provider/region MUST ensure
+// the URI host matches the derived endpoint exactly (the equality guard in
+// NormalizeExternalSource and BuildExtfsOverrides relies on a string match),
+// otherwise the URI will be silently rewritten as AWS-style and the original
+// endpoint will be misinterpreted as a bucket. Self-hosted S3-compatible
+// targets (MinIO, R2, Backblaze) must NOT set cloud_provider/region that
+// conflicts with the true storage — use `address` explicitly instead.
 // Note: these values are stored in etcd as part of CollectionSchema.
 var allowedExtfsKeys = map[string]bool{
 	"use_iam":          true,
@@ -71,6 +87,8 @@ var allowedExtfsKeys = map[string]bool{
 	"session_name":     true,
 	"external_id":      true,
 	"load_frequency":   true,
+	"address":          true,
+	"bucket_name":      true,
 }
 
 // booleanExtfsKeys lists extfs keys that only accept "true" or "false".
@@ -224,6 +242,14 @@ func ValidateExternalSource(source string) error {
 	// Empty host allowed: `s3:///bucket/path` means same-endpoint cross-bucket
 	// (uses Milvus's own storage endpoint; BuildExtfsOverrides skips address
 	// override when host is empty).
+	// Non-empty host carries two meanings depending on whether ExternalSpec
+	// provides extfs.address:
+	// - Milvus form (default, spec.extfs.address absent): host is the
+	//   storage endpoint and the first path segment is the bucket, e.g.
+	//   `s3://minio:9000/bucket/key` or `aws://s3.us-west-2.amazonaws.com/bkt/key`.
+	// - AWS standard form (spec.extfs.address present): host is the bucket
+	//   and the remainder of the path is the key, matching aws-cli shape
+	//   `s3://bucket/key`. Endpoint taken from spec.extfs.address.
 	return nil
 }
 
@@ -241,6 +267,188 @@ func ValidateSourceAndSpec(externalSource, externalSpec string) error {
 	}
 	return nil
 }
+
+// DeriveEndpoint returns the storage endpoint URL for a (cloud_provider,
+// region) pair when it can be mechanically derived from documented public
+// endpoint patterns. It is the second-tier source of the effective endpoint
+// used by NormalizeExternalSource / BuildExtfsOverrides when the caller
+// omits `spec.extfs.address`.
+//
+// Coverage matches milvus-storage cpp/include/milvus-storage/filesystem/fs.h
+// provider enum minus Azure: AWS, GCP, Aliyun OSS, Tencent COS, Huawei OBS.
+// Azure Blob is intentionally excluded because its endpoint
+// (`<account>.blob.core.windows.net`) carries an account-specific subdomain
+// that cannot be reconstructed from (provider, region) alone — Azure users
+// must provide extfs.address explicitly. Self-hosted S3-compatible targets
+// (MinIO, R2, Backblaze B2, Wasabi) fall outside the provider enum entirely
+// and likewise require an explicit address.
+func DeriveEndpoint(cloudProvider, region string) (string, bool) {
+	switch strings.ToLower(cloudProvider) {
+	case "aws":
+		if region == "" {
+			return "", false
+		}
+		// AWS China regions live under a separate top-level domain.
+		if strings.HasPrefix(region, "cn-") {
+			return "https://s3." + region + ".amazonaws.com.cn", true
+		}
+		return "https://s3." + region + ".amazonaws.com", true
+	case "gcp":
+		// GCS uses a single global endpoint for all regions; region is a
+		// bucket property, not part of the endpoint URL.
+		return "https://storage.googleapis.com", true
+	case "aliyun":
+		if region == "" {
+			return "", false
+		}
+		return "https://oss-" + region + ".aliyuncs.com", true
+	case "tencent":
+		if region == "" {
+			return "", false
+		}
+		return "https://cos." + region + ".myqcloud.com", true
+	case "huawei":
+		if region == "" {
+			return "", false
+		}
+		return "https://obs." + region + ".myhuaweicloud.com", true
+	}
+	return "", false
+}
+
+// EffectiveAddressFromExtfs returns the effective endpoint for a spec extfs
+// map using the three-tier priority:
+//  1. explicit spec.extfs.address
+//  2. derived from (cloud_provider, region) via DeriveEndpoint
+//  3. "" (signalling "no extfs-supplied endpoint — defer to URI host",
+//     i.e. the pre-existing Milvus-form semantics)
+//
+// Extfs keys are unprefixed in this call (callers at the packed FFI layer
+// that work with prefixed maps are expected to strip the prefix first).
+func EffectiveAddressFromExtfs(extfs map[string]string) string {
+	if len(extfs) == 0 {
+		return ""
+	}
+	if a, ok := extfs["address"]; ok && a != "" {
+		return a
+	}
+	if d, ok := DeriveEndpoint(extfs["cloud_provider"], extfs["region"]); ok {
+		return d
+	}
+	return ""
+}
+
+// NormalizeExternalSource rewrites an AWS-style URI (`scheme://bucket/key`) into
+// the canonical Milvus form (`scheme://endpoint/bucket/key`) whenever the
+// caller supplies an endpoint through ExternalSpec.extfs — either explicitly
+// via `address` or derivable from `cloud_provider + region`. The canonical
+// form is what gets persisted into CollectionSchema, so every downstream
+// consumer (DataCoord explore, DataNode fetch, QueryNode LoadColumnGroups,
+// index build) sees a URI whose host is the storage endpoint — matching the
+// URI shape produced by milvus-storage explore.
+//
+// Three-tier priority for the effective endpoint:
+//  1. `spec.extfs.address` explicit (wins outright)
+//  2. Derived from `spec.extfs.cloud_provider + region` for the 5 public
+//     clouds milvus-storage supports with a region-based endpoint pattern
+//  3. None of the above — URI is returned unchanged (Milvus-form semantics)
+//
+// Equality guard: if the URI host already equals the effective endpoint, the
+// user is writing a Milvus-form URI that happens to redundantly carry
+// cloud_provider + region in the spec. The guard avoids misinterpreting the
+// endpoint as a bucket in that case and returns the source untouched, leaving
+// the existing Milvus-form path to handle it.
+//
+// Relative paths, empty-host URIs, and URIs whose host is not a safe bucket
+// name are returned as-is so downstream validators can surface a precise
+// error rather than seeing a silently-mangled URI.
+func NormalizeExternalSource(externalSource, externalSpec string) string {
+	if externalSource == "" || externalSpec == "" {
+		return externalSource
+	}
+	spec, err := ParseExternalSpec(externalSpec)
+	if err != nil {
+		return externalSource
+	}
+	return RewriteAWSStyleToMilvusForm(externalSource, EffectiveAddressFromExtfs(spec.Extfs))
+}
+
+// RewriteAWSStyleToMilvusForm is the shared core rewrite used by both
+// NormalizeExternalSource (ExternalSpec JSON entry point) and the prefix-aware
+// variant in internal/storagev2/packed. Given a pre-computed effective
+// endpoint, it rewrites an AWS-style URI (`scheme://bucket/key`) into the
+// canonical Milvus form (`scheme://endpoint/bucket/key`). All safety gates
+// (empty endpoint, invalid URL, empty/unsafe host, equality guard) are
+// applied inside this single function so the two entry points cannot drift.
+func RewriteAWSStyleToMilvusForm(externalSource, effectiveAddr string) string {
+	if effectiveAddr == "" {
+		return externalSource
+	}
+	u, err := url.Parse(externalSource)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return externalSource
+	}
+	if !IsSafeURIHost(u.Host) {
+		return externalSource
+	}
+	endpoint := StripURLScheme(effectiveAddr)
+	if u.Host == endpoint {
+		return externalSource
+	}
+	normalized := &url.URL{
+		Scheme:   u.Scheme,
+		Host:     endpoint,
+		Path:     "/" + u.Host + u.Path,
+		RawQuery: u.RawQuery,
+		Fragment: u.Fragment,
+	}
+	return normalized.String()
+}
+
+// IsSafeURIHost accepts hosts composed only of RFC-3986 unreserved + `:` (port)
+// + `-` + `.` characters. The whitelist is deliberately stricter than what
+// url.Parse tolerates so the reassembled URI cannot carry characters that
+// would alter parsing on the C++ side (bracketed IPv6 literals, userinfo,
+// whitespace, percent-encodings we did not introduce ourselves).
+// Accepting a whitelist also future-proofs the check — new RFC-tolerated
+// characters do not silently become valid bucket names.
+func IsSafeURIHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// StripURLScheme removes a leading "http://" or "https://" from address,
+// leaving bare host[:port]. Matches the behaviour of the FFI-side helper so
+// the persisted URI does not carry a nested scheme when reassembled.
+func StripURLScheme(address string) string {
+	if strings.HasPrefix(address, "http://") {
+		return address[len("http://"):]
+	}
+	if strings.HasPrefix(address, "https://") {
+		return address[len("https://"):]
+	}
+	return address
+}
+
+// isSafeURIHost / stripURLScheme are retained as lowercase wrappers because
+// existing test files reference them; delegating to the exported versions
+// keeps a single implementation.
+func isSafeURIHost(host string) bool       { return IsSafeURIHost(host) }
+func stripURLScheme(address string) string { return StripURLScheme(address) }
+
 
 // RedactExternalSpec returns a log-safe representation of an external spec
 // JSON string. Secret extfs values (see secretExtfsKeys) are replaced with

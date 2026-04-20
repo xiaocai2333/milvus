@@ -21,6 +21,7 @@ import (
 
 	_ "github.com/milvus-io/milvus/internal/util/cgo"
 	"github.com/milvus-io/milvus/pkg/v2/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v2/util/externalspec"
 )
 
 // ErrLoonTransient marks any failure surfaced by the loon FFI layer. Today
@@ -88,7 +89,14 @@ func ExtfsPrefixForCollection(collectionID int64) string {
 // It always copies the baseline from storageConfig so that C++ resolve_config can match
 // the extfs group by address+bucket (even for same-bucket relative paths, because C++
 // explore returns full URIs like aws://host:port/bucket/key).
-// For cross-bucket URIs, it overrides bucket/address from the URI.
+//
+// Two URI shapes are supported:
+//   - Milvus form (default when spec.extfs.address is absent):
+//     `scheme://endpoint/bucket/key` → URI host becomes address, path[0] becomes bucket.
+//   - AWS standard form (when spec.extfs.address is present):
+//     `scheme://bucket/key` → URI host becomes bucket, entire path becomes key; endpoint
+//     comes from spec.extfs.address. Matches the URI shape used by aws-cli / boto3.
+//
 // Finally, user-specified extfs overrides from ExternalSpec take highest priority.
 func BuildExtfsOverrides(externalSource string, storageConfig *indexpb.StorageConfig,
 	extfsPrefix string, specExtfs map[string]string,
@@ -99,29 +107,114 @@ func BuildExtfsOverrides(externalSource string, storageConfig *indexpb.StorageCo
 	// is self-contained (C++ resolve_config treats each group independently).
 	copyStorageConfigToExtfs(overrides, extfsPrefix, storageConfig)
 
+	// Determine the effective endpoint from spec.extfs using the 3-tier
+	// priority: explicit address → derived from cloud_provider+region → none.
+	// A non-empty effective endpoint activates AWS-style URI interpretation,
+	// except when the URI host already equals the endpoint (equality guard:
+	// the user wrote Milvus-form URI redundantly carrying provider+region
+	// in extfs, so do not misinterpret the host as a bucket).
+	effectiveAddr := effectiveSpecAddress(specExtfs, extfsPrefix)
+
 	// For cross-bucket URIs, override bucket and address from the URI.
 	u, err := url.Parse(externalSource)
 	if err == nil && u.Scheme != "" {
-		// Override bucket from the URI path (first component after leading /).
-		path := strings.TrimPrefix(u.Path, "/")
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) > 0 && parts[0] != "" {
-			overrides[extfsPrefix+"bucket_name"] = parts[0]
-		}
+		// AWS-style activation requires (a) effective endpoint present,
+		// (b) URI host non-empty (empty host = `s3:///bucket/key` shorthand
+		// falls through to the Milvus-form branch which correctly reads the
+		// bucket from path[0]), and (c) URI host != endpoint (equality guard).
+		awsStyle := effectiveAddr != "" && u.Host != "" && u.Host != externalspec.StripURLScheme(effectiveAddr)
+		if awsStyle {
+			// AWS standard form: host IS the bucket, path is the key. Set
+			// address here directly from the effective endpoint so this
+			// branch is locally self-contained and not implicitly dependent
+			// on the spec-override merge step below. The later merge
+			// remains idempotent for address when explicitly provided.
+			if u.Host != "" {
+				overrides[extfsPrefix+"bucket_name"] = u.Host
+			}
+			overrides[extfsPrefix+"address"] = effectiveAddr
+		} else {
+			// Milvus form: host is endpoint, path[0] is bucket.
+			path := strings.TrimPrefix(u.Path, "/")
+			parts := strings.SplitN(path, "/", 2)
+			if len(parts) > 0 && parts[0] != "" {
+				overrides[extfsPrefix+"bucket_name"] = parts[0]
+			}
 
-		// Override address from the URI host.
-		if u.Host != "" {
-			overrides[extfsPrefix+"address"] = ensureHTTPScheme(u.Host, storageConfig.GetUseSSL())
+			if u.Host != "" {
+				overrides[extfsPrefix+"address"] = ensureHTTPScheme(u.Host, storageConfig.GetUseSSL())
+			}
 		}
 	}
 
 	// Apply spec extfs overrides (highest priority, keys already prefixed by caller).
+	// Empty values are skipped so a present-but-empty user key cannot clobber a
+	// derived or storage-config-sourced value (e.g. extfs.<id>.address="" must
+	// not erase the Tier-2-derived endpoint or the baseline from storageConfig).
 	for k, v := range specExtfs {
+		if v == "" {
+			continue
+		}
 		overrides[k] = v
 	}
 
 	return overrides
 }
+
+// specHasAddress reports whether specExtfs explicitly provides an `address`
+// entry for the given extfs prefix. Retained as a Tier-1-only probe used by
+// callers that need to distinguish "address came from the user" from "address
+// was derived"; normalization/override logic should use effectiveSpecAddress
+// instead so the three-tier resolution applies uniformly.
+func specHasAddress(specExtfs map[string]string, extfsPrefix string) bool {
+	if len(specExtfs) == 0 {
+		return false
+	}
+	v, ok := specExtfs[extfsPrefix+"address"]
+	return ok && v != ""
+}
+
+// effectiveSpecAddress returns the effective endpoint for a prefixed spec
+// extfs map using the 3-tier priority:
+//  1. spec.extfs.<prefix>address (explicit)
+//  2. DeriveEndpoint(<prefix>cloud_provider, <prefix>region) (5 public clouds)
+//  3. "" (defer to URI host — Milvus-form semantics)
+//
+// Mirror of externalspec.EffectiveAddressFromExtfs but adapted to the
+// prefix-per-key layout used at the packed FFI layer.
+func effectiveSpecAddress(specExtfs map[string]string, extfsPrefix string) string {
+	if len(specExtfs) == 0 {
+		return ""
+	}
+	if v, ok := specExtfs[extfsPrefix+"address"]; ok && v != "" {
+		return v
+	}
+	if d, ok := externalspec.DeriveEndpoint(
+		specExtfs[extfsPrefix+"cloud_provider"],
+		specExtfs[extfsPrefix+"region"]); ok {
+		return d
+	}
+	return ""
+}
+
+// NormalizeExternalSource is the prefix-aware entry point on the packed/FFI
+// side. It resolves the effective endpoint from a prefixed spec extfs map and
+// delegates the actual URI rewrite to externalspec.RewriteAWSStyleToMilvusForm
+// so the two entry points (pkg/externalspec JSON variant, packed prefix-map
+// variant) share a single implementation of the safety gates (empty-endpoint,
+// empty/unsafe host, equality guard, url.URL-based reassembly).
+func NormalizeExternalSource(externalSource string, specExtfs map[string]string, extfsPrefix string) string {
+	return externalspec.RewriteAWSStyleToMilvusForm(
+		externalSource,
+		effectiveSpecAddress(specExtfs, extfsPrefix),
+	)
+}
+
+// isSafeURIHost / stripURLScheme kept as local aliases so existing callers and
+// tests in this package continue to compile; both delegate to the exported
+// externalspec helpers, which are the single source of truth.
+func isSafeURIHost(host string) bool       { return externalspec.IsSafeURIHost(host) }
+func stripURLScheme(address string) string { return externalspec.StripURLScheme(address) }
 
 // copyStorageConfigToExtfs copies all relevant storage config fields to the extfs override map.
 func copyStorageConfigToExtfs(overrides map[string]string, prefix string, cfg *indexpb.StorageConfig) {

@@ -82,6 +82,13 @@ func TestParseExternalSpec_BooleanExtfsValidation(t *testing.T) {
 	assert.Equal(t, "true", spec.Extfs["use_iam"])
 }
 
+func TestParseExternalSpec_AddressAndBucketExtfsAllowed(t *testing.T) {
+	spec, err := ParseExternalSpec(`{"format":"parquet","extfs":{"address":"https://s3.us-west-2.amazonaws.com","bucket_name":"my-bucket"}}`)
+	require.NoError(t, err)
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com", spec.Extfs["address"])
+	assert.Equal(t, "my-bucket", spec.Extfs["bucket_name"])
+}
+
 func TestBuildExtfsOverrides(t *testing.T) {
 	t.Run("empty_extfs_returns_nil", func(t *testing.T) {
 		spec := &ExternalSpec{Format: "parquet"}
@@ -261,4 +268,179 @@ func TestParseExternalSpec_ArnKeys(t *testing.T) {
 		assert.Equal(t, "arn:aws:iam::123456789012:role/test", out["extfs.42.role_arn"])
 		assert.Equal(t, "3600", out["extfs.42.load_frequency"])
 	})
+}
+
+func TestNormalizeExternalSource(t *testing.T) {
+	specWithAddr := `{"format":"parquet","extfs":{"address":"https://s3.us-west-2.amazonaws.com"}}`
+	specBareAddr := `{"format":"parquet","extfs":{"address":"minio:9000"}}`
+	specNoAddr := `{"format":"parquet","extfs":{"region":"us-west-2"}}`
+	specEmpty := ""
+
+	cases := []struct {
+		name     string
+		source   string
+		spec     string
+		expected string
+	}{
+		{"empty_source", "", specWithAddr, ""},
+		{"empty_spec", "s3://bucket/key", specEmpty, "s3://bucket/key"},
+		{"spec_without_address", "s3://bucket/key", specNoAddr, "s3://bucket/key"},
+		{"invalid_spec_json", "s3://bucket/key", `{bad`, "s3://bucket/key"},
+		{
+			"aws_style_rewritten",
+			"s3://my-bucket/data",
+			specWithAddr,
+			"s3://s3.us-west-2.amazonaws.com/my-bucket/data",
+		},
+		{
+			"aws_style_bare_endpoint",
+			"s3://my-bucket/data",
+			specBareAddr,
+			"s3://minio:9000/my-bucket/data",
+		},
+		{
+			"aws_style_bucket_only",
+			"s3://my-bucket",
+			specWithAddr,
+			"s3://s3.us-west-2.amazonaws.com/my-bucket",
+		},
+		{
+			"aws_style_trailing_slash",
+			"s3://my-bucket/",
+			specWithAddr,
+			"s3://s3.us-west-2.amazonaws.com/my-bucket/",
+		},
+		{
+			"empty_host_unchanged",
+			"s3:///bucket/key",
+			specWithAddr,
+			"s3:///bucket/key",
+		},
+		{
+			"relative_unchanged",
+			"path/to/data",
+			specWithAddr,
+			"path/to/data",
+		},
+		{
+			"unsafe_host_unchanged",
+			"s3://[::1]/key",
+			specWithAddr,
+			"s3://[::1]/key",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, NormalizeExternalSource(tc.source, tc.spec))
+		})
+	}
+}
+
+func TestStripURLScheme_Pkg(t *testing.T) {
+	assert.Equal(t, "host:9000", stripURLScheme("http://host:9000"))
+	assert.Equal(t, "s3.amazonaws.com", stripURLScheme("https://s3.amazonaws.com"))
+	assert.Equal(t, "minio:9000", stripURLScheme("minio:9000"))
+	assert.Equal(t, "s3://x", stripURLScheme("s3://x"))
+}
+
+func TestIsSafeURIHost_Pkg(t *testing.T) {
+	assert.True(t, isSafeURIHost("host"))
+	assert.True(t, isSafeURIHost("host:9000"))
+	assert.False(t, isSafeURIHost(""))
+	assert.False(t, isSafeURIHost("user@host"))
+	assert.False(t, isSafeURIHost("[::1]"))
+	assert.False(t, isSafeURIHost("host/path"))
+}
+
+func TestDeriveEndpoint(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		region   string
+		want     string
+		ok       bool
+	}{
+		{"aws_std", "aws", "us-west-2", "https://s3.us-west-2.amazonaws.com", true},
+		{"aws_china", "aws", "cn-north-1", "https://s3.cn-north-1.amazonaws.com.cn", true},
+		{"aws_region_missing", "aws", "", "", false},
+		{"aws_case_insensitive", "AWS", "us-east-1", "https://s3.us-east-1.amazonaws.com", true},
+		{"gcp_any_region", "gcp", "us-central1", "https://storage.googleapis.com", true},
+		{"gcp_no_region", "gcp", "", "https://storage.googleapis.com", true},
+		{"aliyun_hangzhou", "aliyun", "cn-hangzhou", "https://oss-cn-hangzhou.aliyuncs.com", true},
+		{"aliyun_no_region", "aliyun", "", "", false},
+		{"tencent_guangzhou", "tencent", "ap-guangzhou", "https://cos.ap-guangzhou.myqcloud.com", true},
+		{"huawei_north4", "huawei", "cn-north-4", "https://obs.cn-north-4.myhuaweicloud.com", true},
+		{"azure_not_derivable", "azure", "eastus", "", false},
+		{"unknown_provider", "foo", "us-west-2", "", false},
+		{"empty_provider", "", "us-west-2", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := DeriveEndpoint(tc.provider, tc.region)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestEffectiveAddressFromExtfs(t *testing.T) {
+	// Tier 1 wins over Tier 2 (explicit address trumps derivation).
+	assert.Equal(t, "https://custom.example.com",
+		EffectiveAddressFromExtfs(map[string]string{
+			"address":        "https://custom.example.com",
+			"cloud_provider": "aws",
+			"region":         "us-west-2",
+		}))
+	// Tier 2: derivation fills in when address is absent.
+	assert.Equal(t, "https://s3.us-west-2.amazonaws.com",
+		EffectiveAddressFromExtfs(map[string]string{
+			"cloud_provider": "aws",
+			"region":         "us-west-2",
+		}))
+	// Empty address falls through to Tier 2.
+	assert.Equal(t, "https://storage.googleapis.com",
+		EffectiveAddressFromExtfs(map[string]string{
+			"address":        "",
+			"cloud_provider": "gcp",
+		}))
+	// Tier 3 (no effective endpoint).
+	assert.Equal(t, "",
+		EffectiveAddressFromExtfs(map[string]string{
+			"cloud_provider": "azure", // not derivable
+			"region":         "eastus",
+		}))
+	assert.Equal(t, "", EffectiveAddressFromExtfs(nil))
+	assert.Equal(t, "", EffectiveAddressFromExtfs(map[string]string{}))
+}
+
+func TestNormalizeExternalSource_Tier2(t *testing.T) {
+	// Tier 2: no address, provider+region present, URI host is bucket.
+	specTier2 := `{"format":"parquet","extfs":{"cloud_provider":"aws","region":"us-west-2"}}`
+	assert.Equal(t,
+		"s3://s3.us-west-2.amazonaws.com/my-bucket/key",
+		NormalizeExternalSource("s3://my-bucket/key", specTier2))
+
+	// Tier 2 equality guard: URI host already matches derived endpoint →
+	// Milvus form, leave unchanged.
+	assert.Equal(t,
+		"s3://s3.us-west-2.amazonaws.com/real-bucket/data",
+		NormalizeExternalSource("s3://s3.us-west-2.amazonaws.com/real-bucket/data", specTier2))
+
+	// Tier 1 wins over Tier 2.
+	specBoth := `{"format":"parquet","extfs":{"address":"https://custom.example.com","cloud_provider":"aws","region":"us-west-2"}}`
+	assert.Equal(t,
+		"s3://custom.example.com/my-bucket/key",
+		NormalizeExternalSource("s3://my-bucket/key", specBoth))
+
+	// GCP Tier 2: region-less derivation.
+	specGCP := `{"format":"parquet","extfs":{"cloud_provider":"gcp"}}`
+	assert.Equal(t,
+		"gs://storage.googleapis.com/bucket/data",
+		NormalizeExternalSource("gs://bucket/data", specGCP))
+
+	// Azure: not derivable, not rewritten.
+	specAzure := `{"format":"parquet","extfs":{"cloud_provider":"azure","region":"eastus"}}`
+	assert.Equal(t,
+		"s3://my-bucket/key",
+		NormalizeExternalSource("s3://my-bucket/key", specAzure))
 }
