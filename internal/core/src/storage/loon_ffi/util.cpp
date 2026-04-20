@@ -299,6 +299,10 @@ static const std::unordered_set<std::string> kAllowedExtfsSpecKeys = {
     "ssl_ca_cert",
     "access_key_id",
     "access_key_value",
+    "role_arn",
+    "session_name",
+    "external_id",
+    "load_frequency",
 };
 
 void

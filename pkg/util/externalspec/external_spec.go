@@ -67,6 +67,10 @@ var allowedExtfsKeys = map[string]bool{
 	"ssl_ca_cert":      true,
 	"access_key_id":    true,
 	"access_key_value": true,
+	"role_arn":         true,
+	"session_name":     true,
+	"external_id":      true,
+	"load_frequency":   true,
 }
 
 // booleanExtfsKeys lists extfs keys that only accept "true" or "false".

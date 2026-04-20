@@ -217,3 +217,48 @@ func TestBuildFormatProperties(t *testing.T) {
 		assert.Equal(t, "12345", props[PropertyIcebergSnapshotID])
 	})
 }
+
+func TestParseExternalSpec_ArnKeys(t *testing.T) {
+	t.Run("all_arn_keys_accepted", func(t *testing.T) {
+		spec, err := ParseExternalSpec(`{
+			"format":"parquet",
+			"extfs":{
+				"role_arn":"arn:aws:iam::123456789012:role/test-role",
+				"session_name":"my-session",
+				"external_id":"ext-123",
+				"load_frequency":"900"
+			}
+		}`)
+		require.NoError(t, err)
+		assert.Equal(t, "arn:aws:iam::123456789012:role/test-role", spec.Extfs["role_arn"])
+		assert.Equal(t, "my-session", spec.Extfs["session_name"])
+		assert.Equal(t, "ext-123", spec.Extfs["external_id"])
+		assert.Equal(t, "900", spec.Extfs["load_frequency"])
+	})
+
+	t.Run("role_arn_with_existing_keys", func(t *testing.T) {
+		spec, err := ParseExternalSpec(`{
+			"format":"parquet",
+			"extfs":{
+				"region":"us-west-2",
+				"cloud_provider":"aws",
+				"role_arn":"arn:aws:iam::123456789012:role/cross-account"
+			}
+		}`)
+		require.NoError(t, err)
+		assert.Equal(t, "us-west-2", spec.Extfs["region"])
+		assert.Equal(t, "arn:aws:iam::123456789012:role/cross-account", spec.Extfs["role_arn"])
+	})
+
+	t.Run("arn_keys_flow_through_extfs_overrides", func(t *testing.T) {
+		spec := &ExternalSpec{
+			Extfs: map[string]string{
+				"role_arn":       "arn:aws:iam::123456789012:role/test",
+				"load_frequency": "3600",
+			},
+		}
+		out := spec.BuildExtfsOverrides("extfs.42.")
+		assert.Equal(t, "arn:aws:iam::123456789012:role/test", out["extfs.42.role_arn"])
+		assert.Equal(t, "3600", out["extfs.42.load_frequency"])
+	})
+}
