@@ -161,19 +161,6 @@ func BuildExtfsOverrides(externalSource string, storageConfig *indexpb.StorageCo
 	return overrides
 }
 
-// specHasAddress reports whether specExtfs explicitly provides an `address`
-// entry for the given extfs prefix. Retained as a Tier-1-only probe used by
-// callers that need to distinguish "address came from the user" from "address
-// was derived"; normalization/override logic should use effectiveSpecAddress
-// instead so the three-tier resolution applies uniformly.
-func specHasAddress(specExtfs map[string]string, extfsPrefix string) bool {
-	if len(specExtfs) == 0 {
-		return false
-	}
-	v, ok := specExtfs[extfsPrefix+"address"]
-	return ok && v != ""
-}
-
 // effectiveSpecAddress returns the effective endpoint for a prefixed spec
 // extfs map using the 3-tier priority:
 //  1. spec.extfs.<prefix>address (explicit)

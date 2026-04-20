@@ -720,14 +720,6 @@ func TestNormalizeExternalSource_RejectsUnsafeHost(t *testing.T) {
 	assert.Equal(t, src, NormalizeExternalSource(src, spec, prefix))
 }
 
-func TestSpecHasAddress(t *testing.T) {
-	prefix := ExtfsPrefixForCollection(3)
-	assert.False(t, specHasAddress(nil, prefix))
-	assert.False(t, specHasAddress(map[string]string{prefix + "region": "us-east-1"}, prefix))
-	assert.False(t, specHasAddress(map[string]string{prefix + "address": ""}, prefix))
-	assert.True(t, specHasAddress(map[string]string{prefix + "address": "host:9000"}, prefix))
-}
-
 func TestEffectiveSpecAddress(t *testing.T) {
 	prefix := ExtfsPrefixForCollection(12)
 	// Tier 1: explicit address wins over derivation.
