@@ -14,7 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <chrono>
+#include <deque>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <memory>
 #include "common/FastMem.h"
 
@@ -1532,15 +1536,16 @@ GetFieldDatasFromStorageV2(std::vector<std::vector<std::string>>& remote_files,
     return field_data_list;
 }
 
-std::vector<FieldDataPtr>
-GetFieldDatasFromManifest(
+void
+IterateFieldDataFromManifest(
     const std::string& manifest_path,
     const std::shared_ptr<milvus_storage::api::Properties>& loon_ffi_properties,
     const FieldDataMeta& field_meta,
     std::optional<DataType> data_type,
     int64_t dim,
     std::optional<DataType> element_type,
-    std::optional<StorageColumnMapping> storage_column_mapping) {
+    std::optional<StorageColumnMapping> storage_column_mapping,
+    const std::function<void(FieldDataPtr)>& consumer) {
     auto loon_manifest = GetLoonManifest(manifest_path, loon_ffi_properties);
     auto column_groups = std::make_shared<milvus_storage::api::ColumnGroups>(
         loon_manifest->columnGroups());
@@ -1577,19 +1582,20 @@ GetFieldDatasFromManifest(
     };
     bool field_exists = column_exists(column_name);
     if (!field_exists) {
-        return {};
+        return;
     }
 
     std::vector<std::string> needed_columns = {column_name};
 
     bool nullable = field_meta.field_schema.nullable();
-    std::optional<FieldMeta> normalize_field_meta;
+    std::shared_ptr<const FieldMeta> normalize_field_meta;
     if (is_external) {
         auto schema = field_meta.field_schema;
         if (schema.fieldid() == 0) {
             schema.set_fieldid(field_meta.field_id);
         }
-        normalize_field_meta.emplace(FieldMeta::ParseFrom(schema));
+        normalize_field_meta =
+            std::make_shared<const FieldMeta>(FieldMeta::ParseFrom(schema));
     }
 
     // External tables: schemaless reader - let the reader derive types from
@@ -1634,12 +1640,39 @@ GetFieldDatasFromManifest(
 
     auto record_batch_reader = reader_result.ValueOrDie();
 
-    std::vector<FieldDataPtr> field_datas;
+    // Decode batches on the MIDDLE thread pool while this thread keeps
+    // draining the record batch reader. ReadNext must stay single-threaded
+    // (the reader is not thread-safe), but everything after it — external
+    // normalization plus FieldData materialization — is pure per-batch work
+    // and is the dominant cost. Offloading it keeps the reader thread free
+    // to trigger the next prefetch round, so network fetch and decode
+    // overlap instead of strictly alternating. Results are delivered to
+    // `consumer` on this thread in batch order; the bounded in-flight
+    // window provides backpressure so decoded-but-undelivered batches
+    // cannot pile up without limit.
+    auto& pool = ThreadPools::GetThreadPool(ThreadPoolPriority::MIDDLE);
+    const size_t max_inflight = std::max<size_t>(2, pool.GetMaxThreadNum() * 2);
+    std::deque<std::future<FieldDataPtr>> pending;
+
+    auto deliver_front = [&]() {
+        auto field_data = pending.front().get();
+        pending.pop_front();
+        consumer(std::move(field_data));
+    };
+
+    auto data_type_v = data_type.value();
+    auto element_type_v = element_type.value();
     while (true) {
         std::shared_ptr<arrow::RecordBatch> batch;
         auto status = record_batch_reader->ReadNext(&batch);
-        AssertInfo(status.ok(),
-                   "Failed to read record batch: " + status.ToString());
+        if (!status.ok()) {
+            // Drain workers before throwing so no task outlives this scope.
+            for (auto& f : pending) {
+                f.wait();
+            }
+            AssertInfo(false,
+                       "Failed to read record batch: " + status.ToString());
+        }
         if (batch == nullptr) {
             break;
         }
@@ -1649,23 +1682,72 @@ GetFieldDatasFromManifest(
             continue;
         }
 
-        auto raw_column = batch->GetColumnByName(column_name);
-        if (is_external) {
-            raw_column =
-                NormalizeExternalArrowByType(raw_column,
-                                             data_type.value(),
-                                             dim,
-                                             nullable,
-                                             element_type.value(),
-                                             normalize_field_meta.value());
+        pending.emplace_back(pool.Submit([batch,
+                                          column_name,
+                                          is_external,
+                                          data_type_v,
+                                          element_type_v,
+                                          dim,
+                                          nullable,
+                                          normalize_field_meta,
+                                          num_rows]() -> FieldDataPtr {
+            auto raw_column = batch->GetColumnByName(column_name);
+            if (is_external) {
+                raw_column =
+                    NormalizeExternalArrowByType(raw_column,
+                                                 data_type_v,
+                                                 dim,
+                                                 nullable,
+                                                 element_type_v,
+                                                 *normalize_field_meta);
+            }
+            auto chunked_array =
+                std::make_shared<arrow::ChunkedArray>(raw_column);
+            auto field_data = CreateFieldData(
+                data_type_v, element_type_v, nullable, dim, num_rows);
+            field_data->FillFieldData(chunked_array);
+            return field_data;
+        }));
+
+        // Backpressure: block on the oldest batch once the window is full.
+        while (pending.size() >= max_inflight) {
+            deliver_front();
         }
-        auto chunked_array = std::make_shared<arrow::ChunkedArray>(raw_column);
-        auto field_data = CreateFieldData(
-            data_type.value(), element_type.value(), nullable, dim, num_rows);
-        field_data->FillFieldData(chunked_array);
-        field_datas.push_back(field_data);
+        // Opportunistically deliver whatever is already done, keeping
+        // consumer-side work (e.g. disk writes) interleaved with fetching.
+        while (!pending.empty() &&
+               pending.front().wait_for(std::chrono::seconds(0)) ==
+                   std::future_status::ready) {
+            deliver_front();
+        }
     }
 
+    while (!pending.empty()) {
+        deliver_front();
+    }
+}
+
+std::vector<FieldDataPtr>
+GetFieldDatasFromManifest(
+    const std::string& manifest_path,
+    const std::shared_ptr<milvus_storage::api::Properties>& loon_ffi_properties,
+    const FieldDataMeta& field_meta,
+    std::optional<DataType> data_type,
+    int64_t dim,
+    std::optional<DataType> element_type,
+    std::optional<StorageColumnMapping> storage_column_mapping) {
+    std::vector<FieldDataPtr> field_datas;
+    IterateFieldDataFromManifest(
+        manifest_path,
+        loon_ffi_properties,
+        field_meta,
+        data_type,
+        dim,
+        element_type,
+        std::move(storage_column_mapping),
+        [&](FieldDataPtr field_data) {
+            field_datas.push_back(std::move(field_data));
+        });
     return field_datas;
 }
 
