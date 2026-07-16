@@ -695,6 +695,51 @@ TEST_F(StorageTest, InitArrowReaderConfig) {
               default_cache_options.range_size_limit);
 }
 
+// Freshly-built loon properties (index build / FFI reader paths construct
+// them per task via MakeInternalPropertiesFromStorageConfig, bypassing
+// LoonFFIPropertiesSingleton's cached map) must still carry the configured
+// arrow reader prebuffer limits — otherwise external-table index builds
+// silently fall back to arrow defaults regardless of
+// common.arrow.reader.* configuration.
+TEST_F(StorageTest, ArrowReaderConfigAppliesToFreshLoonProperties) {
+    auto status =
+        InitArrowReaderConfig(CArrowReaderConfig{32 * 1024, 4 * 1024 * 1024});
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+
+    auto properties =
+        MakeInternalPropertiesFromStorageConfig(get_azure_storage_config());
+    ASSERT_NE(properties, nullptr);
+
+    auto hole_size_limit = milvus_storage::api::GetValue<int64_t>(
+        *properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT);
+    ASSERT_TRUE(hole_size_limit.ok()) << hole_size_limit.status().ToString();
+    EXPECT_EQ(hole_size_limit.ValueOrDie(), 32 * 1024);
+
+    auto range_size_limit = milvus_storage::api::GetValue<int64_t>(
+        *properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
+    ASSERT_TRUE(range_size_limit.ok()) << range_size_limit.status().ToString();
+    EXPECT_EQ(range_size_limit.ValueOrDie(), 4 * 1024 * 1024);
+
+    // Reset to unset: fresh properties must carry 0 (= keep arrow default
+    // downstream), not stale values from the previous configuration.
+    status = InitArrowReaderConfig(CArrowReaderConfig{0, 0});
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+
+    properties =
+        MakeInternalPropertiesFromStorageConfig(get_azure_storage_config());
+    ASSERT_NE(properties, nullptr);
+
+    hole_size_limit = milvus_storage::api::GetValue<int64_t>(
+        *properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT);
+    ASSERT_TRUE(hole_size_limit.ok()) << hole_size_limit.status().ToString();
+    EXPECT_EQ(hole_size_limit.ValueOrDie(), 0);
+
+    range_size_limit = milvus_storage::api::GetValue<int64_t>(
+        *properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
+    ASSERT_TRUE(range_size_limit.ok()) << range_size_limit.status().ToString();
+    EXPECT_EQ(range_size_limit.ValueOrDie(), 0);
+}
+
 class StorageUtilTest : public testing::Test {
  public:
     StorageUtilTest() = default;

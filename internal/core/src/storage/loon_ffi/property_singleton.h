@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -62,9 +63,11 @@ class LoonFFIPropertiesSingleton {
     void
     SetArrowReaderConfig(int64_t hole_size_limit_bytes,
                          int64_t range_size_limit_bytes) {
+        arrow_reader_hole_size_limit_bytes_.store(hole_size_limit_bytes,
+                                                  std::memory_order_relaxed);
+        arrow_reader_range_size_limit_bytes_.store(range_size_limit_bytes,
+                                                   std::memory_order_relaxed);
         std::unique_lock lck(mutex_);
-        arrow_reader_hole_size_limit_bytes_ = hole_size_limit_bytes;
-        arrow_reader_range_size_limit_bytes_ = range_size_limit_bytes;
         if (properties_ != nullptr) {
             auto properties =
                 std::make_shared<milvus_storage::api::Properties>(*properties_);
@@ -79,23 +82,32 @@ class LoonFFIPropertiesSingleton {
         return properties_;
     }
 
- private:
+    // Applies the configured arrow reader prebuffer limits to `properties`.
+    // Lock-free (reads atomics only) so it is safe to call from
+    // MakeInternalPropertiesFromStorageConfig even while this singleton
+    // holds mutex_ (Init builds its cached map through that same helper).
+    // A value of 0 means "keep the arrow default" downstream.
     void
     ApplyArrowReaderConfig(milvus_storage::api::Properties& properties) const {
         milvus_storage::api::SetValue(
             properties,
             PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT,
-            std::to_string(arrow_reader_hole_size_limit_bytes_).c_str());
+            std::to_string(arrow_reader_hole_size_limit_bytes_.load(
+                               std::memory_order_relaxed))
+                .c_str());
         milvus_storage::api::SetValue(
             properties,
             PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT,
-            std::to_string(arrow_reader_range_size_limit_bytes_).c_str());
+            std::to_string(arrow_reader_range_size_limit_bytes_.load(
+                               std::memory_order_relaxed))
+                .c_str());
     }
 
+ private:
     mutable std::shared_mutex mutex_;
     std::shared_ptr<milvus_storage::api::Properties> properties_ = nullptr;
-    int64_t arrow_reader_hole_size_limit_bytes_ = 0;
-    int64_t arrow_reader_range_size_limit_bytes_ = 0;
+    std::atomic<int64_t> arrow_reader_hole_size_limit_bytes_{0};
+    std::atomic<int64_t> arrow_reader_range_size_limit_bytes_{0};
 };
 
 }  // namespace milvus::storage
