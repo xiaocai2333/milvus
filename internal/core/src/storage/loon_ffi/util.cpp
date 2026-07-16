@@ -265,8 +265,8 @@ MakeInternalPropertiesFromStorageConfig(CStorageConfig c_storage_config) {
     // the common.arrow.reader.* configuration never reaches those reads and
     // external-table index builds are stuck with arrow's default range
     // coalescing (effectively one in-flight S3 range per file).
-    LoonFFIPropertiesSingleton::GetInstance().ApplyArrowReaderConfig(
-        *properties_map);
+    milvus::storage::LoonFFIPropertiesSingleton::GetInstance()
+        .ApplyArrowReaderConfig(*properties_map);
 
     return properties_map;
 }
