@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -81,12 +82,43 @@ class FlushGrowingSegmentTest : public ::testing::Test {
         std::string manifest_json =
             "{\"base_path\":\"" + segment_path +
             "\",\"ver\":" + std::to_string(result.committed_version) + "}";
-        return storage::GetFieldDatasFromManifest(manifest_json,
-                                                  properties,
-                                                  field_meta,
-                                                  data_type,
-                                                  dim,
-                                                  element_type);
+        auto field_datas = storage::GetFieldDatasFromManifest(manifest_json,
+                                                              properties,
+                                                              field_meta,
+                                                              data_type,
+                                                              dim,
+                                                              element_type);
+
+        // Contract check for the streaming variant every caller of this
+        // helper implicitly covers: IterateFieldDataFromManifest must
+        // deliver identical batches, in order, on the calling thread, even
+        // though decode runs on a thread pool.
+        std::vector<FieldDataPtr> streamed;
+        auto caller_tid = std::this_thread::get_id();
+        storage::IterateFieldDataFromManifest(
+            manifest_json,
+            properties,
+            field_meta,
+            data_type,
+            dim,
+            element_type,
+            std::nullopt,
+            [&](FieldDataPtr fd) {
+                EXPECT_EQ(std::this_thread::get_id(), caller_tid);
+                streamed.push_back(std::move(fd));
+            });
+        EXPECT_EQ(streamed.size(), field_datas.size());
+        for (size_t i = 0; i < std::min(streamed.size(), field_datas.size());
+             ++i) {
+            EXPECT_EQ(streamed[i]->get_num_rows(),
+                      field_datas[i]->get_num_rows());
+            for (int64_t r = 0; r < streamed[i]->get_num_rows(); ++r) {
+                EXPECT_EQ(streamed[i]->is_valid(r),
+                          field_datas[i]->is_valid(r));
+            }
+        }
+
+        return field_datas;
     }
 
     void
