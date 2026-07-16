@@ -48,6 +48,12 @@ InitDiskFileWriterConfig(CDiskWriteConfig c_disk_write_config);
 CStatus
 InitArrowReaderConfig(CArrowReaderConfig c_arrow_reader_config);
 
+CStatus
+InitLoonReaderThreadPool(int32_t num_threads);
+
+CStatus
+InitIndexBuildReadWindow(int64_t window_bytes);
+
 // Plugin related APIs
 CStatus
 InitPluginLoader(const char* plugin_path);

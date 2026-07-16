@@ -41,6 +41,7 @@
 #include "storage/RemoteChunkManagerSingleton.h"
 #include "storage/Types.h"
 #include "storage/Util.h"
+#include "milvus-storage/thread_pool.h"
 #include "storage/loon_ffi/property_singleton.h"
 #include "storage/loon_ffi/util.h"
 #include "storage/minio/MinioChunkManager.h"
@@ -738,6 +739,67 @@ TEST_F(StorageTest, ArrowReaderConfigAppliesToFreshLoonProperties) {
         *properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
     ASSERT_TRUE(range_size_limit.ok()) << range_size_limit.status().ToString();
     EXPECT_EQ(range_size_limit.ValueOrDie(), 0);
+}
+
+TEST_F(StorageTest, InitLoonReaderThreadPool) {
+    auto status = InitLoonReaderThreadPool(-1);
+    EXPECT_EQ(status.error_code, ConfigInvalid);
+    FreeErrorStatus(status);
+
+    // 0 = keep the pool uninitialized (sequential reads, prior behavior).
+    status = InitLoonReaderThreadPool(0);
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+
+    status = InitLoonReaderThreadPool(4);
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 4);
+
+    // Updates resize the existing pool.
+    status = InitLoonReaderThreadPool(8);
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 8);
+
+    // 0 after creation leaves the pool untouched.
+    status = InitLoonReaderThreadPool(0);
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 8);
+
+    // Restore the no-pool state so other tests keep sequential reads.
+    milvus_storage::ThreadPoolHolder::Release();
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 1);
+}
+
+TEST_F(StorageTest, InitIndexBuildReadWindow) {
+    auto status = InitIndexBuildReadWindow(-1);
+    EXPECT_EQ(status.error_code, ConfigInvalid);
+    FreeErrorStatus(status);
+    status = InitIndexBuildReadWindow(5LL * 1024 * 1024 * 1024);
+    EXPECT_EQ(status.error_code, ConfigInvalid);
+    FreeErrorStatus(status);
+
+    status = InitIndexBuildReadWindow(512LL * 1024 * 1024);
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+    EXPECT_EQ(
+        LoonFFIPropertiesSingleton::GetInstance().GetIndexBuildReadWindow(),
+        512LL * 1024 * 1024);
+
+    // The configured window stamps into per-task properties.
+    milvus_storage::api::Properties props;
+    LoonFFIPropertiesSingleton::GetInstance().ApplyIndexBuildReadWindow(props);
+    auto window = milvus_storage::api::GetValue<int64_t>(
+        props, PROPERTY_READER_RECORD_BATCH_MAX_SIZE);
+    ASSERT_TRUE(window.ok()) << window.status().ToString();
+    EXPECT_EQ(window.ValueOrDie(), 512LL * 1024 * 1024);
+
+    // Reset to 0: no stamping, the registry default (32MB) applies.
+    status = InitIndexBuildReadWindow(0);
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+    milvus_storage::api::Properties fresh;
+    LoonFFIPropertiesSingleton::GetInstance().ApplyIndexBuildReadWindow(fresh);
+    window = milvus_storage::api::GetValue<int64_t>(
+        fresh, PROPERTY_READER_RECORD_BATCH_MAX_SIZE);
+    ASSERT_TRUE(window.ok()) << window.status().ToString();
+    EXPECT_EQ(window.ValueOrDie(), 32LL * 1024 * 1024);
 }
 
 class StorageUtilTest : public testing::Test {

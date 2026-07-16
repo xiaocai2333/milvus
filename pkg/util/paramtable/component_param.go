@@ -240,6 +240,8 @@ type commonConfig struct {
 	ArrowIOThreadPoolMaxCapacity        ParamItem `refreshable:"true"`
 	ArrowReaderHoleSizeLimitBytes       ParamItem `refreshable:"true"`
 	ArrowReaderRangeSizeLimitBytes      ParamItem `refreshable:"true"`
+	StorageReaderThreadPoolSize         ParamItem `refreshable:"true"`
+	IndexBuildReadWindowBytes           ParamItem `refreshable:"true"`
 	EnableMaterializedView              ParamItem `refreshable:"false"`
 	BuildIndexThreadPoolRatio           ParamItem `refreshable:"false"`
 	MaxDegree                           ParamItem `refreshable:"true"`
@@ -780,6 +782,37 @@ This configuration is only used by querynode and indexnode, it selects CPU instr
 		Export: false,
 	}
 	p.ArrowReaderRangeSizeLimitBytes.Init(base.mgr)
+
+	p.StorageReaderThreadPoolSize = ParamItem{
+		Key:          "common.storage.readerThreadPoolSize",
+		Version:      "3.0.0",
+		DefaultValue: "0",
+		Doc: `Size of milvus-storage's global reader thread pool. When > 0, chunk ` +
+			`(row-group) reads issued by one storage-v3/external reader are fanned ` +
+			`out across this pool, so multiple files/chunks download concurrently ` +
+			`instead of one at a time. 0 keeps the pre-existing sequential behavior. ` +
+			`Once created the pool cannot be destroyed at runtime; updates only ` +
+			`resize it.`,
+		Export: false,
+	}
+	p.StorageReaderThreadPoolSize.Init(base.mgr)
+
+	p.IndexBuildReadWindowBytes = ParamItem{
+		Key:          "common.storage.indexBuildReadWindowBytes",
+		Version:      "3.0.0",
+		DefaultValue: "0",
+		Doc: `Per-round read window in bytes (milvus-storage reader.record_batch_max_size) ` +
+			`for index-build manifest reads. The default window (0 = milvus-storage's ` +
+			`32MB) admits a single 64MB-class parquet row group per prefetch round, ` +
+			`serializing the raw-data download to one object-storage range read at a ` +
+			`time. Set to N x row-group-size (e.g. 512MB) so one round spans multiple ` +
+			`row groups whose column chunks prefetch in parallel on the arrow IO ` +
+			`thread pool (common.arrow.ioThreadPoolCoefficient). Memory cost: up to ` +
+			`this many bytes buffered per running build task. Max 4GB. Only affects ` +
+			`index build; query-node loads keep the default window.`,
+		Export: false,
+	}
+	p.IndexBuildReadWindowBytes.Init(base.mgr)
 
 	p.DiskWriteMode = ParamItem{
 		Key:          "common.diskWriteMode",
