@@ -963,58 +963,35 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
     uint32_t var_dim = 0;
     int64_t write_offset = sizeof(num_rows) + sizeof(var_dim);
 
-    std::vector<FieldDataPtr> field_datas;
     auto manifest =
         index::GetValueFromConfig<std::string>(config, SEGMENT_MANIFEST_KEY);
     auto manifest_path_str = manifest.value_or("");
-    if (manifest_path_str != "") {
-        AssertInfo(
-            loon_ffi_properties_ != nullptr,
-            "loon ffi properties is null when build index with manifest");
-        field_datas = GetFieldDatasFromManifest(
-            manifest_path_str,
-            loon_ffi_properties_,
-            field_meta_,
-            data_type,
-            dim,
-            element_type,
-            GetStorageColumnMapping(field_meta_.field_id));
-    } else {
-        field_datas = GetFieldDatasFromStorageV2(all_remote_files,
-                                                 GetFieldDataMeta().field_id,
-                                                 data_type.value(),
-                                                 element_type.value(),
-                                                 dim,
-                                                 fs_);
-    }
-
     bool nullable = false;
     uint64_t total_num_rows = 0;
-    if (valid_data_path.has_value()) {
-        for (auto& field_data : field_datas) {
-            if (field_data->IsNullable()) {
-                nullable = true;
-            }
-            total_num_rows += field_data->get_num_rows();
-        }
-    }
-
     std::vector<uint8_t> valid_bitmap;
-    if (nullable) {
-        valid_bitmap.resize((total_num_rows + 7) / 8, 0);
-    }
-
-    int64_t chunk_offset = 0;
-    for (auto& field_data : field_datas) {
+    auto consume_field_data = [&](FieldDataPtr field_data) {
         num_rows += uint32_t(field_data->get_valid_rows());
+        const auto batch_offset = total_num_rows;
+        if (valid_data_path.has_value()) {
+            auto rows = field_data->get_num_rows();
+            if (field_data->IsNullable() && !nullable) {
+                nullable = true;
+                valid_bitmap.resize((total_num_rows + rows + 7) / 8, 0);
+                for (uint64_t i = 0; i < total_num_rows; ++i) {
+                    set_bit(valid_bitmap, i);
+                }
+            } else if (nullable) {
+                valid_bitmap.resize((total_num_rows + rows + 7) / 8, 0);
+            }
+            total_num_rows += rows;
+        }
         if (nullable) {
             auto rows = field_data->get_num_rows();
             for (int64_t i = 0; i < rows; ++i) {
-                if (field_data->is_valid(i)) {
-                    set_bit(valid_bitmap, chunk_offset + i);
+                if (!field_data->IsNullable() || field_data->is_valid(i)) {
+                    set_bit(valid_bitmap, batch_offset + i);
                 }
             }
-            chunk_offset += rows;
         }
 
         cache_raw_data_to_disk_common<T>(field_data,
@@ -1024,6 +1001,69 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
                                          var_dim,
                                          write_offset,
                                          is_vector_array ? &offsets : nullptr);
+    };
+
+    if (manifest_path_str != "") {
+        AssertInfo(
+            loon_ffi_properties_ != nullptr,
+            "loon ffi properties is null when build index with manifest");
+        auto field_data_channel = std::make_shared<FieldDataChannel>(1);
+        auto read_future = std::async(std::launch::async, [&]() {
+            try {
+                VisitFieldDatasFromManifest(
+                    manifest_path_str,
+                    loon_ffi_properties_,
+                    field_meta_,
+                    data_type,
+                    dim,
+                    element_type,
+                    [&](FieldDataPtr field_data) {
+                        field_data_channel->push(field_data);
+                    },
+                    GetStorageColumnMapping(field_meta_.field_id),
+                    DEFAULT_FIELD_MAX_MEMORY_LIMIT);
+                field_data_channel->close();
+            } catch (...) {
+                field_data_channel->close(std::current_exception());
+            }
+        });
+
+        std::exception_ptr first_exception;
+        while (true) {
+            try {
+                FieldDataPtr field_data;
+                if (!field_data_channel->pop(field_data)) {
+                    break;
+                }
+                if (!first_exception) {
+                    try {
+                        consume_field_data(std::move(field_data));
+                    } catch (...) {
+                        first_exception = std::current_exception();
+                    }
+                }
+            } catch (...) {
+                if (!first_exception) {
+                    first_exception = std::current_exception();
+                }
+                break;
+            }
+        }
+        read_future.get();
+        if (first_exception) {
+            std::rethrow_exception(first_exception);
+        }
+    } else {
+        auto field_datas =
+            GetFieldDatasFromStorageV2(all_remote_files,
+                                       GetFieldDataMeta().field_id,
+                                       data_type.value(),
+                                       element_type.value(),
+                                       dim,
+                                       fs_);
+        for (auto& field_data : field_datas) {
+            consume_field_data(std::move(field_data));
+        }
     }
 
     // For vector arrays, num_rows should be the total flattened vector count,

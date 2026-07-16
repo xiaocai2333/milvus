@@ -1532,15 +1532,17 @@ GetFieldDatasFromStorageV2(std::vector<std::vector<std::string>>& remote_files,
     return field_data_list;
 }
 
-std::vector<FieldDataPtr>
-GetFieldDatasFromManifest(
+void
+VisitFieldDatasFromManifest(
     const std::string& manifest_path,
     const std::shared_ptr<milvus_storage::api::Properties>& loon_ffi_properties,
     const FieldDataMeta& field_meta,
     std::optional<DataType> data_type,
     int64_t dim,
     std::optional<DataType> element_type,
-    std::optional<StorageColumnMapping> storage_column_mapping) {
+    const std::function<void(FieldDataPtr)>& visitor,
+    std::optional<StorageColumnMapping> storage_column_mapping,
+    int64_t record_batch_max_size) {
     auto loon_manifest = GetLoonManifest(manifest_path, loon_ffi_properties);
     auto column_groups = std::make_shared<milvus_storage::api::ColumnGroups>(
         loon_manifest->columnGroups());
@@ -1577,7 +1579,7 @@ GetFieldDatasFromManifest(
     };
     bool field_exists = column_exists(column_name);
     if (!field_exists) {
-        return {};
+        return;
     }
 
     std::vector<std::string> needed_columns = {column_name};
@@ -1622,8 +1624,15 @@ GetFieldDatasFromManifest(
 
     auto needed_cols_ptr =
         std::make_shared<std::vector<std::string>>(needed_columns);
+    auto reader_properties = *loon_ffi_properties;
+    if (record_batch_max_size > 0) {
+        milvus_storage::api::SetValue(
+            reader_properties,
+            PROPERTY_READER_RECORD_BATCH_MAX_SIZE,
+            std::to_string(record_batch_max_size).c_str());
+    }
     auto reader = milvus_storage::api::Reader::create(
-        column_groups, reader_schema, needed_cols_ptr, *loon_ffi_properties);
+        column_groups, reader_schema, needed_cols_ptr, reader_properties);
 
     AssertInfo(reader != nullptr, "Failed to create reader");
 
@@ -1634,7 +1643,6 @@ GetFieldDatasFromManifest(
 
     auto record_batch_reader = reader_result.ValueOrDie();
 
-    std::vector<FieldDataPtr> field_datas;
     while (true) {
         std::shared_ptr<arrow::RecordBatch> batch;
         auto status = record_batch_reader->ReadNext(&batch);
@@ -1663,9 +1671,32 @@ GetFieldDatasFromManifest(
         auto field_data = CreateFieldData(
             data_type.value(), element_type.value(), nullable, dim, num_rows);
         field_data->FillFieldData(chunked_array);
-        field_datas.push_back(field_data);
+        visitor(std::move(field_data));
     }
+}
 
+std::vector<FieldDataPtr>
+GetFieldDatasFromManifest(
+    const std::string& manifest_path,
+    const std::shared_ptr<milvus_storage::api::Properties>& loon_ffi_properties,
+    const FieldDataMeta& field_meta,
+    std::optional<DataType> data_type,
+    int64_t dim,
+    std::optional<DataType> element_type,
+    std::optional<StorageColumnMapping> storage_column_mapping) {
+    std::vector<FieldDataPtr> field_datas;
+    VisitFieldDatasFromManifest(
+        manifest_path,
+        loon_ffi_properties,
+        field_meta,
+        data_type,
+        dim,
+        element_type,
+        [&](FieldDataPtr field_data) {
+            field_datas.push_back(std::move(field_data));
+        },
+        storage_column_mapping,
+        0);
     return field_datas;
 }
 

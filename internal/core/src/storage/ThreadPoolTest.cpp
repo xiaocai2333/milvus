@@ -18,6 +18,7 @@
 #include <string>
 
 #include "gtest/gtest.h"
+#include "milvus-storage/thread_pool.h"
 #include "storage/ThreadPool.h"
 
 namespace milvus {
@@ -107,18 +108,22 @@ TEST_F(ThreadPoolTest, DisableMaxThreadsLimit) {
 TEST_F(ThreadPoolTest, SetThreadPoolMaxThreadsSize) {
     // Default is 16
     EXPECT_EQ(THREAD_POOL_MAX_THREADS_SIZE.load(), 16);
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 16);
 
     // Set to a positive value
     SetThreadPoolMaxThreadsSize(64);
     EXPECT_EQ(THREAD_POOL_MAX_THREADS_SIZE.load(), 64);
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 64);
 
     // Set to 0 (disable limit)
     SetThreadPoolMaxThreadsSize(0);
     EXPECT_EQ(THREAD_POOL_MAX_THREADS_SIZE.load(), 0);
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 4);
 
     // Set to negative (also disables limit)
     SetThreadPoolMaxThreadsSize(-1);
     EXPECT_EQ(THREAD_POOL_MAX_THREADS_SIZE.load(), -1);
+    EXPECT_EQ(milvus_storage::ThreadPoolHolder::GetParallelism(), 4);
 }
 
 TEST_F(ThreadPoolTest, DynamicMaxThreadsSizeUpdate) {

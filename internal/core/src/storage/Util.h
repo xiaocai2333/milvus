@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -300,6 +301,18 @@ GetFieldDatasFromManifest(
     int64_t dim,
     std::optional<DataType> element_type,
     std::optional<StorageColumnMapping> storage_column_mapping = std::nullopt);
+
+void
+VisitFieldDatasFromManifest(
+    const std::string& manifest_path,
+    const std::shared_ptr<milvus_storage::api::Properties>& loon_ffi_properties,
+    const FieldDataMeta& field_meta,
+    std::optional<DataType> data_type,
+    int64_t dim,
+    std::optional<DataType> element_type,
+    const std::function<void(FieldDataPtr)>& visitor,
+    std::optional<StorageColumnMapping> storage_column_mapping = std::nullopt,
+    int64_t record_batch_max_size = 0);
 
 std::vector<FieldDataPtr>
 GetTextFieldDatasFromManifest(

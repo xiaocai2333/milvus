@@ -205,6 +205,26 @@ TEST_F(StorageTest, TextFieldDataFromManifestResolvesLobRefs) {
     EXPECT_NE(*static_cast<const std::string*>(raw_datas[0]->RawValue(2)),
               texts[2]);
 
+    auto streaming_properties =
+        std::make_shared<milvus_storage::api::Properties>(*properties);
+    milvus_storage::api::SetValue(
+        *streaming_properties, PROPERTY_READER_RECORD_BATCH_MAX_ROWS, "1");
+    size_t streamed_batches = 0;
+    size_t streamed_rows = 0;
+    VisitFieldDatasFromManifest(manifest_json,
+                                streaming_properties,
+                                field_meta,
+                                DataType::TEXT,
+                                0,
+                                DataType::NONE,
+                                [&](FieldDataPtr field_data) {
+                                    ++streamed_batches;
+                                    streamed_rows += field_data->get_num_rows();
+                                    EXPECT_EQ(field_data->get_num_rows(), 1);
+                                });
+    EXPECT_EQ(streamed_batches, N);
+    EXPECT_EQ(streamed_rows, N);
+
     auto text_datas =
         GetTextFieldDatasFromManifest(manifest_json, properties, field_meta);
     ASSERT_EQ(text_datas.size(), 1);

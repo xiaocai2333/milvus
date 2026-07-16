@@ -19,6 +19,7 @@
 #include <chrono>
 
 #include "log/Log.h"
+#include "milvus-storage/thread_pool.h"
 #include "storage/SafeQueue.h"
 
 namespace milvus {
@@ -63,7 +64,16 @@ InitCpuNum(const int num) {
 void
 SetThreadPoolMaxThreadsSize(const int size) {
     THREAD_POOL_MAX_THREADS_SIZE.store(size);
-    LOG_INFO("set thread pool max threads size: {}", size);
+    const auto storage_pool_size =
+        static_cast<size_t>(size > 0 ? size : std::max(1, CPU_NUM));
+    // milvus-storage uses its own pool for parallel chunk reads. Without
+    // initializing this singleton, PackedRecordBatchReader falls back to a
+    // parallelism of one even when Milvus and Arrow have larger IO pools.
+    milvus_storage::ThreadPoolHolder::WithSingleton(storage_pool_size);
+    LOG_INFO(
+        "set thread pool max threads size: {}, milvus-storage pool size: {}",
+        size,
+        storage_pool_size);
 }
 
 void
