@@ -13,6 +13,7 @@
 #include <boost/filesystem/path.hpp>
 #include <gtest/gtest.h>
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
@@ -216,6 +217,32 @@ TEST_F(StorageTest, TextFieldDataFromManifestResolvesLobRefs) {
               texts[0]);
     EXPECT_EQ(*static_cast<const std::string*>(text_datas[0]->RawValue(2)),
               texts[2]);
+
+    // The streaming variant must deliver the same batches, in order, on the
+    // calling thread — GetFieldDatasFromManifest is a thin wrapper over it,
+    // but assert the contract directly too (decode runs on a thread pool;
+    // ordering and delivery-thread guarantees are what callers rely on).
+    std::vector<FieldDataPtr> streamed;
+    auto caller_tid = std::this_thread::get_id();
+    IterateFieldDataFromManifest(manifest_json,
+                                 properties,
+                                 field_meta,
+                                 DataType::TEXT,
+                                 0,
+                                 DataType::NONE,
+                                 std::nullopt,
+                                 [&](FieldDataPtr fd) {
+                                     EXPECT_EQ(std::this_thread::get_id(),
+                                               caller_tid);
+                                     streamed.push_back(std::move(fd));
+                                 });
+    ASSERT_EQ(streamed.size(), raw_datas.size());
+    for (size_t i = 0; i < streamed.size(); ++i) {
+        ASSERT_EQ(streamed[i]->get_num_rows(), raw_datas[i]->get_num_rows());
+        for (int64_t r = 0; r < streamed[i]->get_num_rows(); ++r) {
+            ASSERT_EQ(streamed[i]->is_valid(r), raw_datas[i]->is_valid(r));
+        }
+    }
 
     FreeFlushResult(&result);
     cleanup();
