@@ -403,3 +403,110 @@ TEST(BoostScoreRunnerTest, ComputeScorerScoresNonNativeFilterCoversAllBatches) {
     ASSERT_TRUE(scores[4].has_value());   // 9998: "football match"
     EXPECT_FLOAT_EQ(scores[4].value(), 2.0F);
 }
+
+// Test: the native (offset-input) path must also fold UNKNOWN (NULL) into
+// FALSE — a null row never receives a boost, whichever path evaluates the
+// filter. Pins the semantics explicitly instead of relying on the convention
+// that UNKNOWN rows carry data=0.
+TEST(BoostScoreRunnerTest, ComputeScorerScoresNativeFilterSkipsNullRows) {
+    const int64_t N = 200;
+    auto schema = std::make_shared<Schema>();
+    {
+        FieldMeta f(FieldName("pk"),
+                    FieldId(100),
+                    DataType::INT64,
+                    false,
+                    std::nullopt);
+        schema->AddField(std::move(f));
+        schema->set_primary_field_id(FieldId(100));
+    }
+    {
+        FieldMeta f(FieldName("val"),
+                    FieldId(101),
+                    DataType::INT64,
+                    true,
+                    std::nullopt);
+        schema->AddField(std::move(f));
+    }
+    {
+        FieldMeta f(FieldName("fvec"),
+                    FieldId(102),
+                    DataType::VECTOR_FLOAT,
+                    16,
+                    knowhere::metric::L2,
+                    false,
+                    std::nullopt);
+        schema->AddField(std::move(f));
+    }
+
+    // DataGen's scalar path (random_valid = false, deterministic): even rows
+    // are valid, odd rows are NULL.
+    auto raw_data = segcore::DataGen(schema, N);
+    proto::schema::FieldData* val_field_data = nullptr;
+    for (auto& fd : *raw_data.raw_->mutable_fields_data()) {
+        if (fd.field_id() == 101) {
+            val_field_data = &fd;
+            break;
+        }
+    }
+    ASSERT_NE(val_field_data, nullptr);
+    ASSERT_EQ(val_field_data->valid_data_size(), N);
+    ASSERT_FALSE(val_field_data->valid_data(11));   // odd row: NULL
+    ASSERT_TRUE(val_field_data->valid_data(60));    // even row: valid
+    ASSERT_FALSE(val_field_data->valid_data(111));  // odd row: NULL
+    // The packed data array holds only the valid rows; make every valid row
+    // satisfy the filter below so a boost decision depends on validity alone.
+    auto* val_col =
+        val_field_data->mutable_scalars()->mutable_long_data()->mutable_data();
+    for (auto& v : *val_col) {
+        v = 10;
+    }
+    auto segment = CreateSealedWithFieldDataLoaded(schema, raw_data);
+
+    // Probe: the loaded segment must see odd rows as NULL.
+    {
+        FixedVector<int64_t> probe = {11, 60, 111, 160};
+        auto arr = segment->bulk_subscript(
+            nullptr, FieldId(101), probe.data(), probe.size());
+        ASSERT_EQ(arr->valid_data_size(), 4);
+        ASSERT_FALSE(arr->valid_data(0));
+        ASSERT_TRUE(arr->valid_data(1));
+        ASSERT_FALSE(arr->valid_data(2));
+        ASSERT_TRUE(arr->valid_data(3));
+    }
+
+    // val > 5 supports offset input, so this exercises the native path.
+    auto column_info = test::GenColumnInfo(101,
+                                           proto::schema::DataType::Int64,
+                                           false,
+                                           false,
+                                           proto::schema::DataType::None,
+                                           true);
+    int64_t threshold = 5;
+    auto unary_range_expr =
+        test::GenUnaryRangeExpr(proto::plan::OpType::GreaterThan, threshold);
+    unary_range_expr->set_allocated_column_info(column_info);
+    auto expr_proto = test::GenExpr();
+    expr_proto->set_allocated_unary_range_expr(unary_range_expr);
+    auto parser = query::ProtoParser(schema);
+    auto filter = parser.ParseExprs(*expr_proto);
+    auto scorer = std::make_shared<WeightScorer>(filter, 2.0F);
+
+    auto query_context = std::make_shared<exec::QueryContext>(
+        "test_scorer_native_null", segment.get(), N, MAX_TIMESTAMP);
+    OpContext op_context;
+    query_context->set_op_context(&op_context);
+    auto exec_context = exec::ExecContext(query_context.get());
+
+    FixedVector<int32_t> offsets = {11, 60, 111, 160};
+    std::vector<std::optional<float>> scores(offsets.size(), std::nullopt);
+    ComputeScorerScores(
+        &exec_context, &op_context, segment.get(), scorer, offsets, scores);
+
+    EXPECT_FALSE(scores[0].has_value());  // 11: NULL row
+    ASSERT_TRUE(scores[1].has_value());   // 60: valid and 10 > 5
+    EXPECT_FLOAT_EQ(scores[1].value(), 2.0F);
+    EXPECT_FALSE(scores[2].has_value());  // 111: NULL row
+    ASSERT_TRUE(scores[3].has_value());   // 160: valid and 10 > 5
+    EXPECT_FLOAT_EQ(scores[3].value(), 2.0F);
+}

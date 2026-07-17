@@ -63,7 +63,11 @@ ComputeScorerScores(exec::ExecContext* exec_context,
 
     std::vector<expr::TypedExprPtr> filters;
     filters.emplace_back(filter);
-    auto expr_set = std::make_unique<exec::ExprSet>(filters, exec_context);
+    // Both branches below fold UNKNOWN into FALSE (a null row never receives
+    // a boost), so the consumer is null-rejecting and conjunctions may drop
+    // UNKNOWN rows from their active sets early.
+    auto expr_set = std::make_unique<exec::ExprSet>(
+        filters, exec_context, /*null_rejecting=*/true);
     std::vector<VectorPtr> results;
     exec::EvalCtx eval_ctx(exec_context);
 
@@ -90,6 +94,11 @@ ComputeScorerScores(exec::ExecContext* exec_context,
                    filter->ToString());
         auto col_vec_size = col_vec->size();
         TargetBitmapView bitsetview(col_vec->GetRawData(), col_vec_size);
+        // Fold UNKNOWN (NULL) into FALSE explicitly (data &= valid) instead
+        // of relying on the convention that UNKNOWN rows carry data=0,
+        // matching PhyIterativeFilterNode's offset-input path.
+        TargetBitmapView validview(col_vec->GetValidRawData(), col_vec_size);
+        bitsetview.inplace_and(validview, col_vec_size);
         scorer->batch_score(op_context,
                             segment,
                             function_mode,
