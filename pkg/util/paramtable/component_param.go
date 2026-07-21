@@ -800,10 +800,11 @@ This configuration is only used by querynode and indexnode, it selects CPU instr
 			`common.storage.indexBuildReadWindowBytes. Range-level parallelism ` +
 			`from arrow's parquet prebuffer (common.arrow.ioThreadPoolCoefficient) ` +
 			`is independent of this pool. ` +
-			`Once created the pool cannot be destroyed or shrunk at runtime: ` +
-			`updates only grow it, and lowering the value (including back to 0) ` +
-			`takes effect on restart. Readers latch the parallelism when they ` +
-			`open, so a change only affects tasks started afterwards.`,
+			`Values > 0 resize the pool in both directions at runtime. Setting ` +
+			`0 after the pool exists is a no-op — the pool cannot be destroyed, ` +
+			`so disabling it entirely requires a restart. Readers latch the ` +
+			`parallelism when they open, so any change only affects tasks ` +
+			`started afterwards.`,
 		Export: false,
 	}
 	p.StorageReaderThreadPoolSize.Init(base.mgr)

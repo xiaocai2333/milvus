@@ -209,11 +209,12 @@ InitLoonReaderThreadPool(int32_t num_threads) {
                 "loon reader thread pool size must be non-negative");
         }
         // 0 = leave the pool uninitialized (loon reads stay sequential,
-        // the pre-existing behavior). Once created the pool cannot be
-        // destroyed at runtime, so a later 0 does not shrink it back —
-        // callers must surface GetLoonReaderThreadPoolSize() rather than
-        // the requested value, otherwise a dynamic rollback looks applied
-        // while the old pool is still serving reads.
+        // the pre-existing behavior). Non-zero values resize an existing
+        // pool in either direction, but 0 cannot destroy it, so a rollback
+        // to 0 is a no-op — callers must surface
+        // GetLoonReaderThreadPoolSize() rather than the requested value,
+        // otherwise the rollback looks applied while the old pool is still
+        // serving reads.
         if (num_threads == 0) {
             return milvus::SuccessCStatus();
         }
