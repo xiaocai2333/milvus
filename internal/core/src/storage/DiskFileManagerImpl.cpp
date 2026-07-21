@@ -16,7 +16,9 @@
 
 #include <cxxabi.h>
 #include "common/FastMem.h"
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -73,7 +75,45 @@ namespace milvus::storage {
 
 namespace {
 std::atomic<uint64_t> g_file_path_generation{0};
+
+// Kick off writeback for a file's accumulated dirty pages without blocking.
+// The raw-data cache path streams tens of GB through the page cache and
+// never syncs, leaving flushing entirely to background writeback — which
+// the kernel schedules very conservatively (WBT + per-cgroup writeback
+// bandwidth estimation), to the point that on fast NVMe the drain can trail
+// the ingest by an order of magnitude, dirty pages pile up to the cgroup
+// threshold, and the writer stalls in balance_dirty_pages. An explicit
+// SYNC_FILE_RANGE_WRITE turns the flush into foreground-initiated IO at
+// device speed while never blocking the caller (no WAIT flags); on a slow
+// device it merely queues the pages and behavior degrades to the status
+// quo.
+void
+KickWriteback(const std::string& path) {
+#ifdef __linux__
+    int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return;
+    }
+    ::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE);
+    ::close(fd);
+#endif
 }
+
+// Kick writeback whenever the running write offset crosses a boundary.
+// Stateless: compares the pre/post-write offsets, so callers need no
+// bookkeeping. 256MB keeps at most one boundary interval dirty per file.
+constexpr int64_t kWritebackKickIntervalBytes = 256LL << 20;
+
+void
+MaybeKickWriteback(const std::string& path,
+                   int64_t offset_before,
+                   int64_t offset_after) {
+    if (offset_before / kWritebackKickIntervalBytes !=
+        offset_after / kWritebackKickIntervalBytes) {
+        KickWriteback(path);
+    }
+}
+}  // namespace
 
 struct DiskFileManagerImpl::LocalDirState {
     explicit LocalDirState(std::string dir) : dir(std::move(dir)) {
@@ -807,6 +847,7 @@ DiskFileManagerImpl::cache_raw_data_to_disk_common(
     uint32_t& dim,
     int64_t& write_offset,
     std::vector<size_t>* offsets) {
+    const int64_t write_offset_before = write_offset;
     auto data_type = field_data->get_data_type();
     if (!file_created) {
         auto init_file_info = [&](milvus::DataType dt) {
@@ -898,6 +939,8 @@ DiskFileManagerImpl::cache_raw_data_to_disk_common(
                                    data_size);
         write_offset += data_size;
     }
+
+    MaybeKickWriteback(local_data_path, write_offset_before, write_offset);
 }
 
 void
