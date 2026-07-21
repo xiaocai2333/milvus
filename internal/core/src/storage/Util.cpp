@@ -24,6 +24,7 @@
 
 #include "arrow/array/builder_binary.h"
 #include "arrow/array/builder_nested.h"
+#include "arrow/util/byte_size.h"
 #include "arrow/array/builder_primitive.h"
 #include "arrow/array/concatenate.h"
 #include "arrow/buffer_builder.h"
@@ -1650,12 +1651,24 @@ IterateFieldDataFromManifest(
     // `consumer` on this thread in batch order; the bounded in-flight
     // window provides backpressure so decoded-but-undelivered batches
     // cannot pile up without limit.
+    //
+    // The window is bounded by bytes, not by batch count: a count-based cap
+    // scales with the pool size and the per-batch size, so on a large pool
+    // with 64MB batches it would admit gigabytes of decoded data per build
+    // (and several builds may run concurrently). The byte budget below caps
+    // the decoded-but-undelivered bytes regardless of batch size and thread
+    // count; at least two batches are always admitted so decode can still
+    // overlap with fetch when a single batch exceeds the budget.
     auto& pool = ThreadPools::GetThreadPool(ThreadPoolPriority::MIDDLE);
-    const size_t max_inflight = std::max<size_t>(2, pool.GetMaxThreadNum() * 2);
-    std::deque<std::future<FieldDataPtr>> pending;
+    constexpr int64_t kMaxInflightBytes = 512LL << 20;
+    const size_t max_inflight_batches =
+        std::max<size_t>(2, pool.GetMaxThreadNum() * 2);
+    std::deque<std::pair<std::future<FieldDataPtr>, int64_t>> pending;
+    int64_t pending_bytes = 0;
 
     auto deliver_front = [&]() {
-        auto field_data = pending.front().get();
+        auto field_data = pending.front().first.get();
+        pending_bytes -= pending.front().second;
         pending.pop_front();
         consumer(std::move(field_data));
     };
@@ -1668,7 +1681,7 @@ IterateFieldDataFromManifest(
         if (!status.ok()) {
             // Drain workers before throwing so no task outlives this scope.
             for (auto& f : pending) {
-                f.wait();
+                f.first.wait();
             }
             AssertInfo(false,
                        "Failed to read record batch: " + status.ToString());
@@ -1682,7 +1695,17 @@ IterateFieldDataFromManifest(
             continue;
         }
 
-        pending.emplace_back(pool.Submit([batch,
+        // Estimate the decoded footprint of this batch for the byte budget.
+        // The arrow buffers backing the batch are the best available proxy
+        // for the FieldData it will materialize into; fall back to the row
+        // count when the size cannot be computed.
+        int64_t batch_bytes = 0;
+        {
+            auto size_result = arrow::util::TotalBufferSize(*batch);
+            batch_bytes = size_result > 0 ? size_result : num_rows;
+        }
+
+        auto decode_future = pool.Submit([batch,
                                           column_name,
                                           is_external,
                                           data_type_v,
@@ -1707,16 +1730,21 @@ IterateFieldDataFromManifest(
                 data_type_v, element_type_v, nullable, dim, num_rows);
             field_data->FillFieldData(chunked_array);
             return field_data;
-        }));
+        });
+        pending.emplace_back(std::move(decode_future), batch_bytes);
+        pending_bytes += batch_bytes;
 
-        // Backpressure: block on the oldest batch once the window is full.
-        while (pending.size() >= max_inflight) {
+        // Backpressure: block on the oldest batch once the window is full
+        // by bytes or by count. Always keep at least one in flight so a
+        // single oversized batch cannot deadlock the loop.
+        while (pending.size() > 1 && (pending_bytes > kMaxInflightBytes ||
+                                      pending.size() >= max_inflight_batches)) {
             deliver_front();
         }
         // Opportunistically deliver whatever is already done, keeping
         // consumer-side work (e.g. disk writes) interleaved with fetching.
         while (!pending.empty() &&
-               pending.front().wait_for(std::chrono::seconds(0)) ==
+               pending.front().first.wait_for(std::chrono::seconds(0)) ==
                    std::future_status::ready) {
             deliver_front();
         }

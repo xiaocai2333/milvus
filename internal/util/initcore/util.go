@@ -205,9 +205,24 @@ func RegisterLoonReaderConfigWatchers(pt *paramtable.ComponentParam, source stri
 				mlog.String("source", source), mlog.Err(err))
 			return
 		}
+		// Report the effective pool size, not the requested one: the pool
+		// cannot be destroyed at runtime, so lowering the setting (in
+		// particular back to 0) leaves the existing pool serving reads.
+		// Readers also latch parallelism when they open, so a change only
+		// affects tasks started afterwards.
+		requested := pt.CommonCfg.StorageReaderThreadPoolSize.GetAsInt64()
+		effective := int64(EffectiveLoonReaderThreadPoolSize())
+		if requested != effective {
+			mlog.Warn(context.TODO(),
+				"loon reader thread pool size not fully applied; the pool cannot shrink or be destroyed at runtime, restart to change it",
+				mlog.String("source", source),
+				mlog.Int64("requested", requested),
+				mlog.Int64("effective", effective))
+		}
 		mlog.Info(context.TODO(), "loon reader params reconfigured",
 			mlog.String("source", source),
-			mlog.Int64("readerThreadPoolSize", pt.CommonCfg.StorageReaderThreadPoolSize.GetAsInt64()),
+			mlog.Int64("readerThreadPoolSizeRequested", requested),
+			mlog.Int64("readerThreadPoolSizeEffective", effective),
 			mlog.Int64("indexBuildReadWindowBytes", pt.CommonCfg.IndexBuildReadWindowBytes.GetAsInt64()))
 	}
 	pt.Watch(pt.CommonCfg.StorageReaderThreadPoolSize.Key,

@@ -1011,9 +1011,10 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
             loon_ffi_properties_ != nullptr,
             "loon ffi properties is null when build index with manifest");
         // Stream batches straight to the local file instead of
-        // materializing the whole column in memory first: peak memory drops
-        // from the full column size to the reader's in-flight window, and
-        // the disk write overlaps with fetch/decode.
+        // materializing the whole column in memory first, so this task's
+        // retention drops from the full raw column to the reader's prefetch
+        // window plus the bounded decode window, and the disk write
+        // overlaps with fetch/decode.
         IterateFieldDataFromManifest(
             manifest_path_str,
             loon_ffi_properties_,

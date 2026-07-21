@@ -28,6 +28,14 @@
 
 namespace milvus::storage {
 
+// Arrow parquet prebuffer range-coalescing limits. Published and consumed as
+// one unit: the parquet reader validates range_size_limit > hole_size_limit,
+// so a mix of values from two generations is rejected downstream.
+struct ArrowReaderLimits {
+    int64_t hole_size_limit_bytes = 0;
+    int64_t range_size_limit_bytes = 0;
+};
+
 class LoonFFIPropertiesSingleton {
  private:
     LoonFFIPropertiesSingleton() = default;
@@ -63,10 +71,17 @@ class LoonFFIPropertiesSingleton {
     void
     SetArrowReaderConfig(int64_t hole_size_limit_bytes,
                          int64_t range_size_limit_bytes) {
-        arrow_reader_hole_size_limit_bytes_.store(hole_size_limit_bytes,
-                                                  std::memory_order_relaxed);
-        arrow_reader_range_size_limit_bytes_.store(range_size_limit_bytes,
-                                                   std::memory_order_relaxed);
+        // Publish both limits as one snapshot. They are validated against
+        // each other downstream (the parquet reader rejects
+        // range_size_limit <= hole_size_limit), so a reader must never
+        // observe one value from the new generation and the other from the
+        // old one — e.g. updating 1MiB/4MiB to 8MiB/16MiB could otherwise
+        // transiently expose 8MiB/4MiB and fail the build task.
+        {
+            std::unique_lock cfg_lck(config_mutex_);
+            arrow_reader_limits_ = {hole_size_limit_bytes,
+                                    range_size_limit_bytes};
+        }
         std::unique_lock lck(mutex_);
         if (properties_ != nullptr) {
             auto properties =
@@ -115,32 +130,40 @@ class LoonFFIPropertiesSingleton {
                                       std::to_string(window).c_str());
     }
 
+    // Returns the currently published limits as one coherent snapshot.
+    ArrowReaderLimits
+    GetArrowReaderLimits() const {
+        std::shared_lock cfg_lck(config_mutex_);
+        return arrow_reader_limits_;
+    }
+
     // Applies the configured arrow reader prebuffer limits to `properties`.
-    // Lock-free (reads atomics only) so it is safe to call from
-    // MakeInternalPropertiesFromStorageConfig even while this singleton
-    // holds mutex_ (Init builds its cached map through that same helper).
+    // Reads one coherent snapshot, so the two values always come from the
+    // same generation. Guarded by config_mutex_ rather than mutex_, so it
+    // stays callable from MakeInternalPropertiesFromStorageConfig while
+    // Init holds mutex_ (lock order is always mutex_ -> config_mutex_;
+    // SetArrowReaderConfig releases config_mutex_ before taking mutex_).
     // A value of 0 means "keep the arrow default" downstream.
     void
     ApplyArrowReaderConfig(milvus_storage::api::Properties& properties) const {
+        auto limits = GetArrowReaderLimits();
         milvus_storage::api::SetValue(
             properties,
             PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT,
-            std::to_string(arrow_reader_hole_size_limit_bytes_.load(
-                               std::memory_order_relaxed))
-                .c_str());
+            std::to_string(limits.hole_size_limit_bytes).c_str());
         milvus_storage::api::SetValue(
             properties,
             PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT,
-            std::to_string(arrow_reader_range_size_limit_bytes_.load(
-                               std::memory_order_relaxed))
-                .c_str());
+            std::to_string(limits.range_size_limit_bytes).c_str());
     }
 
  private:
     mutable std::shared_mutex mutex_;
     std::shared_ptr<milvus_storage::api::Properties> properties_ = nullptr;
-    std::atomic<int64_t> arrow_reader_hole_size_limit_bytes_{0};
-    std::atomic<int64_t> arrow_reader_range_size_limit_bytes_{0};
+    // Guards arrow_reader_limits_ only. Separate from mutex_ so the limits
+    // can be read while mutex_ is held; see ApplyArrowReaderConfig.
+    mutable std::shared_mutex config_mutex_;
+    ArrowReaderLimits arrow_reader_limits_{};
     std::atomic<int64_t> index_build_read_window_bytes_{0};
 };
 

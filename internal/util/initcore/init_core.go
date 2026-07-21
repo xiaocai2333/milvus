@@ -517,6 +517,14 @@ func InitLoonReaderConfig(params *paramtable.ComponentParam) error {
 	return HandleCStatus(&status, "InitIndexBuildReadWindow failed")
 }
 
+// EffectiveLoonReaderThreadPoolSize returns the pool size actually in effect,
+// which differs from the configured value when the pool already exists: it
+// cannot be destroyed at runtime, so lowering the setting to 0 does not take
+// effect until restart.
+func EffectiveLoonReaderThreadPoolSize() int32 {
+	return int32(C.GetLoonReaderThreadPoolSize())
+}
+
 func InitArrowReaderConfig(params *paramtable.ComponentParam) error {
 	arrowReaderConfig := C.CArrowReaderConfig{
 		hole_size_limit_bytes:  C.int64_t(params.CommonCfg.ArrowReaderHoleSizeLimitBytes.GetAsInt64()),

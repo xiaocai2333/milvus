@@ -788,11 +788,22 @@ This configuration is only used by querynode and indexnode, it selects CPU instr
 		Version:      "3.0.0",
 		DefaultValue: "0",
 		Doc: `Size of milvus-storage's global reader thread pool. When > 0, chunk ` +
-			`(row-group) reads issued by one storage-v3/external reader are fanned ` +
-			`out across this pool, so multiple files/chunks download concurrently ` +
-			`instead of one at a time. 0 keeps the pre-existing sequential behavior. ` +
-			`Once created the pool cannot be destroyed at runtime; updates only ` +
-			`resize it.`,
+			`(row-group) reads issued by one storage-v3/external reader may be ` +
+			`fanned out across this pool. 0 keeps the pre-existing sequential ` +
+			`behavior. ` +
+			`IMPORTANT: milvus-storage splits a round's chunks into contiguous ` +
+			`blocks and merges them without limit when the chunk count does not ` +
+			`exceed the pool size, so a round whose chunks are contiguous and ` +
+			`fewer than or equal to this value is submitted as a SINGLE task and ` +
+			`gains no fan-out. To get real per-chunk parallelism the number of ` +
+			`chunks per round must exceed this value — see ` +
+			`common.storage.indexBuildReadWindowBytes. Range-level parallelism ` +
+			`from arrow's parquet prebuffer (common.arrow.ioThreadPoolCoefficient) ` +
+			`is independent of this pool. ` +
+			`Once created the pool cannot be destroyed or shrunk at runtime: ` +
+			`updates only grow it, and lowering the value (including back to 0) ` +
+			`takes effect on restart. Readers latch the parallelism when they ` +
+			`open, so a change only affects tasks started afterwards.`,
 		Export: false,
 	}
 	p.StorageReaderThreadPoolSize.Init(base.mgr)
@@ -805,11 +816,16 @@ This configuration is only used by querynode and indexnode, it selects CPU instr
 			`for index-build manifest reads. The default window (0 = milvus-storage's ` +
 			`32MB) admits a single 64MB-class parquet row group per prefetch round, ` +
 			`serializing the raw-data download to one object-storage range read at a ` +
-			`time. Set to N x row-group-size (e.g. 512MB) so one round spans multiple ` +
-			`row groups whose column chunks prefetch in parallel on the arrow IO ` +
-			`thread pool (common.arrow.ioThreadPoolCoefficient). Memory cost: up to ` +
-			`this many bytes buffered per running build task. Max 4GB. Only affects ` +
-			`index build; query-node loads keep the default window.`,
+			`time. Set to N x row-group-size so one round spans multiple row groups, ` +
+			`whose column chunks are then prefetched in parallel by arrow ` +
+			`(common.arrow.ioThreadPoolCoefficient). ` +
+			`If you also want per-chunk fan-out on the milvus-storage reader pool, ` +
+			`N must be strictly greater than common.storage.readerThreadPoolSize: ` +
+			`at or below the pool size, contiguous chunks are merged into one task ` +
+			`(e.g. a 1GB window over 64MB row groups is 16 chunks, which a 16-thread ` +
+			`pool executes as a single task). Memory cost: up to this many bytes ` +
+			`buffered per running build task, on top of the decode window. Max 4GB. ` +
+			`Only affects index build; query-node loads keep the default window.`,
 		Export: false,
 	}
 	p.IndexBuildReadWindowBytes.Init(base.mgr)

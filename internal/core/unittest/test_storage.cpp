@@ -829,6 +829,73 @@ TEST_F(StorageTest, InitIndexBuildReadWindow) {
     EXPECT_EQ(window.ValueOrDie(), 32LL * 1024 * 1024);
 }
 
+// The two prebuffer limits are validated against each other downstream (the
+// parquet reader rejects range_size_limit <= hole_size_limit), so a task
+// building fresh properties must never observe one value from the new
+// generation and the other from the old one. Hot-reload concurrently with
+// property creation and assert every observed pair is self-consistent.
+TEST_F(StorageTest, ArrowReaderConfigSnapshotIsAtomicUnderHotReload) {
+    // Two generations, each individually valid, whose crosswise mixes are
+    // not: (8M, 16M) mixed with (1M, 4M) yields 8M/4M, which is rejected.
+    constexpr int64_t kHoleA = 1LL << 20, kRangeA = 4LL << 20;
+    constexpr int64_t kHoleB = 8LL << 20, kRangeB = 16LL << 20;
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> torn{0};
+    std::atomic<int> observations{0};
+
+    std::thread writer([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            LoonFFIPropertiesSingleton::GetInstance().SetArrowReaderConfig(
+                kHoleA, kRangeA);
+            LoonFFIPropertiesSingleton::GetInstance().SetArrowReaderConfig(
+                kHoleB, kRangeB);
+        }
+    });
+
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t) {
+        readers.emplace_back([&]() {
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto properties = MakeInternalPropertiesFromStorageConfig(
+                    get_azure_storage_config());
+                auto hole = milvus_storage::api::GetValue<int64_t>(
+                    *properties,
+                    PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT);
+                auto range = milvus_storage::api::GetValue<int64_t>(
+                    *properties,
+                    PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
+                if (!hole.ok() || !range.ok()) {
+                    torn.fetch_add(1);
+                    continue;
+                }
+                auto h = hole.ValueOrDie(), r = range.ValueOrDie();
+                bool consistent = (h == kHoleA && r == kRangeA) ||
+                                  (h == kHoleB && r == kRangeB);
+                if (!consistent) {
+                    torn.fetch_add(1);
+                }
+                observations.fetch_add(1);
+            }
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.store(true, std::memory_order_relaxed);
+    writer.join();
+    for (auto& r : readers) {
+        r.join();
+    }
+
+    EXPECT_GT(observations.load(), 0) << "no observations were made";
+    EXPECT_EQ(torn.load(), 0)
+        << "observed a mix of prebuffer limits from different generations";
+
+    // Restore the unset state for the tests that follow.
+    auto status = InitArrowReaderConfig(CArrowReaderConfig{0, 0});
+    ASSERT_EQ(status.error_code, Success) << status.error_msg;
+}
+
 class StorageUtilTest : public testing::Test {
  public:
     StorageUtilTest() = default;
