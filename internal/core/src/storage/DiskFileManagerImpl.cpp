@@ -831,6 +831,16 @@ DiskFileManagerImpl::cache_raw_data_to_disk_common(
         if (data_type == milvus::DataType::VECTOR_SPARSE_U32_F32) {
             local_data_path += ".sparse_u32_f32";
         }
+        // FileWriter opens with O_CREAT but does not create the parent
+        // directories, which the previous LocalChunkManager path did on
+        // every call. The raw-data prefix is per-build and does not exist
+        // yet, so create it here or the open fails with ENOENT.
+        // FileWriter opens with O_CREAT but does not create the parent
+        // directories, which the previous LocalChunkManager path did on
+        // every call. The raw-data prefix is per-build and does not exist
+        // yet, so create it here or the open fails with ENOENT.
+        std::filesystem::create_directories(
+            std::filesystem::path(local_data_path).parent_path());
         // LOW, deliberately: index build is a background batch job, so it
         // should yield to latency-sensitive writes if the write rate
         // limiter is ever enabled. It must also not be HIGH — FileWriter
