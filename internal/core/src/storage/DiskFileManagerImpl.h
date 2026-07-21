@@ -27,6 +27,7 @@
 
 #include "storage/IndexData.h"
 #include "storage/FileManager.h"
+#include "storage/FileWriter.h"
 #include "storage/LocalChunkManager.h"
 #include "common/Consts.h"
 #include "storage/Types.h"
@@ -296,16 +297,23 @@ class DiskFileManagerImpl : public FileManagerImpl {
     std::string
     cache_opt_field_to_disk_v3(const Config& config);
 
+    // Appends one batch of raw vector data to the local scratch file.
+    //
+    // `writer` is owned by the caller and created lazily on the first batch
+    // (the file name depends on the field's data type). It writes through
+    // FileWriter rather than LocalChunkManager so the configured write mode
+    // applies: with common.diskWriteMode=direct the raw data bypasses the
+    // page cache entirely, which keeps a multi-GB spill from piling up
+    // dirty pages that kernel background writeback drains far below device
+    // speed. The first sizeof(uint32)*2 bytes are reserved for the header;
+    // the caller backfills them after Finish().
     template <typename DataType>
     void
-    cache_raw_data_to_disk_common(
-        const FieldDataPtr& field_data,
-        const std::shared_ptr<LocalChunkManager>& local_chunk_manager,
-        std::string& local_data_path,
-        bool& file_created,
-        uint32_t& dim,
-        int64_t& write_offset,
-        std::vector<size_t>* offsets = nullptr);
+    cache_raw_data_to_disk_common(const FieldDataPtr& field_data,
+                                  std::unique_ptr<FileWriter>& writer,
+                                  std::string& local_data_path,
+                                  uint32_t& dim,
+                                  std::vector<size_t>* offsets = nullptr);
 
     inline void
     set_bit(std::vector<uint8_t>& bitmap, int64_t bit_pos) {

@@ -109,6 +109,15 @@ func InitSegcore(nodeID int64) error {
 		return err
 	}
 
+	// Apply the local disk writer config (write mode, buffer size, writer
+	// pool, rate limiter). Index build spills tens of GB of raw vector data
+	// to local disk through FileWriter, so DataNode needs this wired up too
+	// — previously only QueryNode initialized it, leaving DataNode on the
+	// built-in defaults.
+	if err := initcore.InitDiskFileWriterConfig(paramtable.Get()); err != nil {
+		return err
+	}
+
 	// Wire hot-reload watchers so capacity / coalescing-limit changes take effect
 	// without restart, matching QueryNode behavior.
 	initcore.RegisterArrowIOThreadPoolWatchers(paramtable.Get(), "datanode")

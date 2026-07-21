@@ -73,7 +73,24 @@ namespace milvus::storage {
 
 namespace {
 std::atomic<uint64_t> g_file_path_generation{0};
+
+// Backfills the raw-data file header (num_rows, dim) that
+// cache_raw_data_to_disk_common reserved as the first two uint32s. Written
+// through LocalChunkManager rather than FileWriter because FileWriter is
+// sequential and the file has already been finished by this point; the
+// write is 8 bytes, so the buffered path costs nothing here.
+void
+write_header(const std::shared_ptr<LocalChunkManager>& local_chunk_manager,
+             const std::string& local_data_path,
+             uint32_t num_rows,
+             uint32_t dim) {
+    int64_t offset = 0;
+    local_chunk_manager->Write(
+        local_data_path, offset, &num_rows, sizeof(num_rows));
+    offset += sizeof(num_rows);
+    local_chunk_manager->Write(local_data_path, offset, &dim, sizeof(dim));
 }
+}  // namespace
 
 struct DiskFileManagerImpl::LocalDirState {
     explicit LocalDirState(std::string dir) : dir(std::move(dir)) {
@@ -662,7 +679,10 @@ DiskFileManagerImpl::cache_raw_data_to_disk_internal(const Config& config) {
     auto local_chunk_manager =
         LocalChunkManagerSingleton::GetInstance().GetChunkManager();
     std::string local_data_path;
-    bool file_created = false;
+    // Created lazily on the first batch, then reused for the whole spill so
+    // the raw data goes through one FileWriter (and thus one open with the
+    // configured write mode) instead of a buffered write per batch.
+    std::unique_ptr<FileWriter> writer;
 
     // Check if we're dealing with embedding list (VECTOR_ARRAY)
     auto is_embedding_list =
@@ -687,7 +707,6 @@ DiskFileManagerImpl::cache_raw_data_to_disk_internal(const Config& config) {
     // num_rows(uint32) | dim(uint32) | index_data ([]uint8_t)
     uint32_t num_rows = 0;
     uint32_t dim = 0;
-    int64_t write_offset = sizeof(num_rows) + sizeof(dim);
 
     auto FetchRawData = [&]() {
         auto field_datas = GetObjectData(rcm_.get(), batch_files);
@@ -716,11 +735,9 @@ DiskFileManagerImpl::cache_raw_data_to_disk_internal(const Config& config) {
 
                 cache_raw_data_to_disk_common<DataType>(
                     field_data,
-                    local_chunk_manager,
+                    writer,
                     local_data_path,
-                    file_created,
                     dim,
-                    write_offset,
                     is_vector_array ? &offsets : nullptr);
             });
     };
@@ -746,13 +763,16 @@ DiskFileManagerImpl::cache_raw_data_to_disk_internal(const Config& config) {
         num_rows = static_cast<uint32_t>(offsets.back());
     }
 
+    // Close the writer before backfilling the header: with direct I/O the
+    // tail is only flushed and the file truncated to its real size on
+    // Finish(), and the header write below opens the file separately.
+    if (writer != nullptr) {
+        writer->Finish();
+        writer.reset();
+    }
+
     // write num_rows and dim value to file header
-    write_offset = 0;
-    local_chunk_manager->Write(
-        local_data_path, write_offset, &num_rows, sizeof(num_rows));
-    write_offset += sizeof(num_rows);
-    local_chunk_manager->Write(
-        local_data_path, write_offset, &dim, sizeof(dim));
+    write_header(local_chunk_manager, local_data_path, num_rows, dim);
 
     // Write offsets file for VECTOR_ARRAY
     if (is_vector_array) {
@@ -801,23 +821,29 @@ template <typename DataType>
 void
 DiskFileManagerImpl::cache_raw_data_to_disk_common(
     const FieldDataPtr& field_data,
-    const std::shared_ptr<LocalChunkManager>& local_chunk_manager,
+    std::unique_ptr<FileWriter>& writer,
     std::string& local_data_path,
-    bool& file_created,
     uint32_t& dim,
-    int64_t& write_offset,
     std::vector<size_t>* offsets) {
     auto data_type = field_data->get_data_type();
-    if (!file_created) {
-        auto init_file_info = [&](milvus::DataType dt) {
-            local_data_path = GetLocalRawDataObjectPrefix() + "raw_data";
-            if (dt == milvus::DataType::VECTOR_SPARSE_U32_F32) {
-                local_data_path += ".sparse_u32_f32";
-            }
-            local_chunk_manager->CreateFile(local_data_path);
-        };
-        init_file_info(data_type);
-        file_created = true;
+    if (writer == nullptr) {
+        local_data_path = GetLocalRawDataObjectPrefix() + "raw_data";
+        if (data_type == milvus::DataType::VECTOR_SPARSE_U32_F32) {
+            local_data_path += ".sparse_u32_f32";
+        }
+        // LOW, deliberately: index build is a background batch job, so it
+        // should yield to latency-sensitive writes if the write rate
+        // limiter is ever enabled. It must also not be HIGH — FileWriter
+        // forces BUFFERED mode for HIGH priority, which would silently
+        // disable direct I/O and reintroduce the dirty-page pile-up this
+        // path is trying to avoid.
+        writer =
+            std::make_unique<FileWriter>(local_data_path, io::Priority::LOW);
+        // Reserve the header (num_rows, dim); the caller backfills it once
+        // the totals are known. FileWriter is sequential, so the space has
+        // to be occupied up front.
+        const uint32_t header_placeholder[2] = {0, 0};
+        writer->Write(header_placeholder, sizeof(header_placeholder));
     }
     if (data_type == milvus::DataType::VECTOR_SPARSE_U32_F32) {
         dim =
@@ -831,14 +857,8 @@ DiskFileManagerImpl::cache_raw_data_to_disk_common(
             auto row = sparse_rows[i];
             auto row_byte_size = row.data_byte_size();
             uint32_t nnz = row.size();
-            local_chunk_manager->Write(local_data_path,
-                                       write_offset,
-                                       const_cast<uint32_t*>(&nnz),
-                                       sizeof(nnz));
-            write_offset += sizeof(nnz);
-            local_chunk_manager->Write(
-                local_data_path, write_offset, row.data(), row_byte_size);
-            write_offset += row_byte_size;
+            writer->Write(&nnz, sizeof(nnz));
+            writer->Write(row.data(), row_byte_size);
         }
     } else if (data_type == milvus::DataType::VECTOR_ARRAY) {
         // Handle VECTOR_ARRAY - need to flatten the array data
@@ -885,18 +905,12 @@ DiskFileManagerImpl::cache_raw_data_to_disk_common(
         }
 
         // Write flattened data to disk
-        local_chunk_manager->Write(
-            local_data_path, write_offset, buf.get(), total_size);
-        write_offset += total_size;
+        writer->Write(buf.get(), total_size);
     } else {
         dim = field_data->get_dim();
         auto data_size =
             field_data->get_valid_rows() * milvus::GetVecRowSize<DataType>(dim);
-        local_chunk_manager->Write(local_data_path,
-                                   write_offset,
-                                   const_cast<void*>(field_data->Data()),
-                                   data_size);
-        write_offset += data_size;
+        writer->Write(field_data->Data(), data_size);
     }
 }
 
@@ -942,7 +956,7 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
     auto local_chunk_manager =
         LocalChunkManagerSingleton::GetInstance().GetChunkManager();
     std::string local_data_path;
-    bool file_created = false;
+    std::unique_ptr<FileWriter> writer;
 
     // Check if we're dealing with embedding list (VECTOR_ARRAY)
     auto is_embedding_list =
@@ -961,7 +975,6 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
     // num_rows(uint32) | dim(uint32) | index_data ([]uint8_t)
     uint32_t num_rows = 0;
     uint32_t var_dim = 0;
-    int64_t write_offset = sizeof(num_rows) + sizeof(var_dim);
 
     bool nullable = false;
     uint64_t total_num_rows = 0;
@@ -995,11 +1008,9 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
         }
 
         cache_raw_data_to_disk_common<T>(field_data,
-                                         local_chunk_manager,
+                                         writer,
                                          local_data_path,
-                                         file_created,
                                          var_dim,
-                                         write_offset,
                                          is_vector_array ? &offsets : nullptr);
     };
 
@@ -1043,13 +1054,15 @@ DiskFileManagerImpl::cache_raw_data_to_disk_storage_v2(const Config& config) {
         num_rows = static_cast<uint32_t>(offsets.back());
     }
 
+    // Close the writer before backfilling the header; see the note in
+    // cache_raw_data_to_disk_internal.
+    if (writer != nullptr) {
+        writer->Finish();
+        writer.reset();
+    }
+
     // write num_rows and dim value to file header
-    write_offset = 0;
-    local_chunk_manager->Write(
-        local_data_path, write_offset, &num_rows, sizeof(num_rows));
-    write_offset += sizeof(num_rows);
-    local_chunk_manager->Write(
-        local_data_path, write_offset, &var_dim, sizeof(var_dim));
+    write_header(local_chunk_manager, local_data_path, num_rows, var_dim);
 
     // Write offsets file for VECTOR_ARRAY
     if (is_vector_array) {
