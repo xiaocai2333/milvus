@@ -22,10 +22,14 @@
 #include <folly/futures/Promise.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <utility>
+
+#include "log/Log.h"
 
 #include "folly/ExceptionWrapper.h"
 #include "folly/ScopeGuard.h"
@@ -196,6 +200,7 @@ FileWriter::PositionedWriteWithCheck(const void* data,
                                      size_t nbyte,
                                      size_t file_offset) {
     size_t alignment_bytes = use_direct_io_ ? ALIGNMENT_BYTES : 1;
+    auto start = std::chrono::steady_clock::now();
     try {
         PositionedWriteWithRateLimit(fd_,
                                      filename_,
@@ -209,6 +214,18 @@ FileWriter::PositionedWriteWithCheck(const void* data,
         Cleanup();
         throw;
     }
+    auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - start)
+                          .count();
+    ++dev_write_count_;
+    dev_write_bytes_ += nbyte;
+    dev_write_ns_ += elapsed_ns;
+    dev_write_max_ns_ = std::max(dev_write_max_ns_, elapsed_ns);
+    int bucket = elapsed_ns < 1'000'000    ? 0
+                 : elapsed_ns < 8'000'000  ? 1
+                 : elapsed_ns < 64'000'000 ? 2
+                                           : 3;
+    ++dev_lat_buckets_[bucket];
 }
 
 void
@@ -276,6 +293,14 @@ FileWriter::Write(const void* data, size_t nbyte) {
         return;
     }
 
+    auto stall_start = std::chrono::steady_clock::now();
+    auto record_stall = folly::makeGuard([this, stall_start]() {
+        caller_stall_ns_ +=
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - stall_start)
+                .count();
+    });
+
     if (!use_writer_pool_) {
         WriteInternal(data, nbyte);
         return;
@@ -342,6 +367,7 @@ FileWriter::FlushWithBufferedIO() {
 
 size_t
 FileWriter::Finish() {
+    auto stall_start = std::chrono::steady_clock::now();
     // if the aligned buffer is not empty, we should flush it to the file
     if (offset_ != 0) {
         auto promise = std::make_shared<folly::Promise<folly::Unit>>();
@@ -377,6 +403,37 @@ FileWriter::Finish() {
                 FlushWithBufferedIO();
             }
         }
+    }
+
+    caller_stall_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - stall_start)
+                            .count();
+
+    // One line per finished file so a slow run can be attributed: high
+    // dev_avg/dev_max latency means the device (or its queue) is slow;
+    // low device latency with high caller_stall means time is lost
+    // elsewhere in the pipeline. Skip files that never hit the device
+    // through this writer to avoid spamming on tiny metadata files.
+    if (dev_write_count_ > 0) {
+        LOG_INFO(
+            "[FileWriterStats] file={} mode={} pool={} size={} dev_writes={} "
+            "dev_MB={} dev_ms={} dev_avg_us={} dev_max_ms={} "
+            "lat_buckets[<1ms,1-8ms,8-64ms,>=64ms]={},{},{},{} "
+            "caller_stall_ms={}",
+            filename_,
+            use_direct_io_ ? "direct" : "buffered",
+            use_writer_pool_,
+            file_size_,
+            dev_write_count_,
+            dev_write_bytes_ >> 20,
+            dev_write_ns_ / 1'000'000,
+            dev_write_ns_ / 1'000 / static_cast<int64_t>(dev_write_count_),
+            dev_write_max_ns_ / 1'000'000,
+            dev_lat_buckets_[0],
+            dev_lat_buckets_[1],
+            dev_lat_buckets_[2],
+            dev_lat_buckets_[3],
+            caller_stall_ns_ / 1'000'000);
     }
 
     // clean up the file writer

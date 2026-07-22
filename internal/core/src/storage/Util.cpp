@@ -1666,18 +1666,48 @@ IterateFieldDataFromManifest(
     std::deque<std::pair<std::future<FieldDataPtr>, int64_t>> pending;
     int64_t pending_bytes = 0;
 
+    // Phase accounting for the streaming loop, reported once at the end.
+    // fetch = ReadNext (network/prefetch wait), decode_wait = blocking on
+    // the decode future, consume = the consumer callback (for index build:
+    // the local disk write). The three phases run on this thread and are
+    // mutually exclusive, so comparing their totals against the wall time
+    // shows where the pipeline actually spends its time — in particular
+    // whether a blocking consumer is starving ReadNext (fetch_max grows)
+    // or the writes themselves are slow (consume dominates).
+    int64_t fetch_ns = 0, fetch_max_ns = 0;
+    int64_t decode_wait_ns = 0;
+    int64_t consume_ns = 0, consume_max_ns = 0;
+    int64_t total_batch_bytes = 0;
+    size_t batch_count = 0;
+    auto wall_start = std::chrono::steady_clock::now();
+    auto now_ns = []() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    };
+
     auto deliver_front = [&]() {
+        auto t0 = now_ns();
         auto field_data = pending.front().first.get();
+        auto t1 = now_ns();
         pending_bytes -= pending.front().second;
         pending.pop_front();
         consumer(std::move(field_data));
+        auto t2 = now_ns();
+        decode_wait_ns += t1 - t0;
+        consume_ns += t2 - t1;
+        consume_max_ns = std::max(consume_max_ns, t2 - t1);
     };
 
     auto data_type_v = data_type.value();
     auto element_type_v = element_type.value();
     while (true) {
         std::shared_ptr<arrow::RecordBatch> batch;
+        auto fetch_start = now_ns();
         auto status = record_batch_reader->ReadNext(&batch);
+        auto fetch_elapsed = now_ns() - fetch_start;
+        fetch_ns += fetch_elapsed;
+        fetch_max_ns = std::max(fetch_max_ns, fetch_elapsed);
         if (!status.ok()) {
             // Drain workers before throwing so no task outlives this scope.
             for (auto& f : pending) {
@@ -1733,6 +1763,8 @@ IterateFieldDataFromManifest(
         });
         pending.emplace_back(std::move(decode_future), batch_bytes);
         pending_bytes += batch_bytes;
+        total_batch_bytes += batch_bytes;
+        ++batch_count;
 
         // Backpressure: block on the oldest batch once the window is full
         // by bytes or by count. Always keep at least one in flight so a
@@ -1752,6 +1784,25 @@ IterateFieldDataFromManifest(
 
     while (!pending.empty()) {
         deliver_front();
+    }
+
+    if (batch_count > 0) {
+        auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - wall_start)
+                           .count();
+        LOG_INFO(
+            "[ManifestReadStats] column={} batches={} MB={} wall_ms={} "
+            "fetch_ms={} fetch_max_ms={} decode_wait_ms={} consume_ms={} "
+            "consume_max_ms={}",
+            column_name,
+            batch_count,
+            total_batch_bytes >> 20,
+            wall_ms,
+            fetch_ns / 1'000'000,
+            fetch_max_ns / 1'000'000,
+            decode_wait_ns / 1'000'000,
+            consume_ns / 1'000'000,
+            consume_max_ns / 1'000'000);
     }
 }
 

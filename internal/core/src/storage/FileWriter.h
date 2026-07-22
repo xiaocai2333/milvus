@@ -292,6 +292,20 @@ class FileWriter {
     // for rate limiter
     io::Priority priority_;
     io::WriteRateLimiter& rate_limiter_;
+
+    // Device-write observability. All physical writes funnel through
+    // PositionedWriteWithCheck, and at most one is in flight per writer
+    // (pool submissions are awaited immediately), so plain members are
+    // safe. dev_write_ns_ includes any rate-limiter wait; the latency
+    // buckets split at 1ms / 8ms / 64ms. caller_stall_ns_ is the time the
+    // writer's caller spent blocked past the memcpy fast path — under
+    // direct I/O this is the stall the data pipeline actually sees.
+    size_t dev_write_count_{0};
+    size_t dev_write_bytes_{0};
+    int64_t dev_write_ns_{0};
+    int64_t dev_write_max_ns_{0};
+    size_t dev_lat_buckets_[4]{0, 0, 0, 0};
+    int64_t caller_stall_ns_{0};
 };
 
 class PositionedFileWriter {
