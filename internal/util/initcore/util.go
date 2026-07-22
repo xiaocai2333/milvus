@@ -189,6 +189,44 @@ func RegisterArrowReaderConfigWatchers(pt *paramtable.ComponentParam, source str
 		config.NewHandler(pt.CommonCfg.ArrowReaderRangeSizeLimitBytes.Key, handler))
 }
 
+// RegisterDiskFileWriterWatchers wires hot-reload of the local disk writer
+// settings (write mode, buffer size, writer pool, rate limiter), mirroring
+// the QueryNode wiring in querynodev2/server.go. Without these the values
+// are only read at init, so changing e.g. the direct-I/O buffer size has no
+// effect until the process restarts — and with direct I/O that buffer size
+// determines how many synchronous device round-trips each spill costs, so
+// it is exactly the knob an operator needs to be able to tune live.
+func RegisterDiskFileWriterWatchers(pt *paramtable.ComponentParam, source string) {
+	handler := func(evt *config.Event) {
+		if !evt.HasUpdated {
+			return
+		}
+		if err := InitDiskFileWriterConfig(pt); err != nil {
+			mlog.Warn(context.TODO(), "failed to reconfigure disk file writer params",
+				mlog.String("source", source), mlog.Err(err))
+			return
+		}
+		mlog.Info(context.TODO(), "disk file writer params reconfigured",
+			mlog.String("source", source),
+			mlog.String("mode", pt.CommonCfg.DiskWriteMode.GetValue()),
+			mlog.Uint64("bufferSizeKb", pt.CommonCfg.DiskWriteBufferSizeKb.GetAsUint64()),
+			mlog.Int("nrThreads", pt.CommonCfg.DiskWriteNumThreads.GetAsInt()))
+	}
+	for _, key := range []string{
+		pt.CommonCfg.DiskWriteMode.Key,
+		pt.CommonCfg.DiskWriteBufferSizeKb.Key,
+		pt.CommonCfg.DiskWriteNumThreads.Key,
+		pt.CommonCfg.DiskWriteRateLimiterRefillPeriodUs.Key,
+		pt.CommonCfg.DiskWriteRateLimiterMaxBurstKBps.Key,
+		pt.CommonCfg.DiskWriteRateLimiterAvgKBps.Key,
+		pt.CommonCfg.DiskWriteRateLimiterHighPriorityRatio.Key,
+		pt.CommonCfg.DiskWriteRateLimiterMiddlePriorityRatio.Key,
+		pt.CommonCfg.DiskWriteRateLimiterLowPriorityRatio.Key,
+	} {
+		pt.Watch(key, config.NewHandler(key, handler))
+	}
+}
+
 // RegisterLoonReaderConfigWatchers wires hot-reload of the milvus-storage
 // reader thread pool size and the index-build read window. `source` is
 // included in the log entry for the same reason as in

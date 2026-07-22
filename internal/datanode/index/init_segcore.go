@@ -123,6 +123,7 @@ func InitSegcore(nodeID int64) error {
 	initcore.RegisterArrowIOThreadPoolWatchers(paramtable.Get(), "datanode")
 	initcore.RegisterArrowReaderConfigWatchers(paramtable.Get(), "datanode")
 	initcore.RegisterLoonReaderConfigWatchers(paramtable.Get(), "datanode")
+	initcore.RegisterDiskFileWriterWatchers(paramtable.Get(), "datanode")
 
 	// init paramtable change callback for core related config
 	initcore.SetupCoreConfigChangelCallback()
