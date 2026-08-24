@@ -65,6 +65,18 @@ func (t *mixCompactionTask) GetTaskSlot() int64 {
 	return t.computeAndCacheTaskSlot(segments, allResolved)
 }
 
+// GetResourceRequirement returns the estimate computeAndCacheTaskSlot already
+// derives and then folds away. Sizing it from meta rather than from the plan's
+// binlog arrays is what makes it correct on storage v3, where those arrays are
+// not persisted (see compactionInputFromMeta).
+//
+// Deliberately not cached; see the same note on l0CompactionTask.
+func (t *mixCompactionTask) GetResourceRequirement() taskresource.Requirement {
+	req, _ := compactionRequirementFromMeta(context.Background(), t.meta, t.GetTaskID(),
+		t.GetTaskProto().GetType(), t.GetTaskProto().GetInputSegments())
+	return req
+}
+
 // resolveInputSegments fetches every input segment via meta.GetHealthySegment.
 // It returns the segments that resolved and whether every input segment did;
 // a segment that fails to resolve is logged by ID rather than silently

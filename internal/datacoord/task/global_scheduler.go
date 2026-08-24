@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/datacoord/session"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	taskcommon "github.com/milvus-io/milvus/pkg/v3/taskcommon"
@@ -314,26 +315,31 @@ const balanceWeight = 0.5
 // than refusing it -- refusing here would leave it pending forever, since no node
 // ever grows.
 //
-// The picked node's figures are decremented in place so later picks in the same
-// round see the load this one added. taskMemory is what the scalar cannot carry
-// yet, so until the task side reports bytes this decrements only the scalar and
-// scores on the node's own state; that is a placement improvement, not yet an
-// admission decision.
-func pickNodeByDimensions(entries []*nodeSlotEntry, taskSlot int64) int64 {
+// req is the task's own footprint in bytes and cores. A ZERO req means the task
+// type has not been converted on the coordinator side yet: the filter then only
+// asks whether the node has any memory left at all, which is the same
+// information the scalar carried. A NON-ZERO req is what makes this an actual
+// reservation -- the node's remainders are decremented by it, so the second
+// task of a round sees the bytes the first one took, and a node cannot be handed
+// ten 8GiB compactions because each of them individually fitted.
+//
+// The picked node's figures are decremented in place; the caller reuses the same
+// entries across all tasks in a round.
+func pickNodeByDimensions(entries []*nodeSlotEntry, taskSlot int64, req taskresource.Requirement) int64 {
 	var best *nodeSlotEntry
 	var bestScore float64
 	var fallback *nodeSlotEntry
 	var fallbackMem int64
+	haveFallback := false
 
 	for _, e := range entries {
 		if !e.slots.HasDimensions() {
 			continue
 		}
-		if fallback == nil || e.slots.MemoryAvailable > fallbackMem {
-			fallback, fallbackMem = e, e.slots.MemoryAvailable
+		if !haveFallback || e.slots.MemoryAvailable > fallbackMem {
+			fallback, fallbackMem, haveFallback = e, e.slots.MemoryAvailable, true
 		}
-		// Hard filter: a node with no memory left cannot take more work.
-		if e.slots.MemoryTotal > 0 && e.slots.MemoryAvailable <= 0 {
+		if !memoryFits(e.slots, req.Memory) {
 			continue
 		}
 		if sc := scoreNode(e.slots); best == nil || sc > bestScore {
@@ -342,22 +348,57 @@ func pickNodeByDimensions(entries []*nodeSlotEntry, taskSlot int64) int64 {
 	}
 
 	if best == nil {
-		if fallback == nil {
+		if !haveFallback {
 			return NullNodeID // no node reported dimensions; caller falls back
 		}
 		best = fallback
 	}
 
-	// Keep the scalar in step so a later round, or a mixed fleet, still sees the
-	// load this placement added.
+	chargeNode(best.slots, taskSlot, req)
+	return best.nodeID
+}
+
+// memoryFits is the hard filter. With a known requirement it asks whether the
+// node can hold it; without one it can only ask whether the node has anything
+// left, which is what the scalar already told us.
+//
+// A node reporting no memory capacity at all is not filtered out: that is a
+// node whose guard has not established a budget yet, and excluding it would
+// take it out of service on the strength of a missing number.
+func memoryFits(ws *session.WorkerSlots, memoryRequired int64) bool {
+	if ws.MemoryTotal <= 0 {
+		return true
+	}
+	if memoryRequired > 0 {
+		return ws.MemoryAvailable >= memoryRequired
+	}
+	return ws.MemoryAvailable > 0
+}
+
+// chargeNode debits a placement from the node's view for the rest of this round.
+//
+// The scalar is debited too, so a mixed fleet and the next round both see the
+// load. The dimensions are debited only when the requirement is known -- charging
+// a zero requirement would leave the node looking untouched and let the whole
+// round pile onto it.
+//
+// Remainders are allowed to go negative. That is the same choice the DataNode
+// makes when it reports them: over-commitment is a fact the filter needs to see,
+// and clamping it at zero would read as "exactly full" instead.
+func chargeNode(ws *session.WorkerSlots, taskSlot int64, req taskresource.Requirement) {
 	if taskSlot > 0 {
-		if best.slots.AvailableSlots >= taskSlot {
-			best.slots.AvailableSlots -= taskSlot
+		if ws.AvailableSlots >= taskSlot {
+			ws.AvailableSlots -= taskSlot
 		} else {
-			best.slots.AvailableSlots = 0
+			ws.AvailableSlots = 0
 		}
 	}
-	return best.nodeID
+	if req.Memory > 0 {
+		ws.MemoryAvailable -= req.Memory
+	}
+	if req.CPU > 0 {
+		ws.CPUAvailableMilli -= int64(req.CPU * 1000)
+	}
 }
 
 // pickNode selects the least-loaded node -- the one with the most available
@@ -460,7 +501,7 @@ func (s *globalTaskScheduler) schedule() {
 		taskSlot := task.GetTaskSlot()
 		var nodeID int64
 		if useDimensions {
-			nodeID = pickNodeByDimensions(entries, taskSlot)
+			nodeID = pickNodeByDimensions(entries, taskSlot, task.GetResourceRequirement())
 		} else {
 			nodeID = s.pickNode(slotHeap, taskSlot)
 		}

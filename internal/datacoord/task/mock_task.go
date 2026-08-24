@@ -3,6 +3,7 @@
 package task
 
 import (
+	taskresource "github.com/milvus-io/milvus/internal/util/taskresource"
 	indexpb "github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	mock "github.com/stretchr/testify/mock"
 
@@ -134,6 +135,51 @@ func (_c *MockTask_GetTaskID_Call) Return(_a0 int64) *MockTask_GetTaskID_Call {
 }
 
 func (_c *MockTask_GetTaskID_Call) RunAndReturn(run func() int64) *MockTask_GetTaskID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetResourceRequirement provides a mock function with no fields
+func (_m *MockTask) GetResourceRequirement() taskresource.Requirement {
+	ret := _m.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetResourceRequirement")
+	}
+
+	var r0 taskresource.Requirement
+	if rf, ok := ret.Get(0).(func() taskresource.Requirement); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Get(0).(taskresource.Requirement)
+	}
+
+	return r0
+}
+
+// MockTask_GetResourceRequirement_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetResourceRequirement'
+type MockTask_GetResourceRequirement_Call struct {
+	*mock.Call
+}
+
+// GetResourceRequirement is a helper method to define mock.On call
+func (_e *MockTask_Expecter) GetResourceRequirement() *MockTask_GetResourceRequirement_Call {
+	return &MockTask_GetResourceRequirement_Call{Call: _e.mock.On("GetResourceRequirement")}
+}
+
+func (_c *MockTask_GetResourceRequirement_Call) Run(run func()) *MockTask_GetResourceRequirement_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockTask_GetResourceRequirement_Call) Return(_a0 taskresource.Requirement) *MockTask_GetResourceRequirement_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockTask_GetResourceRequirement_Call) RunAndReturn(run func() taskresource.Requirement) *MockTask_GetResourceRequirement_Call {
 	_c.Call.Return(run)
 	return _c
 }

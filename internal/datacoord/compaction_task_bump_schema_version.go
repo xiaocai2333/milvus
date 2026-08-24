@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
@@ -76,6 +77,24 @@ func (t *bumpSchemaVersionTask) GetTaskProto() *datapb.CompactionTask {
 
 func (t *bumpSchemaVersionTask) GetTaskSlot() int64 {
 	return paramtable.Get().DataCoordCfg.BumpSchemaVersionCompactionSlotUsage.GetAsInt64()
+}
+
+// GetResourceRequirement sizes this compaction from DataCoord's own metadata
+// rather than leaving the DataNode to reconstruct it from the plan's binlog
+// arrays -- which are empty for storage-v3 segments, so that reconstruction
+// silently falls to the estimator's floor.
+//
+// Bump-schema-version compaction shares the streaming shape with mix compaction.
+//
+// It is deliberately NOT cached. GetTaskSlot's cache exists because that value
+// also lands in the plan and must not change under the task; the requirement is
+// consumed once per scheduling round for placement, and caching a partially
+// resolved estimate would freeze a transient meta miss into this task's
+// permanent footprint.
+func (t *bumpSchemaVersionTask) GetResourceRequirement() taskresource.Requirement {
+	req, _ := compactionRequirementFromMeta(context.Background(), t.meta, t.GetTaskID(),
+		t.GetTaskProto().GetType(), t.GetTaskProto().GetInputSegments())
+	return req
 }
 
 func (t *bumpSchemaVersionTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {

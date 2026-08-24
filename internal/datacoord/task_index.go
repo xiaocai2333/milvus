@@ -31,6 +31,7 @@ import (
 	globalTask "github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/internal/util/vecindexmgr"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -105,6 +106,14 @@ func (it *indexBuildTask) GetTaskID() int64 {
 
 func (it *indexBuildTask) GetTaskSlot() int64 {
 	return it.taskSlot
+}
+
+// GetResourceRequirement returns the zero Requirement: this task type's
+// coordinator-side estimate has not been converted to bytes yet, so the
+// scheduler places it on the node's reported state alone. Not "free" --
+// see the Task interface. (the field size and index type are already known here (calculateIndexTaskSlot uses both), so this is convertible -- it just needs EstimateIndexBuild wiring.)
+func (it *indexBuildTask) GetResourceRequirement() taskresource.Requirement {
+	return taskresource.Requirement{}
 }
 
 func (it *indexBuildTask) GetTaskState() taskcommon.State {

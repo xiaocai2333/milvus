@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/datacoord/session"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 )
@@ -29,6 +30,16 @@ type Task interface {
 	GetTaskType() taskcommon.Type
 	GetTaskState() taskcommon.State
 	GetTaskSlot() int64
+	// GetResourceRequirement is the task's footprint in real units -- bytes and
+	// cores -- rather than the dimensionless slot GetTaskSlot folds it into.
+	//
+	// A ZERO Requirement means "not known on this side", not "free". Task types
+	// whose coordinator-side estimate has not been converted yet return it, and
+	// the scheduler then places them on the node's own reported state alone. That
+	// is the same information the scalar carried, so an unconverted task is no
+	// worse off than before -- whereas reading zero as "needs nothing" would let
+	// it be packed onto a node without limit.
+	GetResourceRequirement() taskresource.Requirement
 	SetTaskTime(timeType taskcommon.TimeType, time time.Time)
 	GetTaskTime(timeType taskcommon.TimeType) time.Time
 	GetTaskVersion() int64

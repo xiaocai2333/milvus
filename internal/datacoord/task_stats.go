@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	globalTask "github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -90,6 +91,14 @@ func (st *statsTask) GetTaskState() taskcommon.State {
 
 func (st *statsTask) GetTaskSlot() int64 {
 	return st.taskSlot
+}
+
+// GetResourceRequirement returns the zero Requirement: this task type's
+// coordinator-side estimate has not been converted to bytes yet, so the
+// scheduler places it on the node's reported state alone. Not "free" --
+// see the Task interface. (convertible via EstimateStats once the touched-field size is resolved from meta.)
+func (st *statsTask) GetResourceRequirement() taskresource.Requirement {
+	return taskresource.Requirement{}
 }
 
 func (st *statsTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {

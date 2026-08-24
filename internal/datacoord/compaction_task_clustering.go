@@ -35,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/fileresource"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -79,6 +80,25 @@ func (t *clusteringCompactionTask) GetTaskState() taskcommon.State {
 
 func (t *clusteringCompactionTask) GetTaskSlot() int64 {
 	return paramtable.Get().DataCoordCfg.ClusteringCompactionSlotUsage.GetAsInt64()
+}
+
+// GetResourceRequirement sizes this compaction from DataCoord's own metadata
+// rather than leaving the DataNode to reconstruct it from the plan's binlog
+// arrays -- which are empty for storage-v3 segments, so that reconstruction
+// silently falls to the estimator's floor.
+//
+// Clustering compaction is charged what the compactor actually allocates today --
+// a fraction of whole-node memory -- not the grant its factor/bounds describe.
+//
+// It is deliberately NOT cached. GetTaskSlot's cache exists because that value
+// also lands in the plan and must not change under the task; the requirement is
+// consumed once per scheduling round for placement, and caching a partially
+// resolved estimate would freeze a transient meta miss into this task's
+// permanent footprint.
+func (t *clusteringCompactionTask) GetResourceRequirement() taskresource.Requirement {
+	req, _ := compactionRequirementFromMeta(context.Background(), t.meta, t.GetTaskID(),
+		t.GetTaskProto().GetType(), t.GetTaskProto().GetInputSegments())
+	return req
 }
 
 func (t *clusteringCompactionTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {

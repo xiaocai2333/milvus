@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	globalTask "github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
@@ -83,6 +84,14 @@ func (at *analyzeTask) GetTaskState() taskcommon.State {
 
 func (at *analyzeTask) GetTaskSlot() int64 {
 	return Params.DataCoordCfg.AnalyzeTaskSlotUsage.GetAsInt64()
+}
+
+// GetResourceRequirement returns the zero Requirement: this task type's
+// coordinator-side estimate has not been converted to bytes yet, so the
+// scheduler places it on the node's reported state alone. Not "free" --
+// see the Task interface. (convertible via EstimateAnalyze; today the coordinator ships a flat 65535-slot constant.)
+func (at *analyzeTask) GetResourceRequirement() taskresource.Requirement {
+	return taskresource.Requirement{}
 }
 
 func (at *analyzeTask) SetState(state indexpb.JobState, failReason string) {

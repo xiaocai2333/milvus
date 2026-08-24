@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -127,6 +128,14 @@ func (t *importTask) GetTaskNodeID() int64 {
 
 func (t *importTask) GetTaskSlot() int64 {
 	return int64(CalculateTaskSlot(t, t.importMeta))
+}
+
+// GetResourceRequirement returns the zero Requirement: this task type's
+// coordinator-side estimate has not been converted to bytes yet, so the
+// scheduler places it on the node's reported state alone. Not "free" --
+// see the Task interface. (convertible via EstimateImport, which needs the file count and per-file buffer.)
+func (t *importTask) GetResourceRequirement() taskresource.Requirement {
+	return taskresource.Requirement{}
 }
 
 func (t *importTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {

@@ -23,6 +23,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/json"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -90,6 +91,14 @@ func (p *preImportTask) GetTaskState() taskcommon.State {
 
 func (p *preImportTask) GetTaskSlot() int64 {
 	return int64(CalculateTaskSlot(p, p.importMeta))
+}
+
+// GetResourceRequirement returns the zero Requirement: this task type's
+// coordinator-side estimate has not been converted to bytes yet, so the
+// scheduler places it on the node's reported state alone. Not "free" --
+// see the Task interface. (same as importTask.)
+func (p *preImportTask) GetResourceRequirement() taskresource.Requirement {
+	return taskresource.Requirement{}
 }
 
 func (p *preImportTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {
