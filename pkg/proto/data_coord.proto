@@ -1474,8 +1474,31 @@ message QuerySlotRequest {}
 
 message QuerySlotResponse {
   common.Status status = 1;
+  // available_slots is the one-dimensional scalar this RPC has always carried.
+  // A DataNode that fills the two fields below still fills it, so a coordinator
+  // that predates them keeps working; a coordinator that understands them
+  // ignores it.
   int64 available_slots = 2;
   string version = 3; // Kept for wire compatibility; new schedulers do not use it
+  // cpu_available and memory_available are the node's remaining budget in real
+  // units, so the coordinator can place on both dimensions instead of on a fold
+  // of them. Zero from a DataNode too old to set them: the coordinator must
+  // treat "both zero" as "unknown, fall back to available_slots" rather than as
+  // "this node is full".
+  //
+  // The two are NOT symmetric, and the coordinator has to keep the asymmetry the
+  // DataNode already enforces: memory is incompressible and gates admission,
+  // CPU is compressible and may only score. Filtering on CPU would recreate the
+  // problem Requirement.MemoryFitsIn exists to avoid -- an L0 compaction held
+  // behind vector index builds it shares no thread pool with.
+  int64 cpu_available_milli = 4; // millicores, so this stays an integer field
+  int64 memory_available = 5;    // bytes
+  // Capacities, so the coordinator can score on FRACTIONS rather than absolute
+  // remainders. Without these a bigger node always looks better simply for being
+  // bigger, and the balance term (how skewed a node's two dimensions would
+  // become after placement) cannot be computed at all.
+  int64 cpu_total_milli = 6; // millicores
+  int64 memory_total = 7;    // bytes, the task budget after memoryRatio, not raw RAM
 }
 
 enum CompactionTaskState {

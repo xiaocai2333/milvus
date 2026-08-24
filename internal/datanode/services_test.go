@@ -2297,3 +2297,72 @@ func TestAvailableSlotsDoesNotCapCompactionOnTheLegacySlotScale(t *testing.T) {
 	assert.Equal(t, int64(48), availableSlots(cpuBound, cpuBoundLegacyTotal, 0, queued, 0),
 		"a quarter of the budget must not read as a full node")
 }
+
+// reportedDimensions is what turns the guard's snapshot into the two figures the
+// wire now carries. The scalar fold is tested separately; these assert the
+// properties that fold cannot express.
+func TestReportedDimensionsUnfoldsTheSnapshot(t *testing.T) {
+	paramtable.Init()
+
+	snap := resource.Snapshot{
+		Total:    taskresource.Capacity{CPU: 8, Memory: 32 << 30},
+		Reserved: taskresource.Capacity{CPU: 2, Memory: 8 << 30},
+	}
+	cpuAvail, cpuTotal, memAvail, memTotal := reportedDimensions(snap)
+
+	assert.Equal(t, int64(8000), cpuTotal)
+	assert.Equal(t, int64(6000), cpuAvail, "millicores, not the folded scalar")
+	assert.Equal(t, int64(32)<<30, memTotal)
+	assert.Equal(t, int64(24)<<30, memAvail)
+}
+
+// Both totals zero is the signal a coordinator uses to fall back to
+// available_slots. A guard with no capacity must produce it, and a live node
+// must never produce it -- otherwise "old node" and "full node" collide.
+func TestReportedDimensionsZeroTotalsMeanUnknown(t *testing.T) {
+	paramtable.Init()
+
+	_, cpuTotal, _, memTotal := reportedDimensions(resource.Snapshot{})
+	assert.Zero(t, cpuTotal)
+	assert.Zero(t, memTotal)
+
+	busy := resource.Snapshot{
+		Total:    taskresource.Capacity{CPU: 8, Memory: 32 << 30},
+		Reserved: taskresource.Capacity{CPU: 8, Memory: 32 << 30},
+	}
+	_, cpuTotal, memAvail, memTotal := reportedDimensions(busy)
+	assert.NotZero(t, memTotal, "a full node still reports capacity")
+	assert.NotZero(t, cpuTotal)
+	assert.Zero(t, memAvail)
+}
+
+// Over-commitment is reported as negative rather than clamped: the coordinator's
+// memory filter must read it as "does not fit", not as "exactly full".
+func TestReportedDimensionsDoNotClampOverCommitment(t *testing.T) {
+	paramtable.Init()
+
+	snap := resource.Snapshot{
+		Total:    taskresource.Capacity{CPU: 8, Memory: 8 << 30},
+		Reserved: taskresource.Capacity{CPU: 12, Memory: 12 << 30},
+	}
+	cpuAvail, _, memAvail, _ := reportedDimensions(snap)
+	assert.Negative(t, memAvail)
+	assert.Negative(t, cpuAvail)
+}
+
+// A frozen or exclusively-occupied node admits nothing, whatever its raw
+// remainder says, so the memory dimension must read zero or the coordinator
+// keeps choosing it.
+func TestReportedDimensionsZeroMemoryWhenClosed(t *testing.T) {
+	paramtable.Init()
+
+	base := taskresource.Capacity{CPU: 8, Memory: 32 << 30}
+	frozen := resource.Snapshot{Total: base, Frozen: true}
+	_, _, memAvail, memTotal := reportedDimensions(frozen)
+	assert.Zero(t, memAvail)
+	assert.NotZero(t, memTotal, "capacity is still reported so the node is not mistaken for an old one")
+
+	exclusive := resource.Snapshot{Total: base, ExclusiveTaskID: 7}
+	_, _, memAvail, _ = reportedDimensions(exclusive)
+	assert.Zero(t, memAvail)
+}

@@ -34,10 +34,30 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
-// WorkerSlots represents the slot information for a worker node
+// WorkerSlots represents the slot information for a worker node.
+//
+// AvailableSlots is the one-dimensional scalar the RPC has always carried: a
+// fold of the node's two dimensions, taking whichever is worse. The four fields
+// after it are those dimensions unfolded, which is what lets the scheduler place
+// on both instead of on the fold.
+//
+// A DataNode too old to report them leaves all four zero. HasDimensions is the
+// test for that -- "both totals zero" cannot be produced by a live node, whereas
+// zero *available* is an ordinary busy node, so the totals are what distinguish
+// "old node" from "full node".
 type WorkerSlots struct {
 	NodeID         int64
 	AvailableSlots int64
+
+	CPUAvailableMilli int64
+	MemoryAvailable   int64
+	CPUTotalMilli     int64
+	MemoryTotal       int64
+}
+
+// HasDimensions reports whether this node supplied the two-dimensional figures.
+func (w *WorkerSlots) HasDimensions() bool {
+	return w != nil && (w.CPUTotalMilli > 0 || w.MemoryTotal > 0)
 }
 
 // Cluster defines the interface for tasks
@@ -199,8 +219,12 @@ func (c *cluster) QuerySlot() map[int64]*WorkerSlots {
 			mu.Lock()
 			defer mu.Unlock()
 			availableNodeSlots[nodeID] = &WorkerSlots{
-				NodeID:         nodeID,
-				AvailableSlots: resp.GetAvailableSlots(),
+				NodeID:            nodeID,
+				AvailableSlots:    resp.GetAvailableSlots(),
+				CPUAvailableMilli: resp.GetCpuAvailableMilli(),
+				MemoryAvailable:   resp.GetMemoryAvailable(),
+				CPUTotalMilli:     resp.GetCpuTotalMilli(),
+				MemoryTotal:       resp.GetMemoryTotal(),
 			}
 		}()
 	}

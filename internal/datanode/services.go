@@ -952,10 +952,60 @@ func (node *DataNode) QuerySlot(ctx context.Context, req *datapb.QuerySlotReques
 	metrics.DataNodeSlot.WithLabelValues(fmt.Sprint(node.GetNodeID()), "compactionUsed").Set(float64(compactionUsed))
 	metrics.DataNodeSlot.WithLabelValues(fmt.Sprint(node.GetNodeID()), "importUsed").Set(float64(importUsed))
 
+	cpuAvail, cpuTotal, memAvail, memTotal := reportedDimensions(snap)
 	return &datapb.QuerySlotResponse{
 		Status:         merr.Success(),
 		AvailableSlots: available,
+		// The scalar above and the four figures below describe the same node;
+		// the scalar is a fold of them kept for coordinators that predate these
+		// fields. See reportedDimensions for why the two dimensions are not
+		// derived from `available`.
+		CpuAvailableMilli: cpuAvail,
+		MemoryAvailable:   memAvail,
+		CpuTotalMilli:     cpuTotal,
+		MemoryTotal:       memTotal,
 	}, nil
+}
+
+// reportedDimensions turns the guard's snapshot into the two dimensions the wire
+// now carries: remaining and total, in millicores and bytes.
+//
+// Three things this deliberately does NOT do.
+//
+// It does not derive the dimensions from `available`. That scalar is already a
+// fold -- the worse of the two utilizations, further reduced by the executors'
+// queue arm -- so unfolding it would hand the coordinator two copies of one
+// number rather than two dimensions.
+//
+// It does not clamp the remainders at zero when the node is over-committed. A
+// negative remainder is the truth (the budget shrank under tasks already
+// admitted) and the coordinator's memory filter should see it as "does not fit"
+// rather than as "exactly full".
+//
+// It does report zero for BOTH totals when the guard has no capacity yet, which
+// is the signal a coordinator uses to fall back to `available_slots`: a live
+// node always has a positive memory total, so "both totals zero" cannot be
+// confused with a genuinely full node.
+//
+// Frozen and exclusive states are folded into the memory dimension rather than
+// left to the scalar alone: a frozen node admits nothing, so reporting its raw
+// memory remainder would invite the coordinator to keep choosing it.
+func reportedDimensions(snap resource.Snapshot) (cpuAvailMilli, cpuTotalMilli, memAvail, memTotal int64) {
+	cpuTotalMilli = int64(snap.Total.CPU * 1000)
+	memTotal = snap.Total.Memory
+	if cpuTotalMilli <= 0 && memTotal <= 0 {
+		return 0, 0, 0, 0
+	}
+
+	cpuAvailMilli = int64((snap.Total.CPU - snap.Reserved.CPU) * 1000)
+	memAvail = snap.Total.Memory - snap.Reserved.Memory
+
+	if snap.Frozen || snap.ExclusiveTaskID != 0 {
+		// Nothing more will be admitted until this clears, whatever the
+		// arithmetic says.
+		memAvail = 0
+	}
+	return cpuAvailMilli, cpuTotalMilli, memAvail, memTotal
 }
 
 // Not in used now

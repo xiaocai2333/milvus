@@ -203,19 +203,161 @@ type nodeSlotEntry struct {
 	slots  *session.WorkerSlots
 }
 
+// newNodeEntries flattens the query result into the slice both placement
+// strategies work over. The entries are shared by pointer, so whichever strategy
+// runs mutates the same state.
+func newNodeEntries(workerSlots map[int64]*session.WorkerSlots) []*nodeSlotEntry {
+	entries := make([]*nodeSlotEntry, 0, len(workerSlots))
+	for nodeID, ws := range workerSlots {
+		entries = append(entries, &nodeSlotEntry{nodeID: nodeID, slots: ws})
+	}
+	return entries
+}
+
+// allHaveDimensions reports whether every node reported CPU and memory, which is
+// the condition for using two-dimensional placement this round.
+//
+// It requires ALL nodes rather than any, on purpose. During a rolling upgrade a
+// mixed fleet would otherwise have the new nodes scored on two dimensions and
+// the old ones excluded for having none, so every task would land on the
+// upgraded half. Falling back to the scalar for the whole fleet until the last
+// node restarts keeps the transition atomic and is the conservative direction:
+// the scalar is what the cluster ran on yesterday.
+func allHaveDimensions(entries []*nodeSlotEntry) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	for _, e := range entries {
+		if !e.slots.HasDimensions() {
+			return false
+		}
+	}
+	return true
+}
+
 // newNodeSlotHeap builds a max-heap of worker nodes ordered by their available
 // slots, so the most-available (least-loaded) node always sits at the top.
 func newNodeSlotHeap(workerSlots map[int64]*session.WorkerSlots) typeutil.Heap[*nodeSlotEntry] {
-	slots := make([]*nodeSlotEntry, 0, len(workerSlots))
-	for nodeID, ws := range workerSlots {
-		slots = append(slots, &nodeSlotEntry{
-			nodeID: nodeID,
-			slots:  ws,
-		})
-	}
-	return typeutil.NewObjectArrayBasedMaximumHeap(slots, func(entry *nodeSlotEntry) int64 {
+	return newNodeSlotHeapFromEntries(newNodeEntries(workerSlots))
+}
+
+func newNodeSlotHeapFromEntries(entries []*nodeSlotEntry) typeutil.Heap[*nodeSlotEntry] {
+	return typeutil.NewObjectArrayBasedMaximumHeap(entries, func(entry *nodeSlotEntry) int64 {
 		return entry.slots.AvailableSlots
 	})
+}
+
+// scoreNode ranks a candidate for a task, in [0, 1]-ish units, using the two
+// dimensions the node reports rather than the scalar fold of them.
+//
+// Both terms are FRACTIONS of that node's own capacity, not absolute remainders.
+// Scoring on absolutes would make a bigger node win merely for being bigger,
+// which is the opposite of load balancing on a heterogeneous fleet.
+//
+// The third term penalises SKEW -- how far apart the two dimensions' utilisations
+// would sit. Without it the scheduler happily drives a node to "CPU exhausted,
+// half its memory stranded", and that stranded half can never be used again
+// until something finishes. This is Kubernetes' BalancedAllocation, and it is
+// the only reason reporting the totals was worth the proto change.
+//
+// What this deliberately does NOT do is filter on CPU. Memory is incompressible
+// -- exceeding it kills the process -- while CPU merely slows things down, so
+// only memory may ever exclude a node. Filtering on CPU here would recreate
+// precisely the problem Requirement.MemoryFitsIn exists to avoid on the worker:
+// an L0 compaction held behind vector index builds it shares no thread pool
+// with. CPU therefore scores and never refuses.
+func scoreNode(ws *session.WorkerSlots) float64 {
+	memFrac, cpuFrac := 0.0, 0.0
+	terms := 0.0
+	score := 0.0
+
+	if ws.MemoryTotal > 0 {
+		memFrac = float64(ws.MemoryAvailable) / float64(ws.MemoryTotal)
+		score += memFrac
+		terms++
+	}
+	if ws.CPUTotalMilli > 0 {
+		cpuFrac = float64(ws.CPUAvailableMilli) / float64(ws.CPUTotalMilli)
+		score += cpuFrac
+		terms++
+	}
+	if terms == 0 {
+		return 0
+	}
+	score /= terms
+
+	// Skew penalty only when both dimensions are known; with one dimension there
+	// is nothing to strand.
+	if ws.MemoryTotal > 0 && ws.CPUTotalMilli > 0 {
+		skew := memFrac - cpuFrac
+		if skew < 0 {
+			skew = -skew
+		}
+		score -= balanceWeight * skew
+	}
+	return score
+}
+
+// balanceWeight is how much a skewed node is punished relative to a full one.
+// At 0.5 a node whose two dimensions are one whole capacity apart loses half a
+// dimension's worth of score -- enough to lose to a slightly fuller but even
+// node, not enough to override a genuinely empty one.
+const balanceWeight = 0.5
+
+// pickNodeByDimensions places a task using the reported CPU and memory instead
+// of the folded scalar. It returns NullNodeID when no node reported dimensions,
+// so the caller can fall back to the scalar heap.
+//
+// Memory is a hard filter and CPU is not; see scoreNode. When nothing passes the
+// memory filter the task is still dispatched, to the node with the most memory
+// free, because the worker's guard admits an oversized task exclusively rather
+// than refusing it -- refusing here would leave it pending forever, since no node
+// ever grows.
+//
+// The picked node's figures are decremented in place so later picks in the same
+// round see the load this one added. taskMemory is what the scalar cannot carry
+// yet, so until the task side reports bytes this decrements only the scalar and
+// scores on the node's own state; that is a placement improvement, not yet an
+// admission decision.
+func pickNodeByDimensions(entries []*nodeSlotEntry, taskSlot int64) int64 {
+	var best *nodeSlotEntry
+	var bestScore float64
+	var fallback *nodeSlotEntry
+	var fallbackMem int64
+
+	for _, e := range entries {
+		if !e.slots.HasDimensions() {
+			continue
+		}
+		if fallback == nil || e.slots.MemoryAvailable > fallbackMem {
+			fallback, fallbackMem = e, e.slots.MemoryAvailable
+		}
+		// Hard filter: a node with no memory left cannot take more work.
+		if e.slots.MemoryTotal > 0 && e.slots.MemoryAvailable <= 0 {
+			continue
+		}
+		if sc := scoreNode(e.slots); best == nil || sc > bestScore {
+			best, bestScore = e, sc
+		}
+	}
+
+	if best == nil {
+		if fallback == nil {
+			return NullNodeID // no node reported dimensions; caller falls back
+		}
+		best = fallback
+	}
+
+	// Keep the scalar in step so a later round, or a mixed fleet, still sees the
+	// load this placement added.
+	if taskSlot > 0 {
+		if best.slots.AvailableSlots >= taskSlot {
+			best.slots.AvailableSlots -= taskSlot
+		} else {
+			best.slots.AvailableSlots = 0
+		}
+	}
+	return best.nodeID
 }
 
 // pickNode selects the least-loaded node -- the one with the most available
@@ -288,9 +430,19 @@ func (s *globalTaskScheduler) schedule() {
 	nodeSlots := s.cluster.QuerySlot()
 	mlog.Info(s.ctx, "scheduling pending tasks...", mlog.Int("num", pendingNum), mlog.Any("nodeSlots", nodeSlots))
 
-	// Build the node-slot max-heap once per round and reuse it across all picks,
-	// so each task is placed on the currently least-loaded node.
-	slotHeap := newNodeSlotHeap(nodeSlots)
+	// Build the node view once per round and reuse it across all picks, so each
+	// task is placed on the currently least-loaded node.
+	//
+	// Only one of the two structures is used per round. They share entry
+	// pointers, so mutating an entry through the slice would silently break the
+	// heap's ordering invariant -- picking the strategy up front instead of per
+	// task is what keeps that from happening.
+	entries := newNodeEntries(nodeSlots)
+	useDimensions := allHaveDimensions(entries)
+	var slotHeap typeutil.Heap[*nodeSlotEntry]
+	if !useDimensions {
+		slotHeap = newNodeSlotHeapFromEntries(entries)
+	}
 	futures := make([]*conc.Future[struct{}], 0)
 	var delayed []Task
 	for {
@@ -306,7 +458,12 @@ func (s *globalTaskScheduler) schedule() {
 			continue
 		}
 		taskSlot := task.GetTaskSlot()
-		nodeID := s.pickNode(slotHeap, taskSlot)
+		var nodeID int64
+		if useDimensions {
+			nodeID = pickNodeByDimensions(entries, taskSlot)
+		} else {
+			nodeID = s.pickNode(slotHeap, taskSlot)
+		}
 		if nodeID == NullNodeID {
 			s.pendingTasks.Push(task)
 			break
