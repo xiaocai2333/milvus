@@ -108,12 +108,33 @@ func (it *indexBuildTask) GetTaskSlot() int64 {
 	return it.taskSlot
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (the field size and index type are already known here (calculateIndexTaskSlot uses both), so this is convertible -- it just needs EstimateIndexBuild wiring.)
+// GetResourceRequirement sizes the index build from the field it targets and the
+// index type requested, resolved from meta here rather than captured at
+// construction so the constructor's signature -- and every caller and fixture of
+// it -- stays untouched.
+//
+// The field size comes from SegmentInfo.getFieldBinlogSize, which is what
+// calculateIndexTaskSlot already uses, and which traverses ChildFields and falls
+// back to the whole segment when the per-field figure is non-positive. Both
+// matter on storage v2/v3, where FieldBinlog entries are keyed by column group
+// rather than by field ID.
 func (it *indexBuildTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	segment := it.meta.GetHealthySegment(context.Background(), it.SegmentID)
+	if segment == nil {
+		// Unknown rather than free: the scheduler falls back to the node's own
+		// state. Charging zero would let this task be packed without limit.
+		mlog.Warn(context.Background(), "indexBuildTask could not resolve its segment for resource estimation",
+			mlog.Int64("buildID", it.BuildID), mlog.Int64("segmentID", it.SegmentID))
+		return taskresource.Requirement{}
+	}
+	indexParams := it.meta.indexMeta.GetIndexParams(it.CollectionID, it.IndexID)
+	fieldID := it.meta.indexMeta.GetFieldIDByIndexID(it.CollectionID, it.IndexID)
+
+	return taskresource.EstimateIndexBuild(taskresource.IndexInput{
+		IndexType:       GetIndexType(indexParams),
+		FieldMemorySize: segment.getFieldBinlogSize(fieldID),
+		StorageVersion:  segment.GetStorageVersion(),
+	})
 }
 
 func (it *indexBuildTask) GetTaskState() taskcommon.State {

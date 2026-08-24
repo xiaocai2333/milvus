@@ -130,12 +130,14 @@ func (t *importTask) GetTaskSlot() int64 {
 	return int64(CalculateTaskSlot(t, t.importMeta))
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (convertible via EstimateImport, which needs the file count and per-file buffer.)
+// GetResourceRequirement sizes the import from the same inputs CalculateTaskSlot
+// uses, but keeps them in bytes. The old formula divided the task buffer by
+// ImportMemoryLimitPerSlot, an integer division that yields ZERO for the common
+// 32MiB/160MiB case and so dropped the memory constraint entirely; and it
+// charged one buffer for the whole task even though the exec pool allocates one
+// per in-flight file.
 func (t *importTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	return importTaskRequirement(t, t.importMeta)
 }
 
 func (t *importTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {

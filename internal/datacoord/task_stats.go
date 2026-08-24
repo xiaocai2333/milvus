@@ -93,12 +93,38 @@ func (st *statsTask) GetTaskSlot() int64 {
 	return st.taskSlot
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (convertible via EstimateStats once the touched-field size is resolved from meta.)
+// GetResourceRequirement sizes the stats sub-job from its input segment.
+//
+// It charges the whole segment rather than only the fields the sub-job touches,
+// which over-charges text and json-key builds. That is deliberate for now: the
+// touched-field set is derived from the collection schema on the DataNode side
+// (RequirementForStats mirrors task_stats.go's own dispatch), and reproducing
+// that here would duplicate the schema walk. Over-charging is the safe
+// direction, and it is what calculateStatsTaskSlot already does.
 func (st *statsTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	segment := st.meta.GetHealthySegment(context.Background(), st.GetSegmentID())
+	if segment == nil {
+		mlog.Warn(context.Background(), "statsTask could not resolve its segment for resource estimation",
+			mlog.Int64("taskID", st.GetTaskID()), mlog.Int64("segmentID", st.GetSegmentID()))
+		return taskresource.Requirement{}
+	}
+
+	// A Sort sub-job is a sort compaction wearing a stats request; EstimateStats
+	// says so explicitly and routes it away. Keep the two sides in step.
+	if st.GetSubJobType() == indexpb.StatsSubJob_Sort {
+		return taskresource.EstimateCompaction(taskresource.CompactionInput{
+			Type:                  datapb.CompactionType_SortCompaction,
+			StorageVersion:        segment.GetStorageVersion(),
+			TotalMemorySize:       segment.getSegmentSize(),
+			TotalRows:             segment.GetNumOfRows(),
+			MaxSegmentDeleteBytes: segment.getDeltaLogSize(),
+		})
+	}
+
+	return taskresource.EstimateStats(taskresource.StatsInput{
+		SubJobType:      st.GetSubJobType(),
+		FieldMemorySize: segment.getSegmentSize(),
+	})
 }
 
 func (st *statsTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {

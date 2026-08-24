@@ -34,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/taskresource"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -866,6 +867,28 @@ func CalculateTaskSlot(task ImportTask, importMeta ImportMeta) int {
 		return cpuBasedSlots
 	}
 	return memoryBasedSlots
+}
+
+// importTaskRequirement is CalculateTaskSlot's inputs kept in bytes.
+//
+// Two defects in the slot formula do not survive the translation. It charged a
+// SINGLE buffer for the whole task even though the exec pool allocates one per
+// in-flight file (importv2/task_import.go submits every file to it), and it
+// computed memoryBasedSlots as taskBufferSize / ImportMemoryLimitPerSlot -- an
+// integer division that is ZERO for the common 32MiB buffer against a 160MiB
+// limit, which removed the memory constraint altogether rather than making it
+// small.
+func importTaskRequirement(task ImportTask, importMeta ImportMeta) taskresource.Requirement {
+	job := importMeta.GetJob(context.TODO(), task.GetJobID())
+	isL0 := importutilv2.IsL0Import(job.GetOptions())
+
+	return taskresource.EstimateImport(taskresource.ImportInput{
+		IsPreImport:  task.GetType() == PreImportTaskType,
+		IsL0:         isL0,
+		FileNum:      len(task.GetFileStats()),
+		VChannelNum:  len(job.GetVchannels()),
+		PartitionNum: len(job.GetPartitionIDs()),
+	})
 }
 
 func createSortCompactionTask(ctx context.Context,

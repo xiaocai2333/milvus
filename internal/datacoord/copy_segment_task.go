@@ -301,12 +301,13 @@ func (t *copySegmentTask) GetTaskSlot() int64 {
 	return t.task.Load().GetTaskSlot()
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (a server-side object-store copy: no segment bytes pass through the worker, so EstimateCopySegment's flat charge applies.)
+// GetResourceRequirement is near-flat by design. copyFile calls
+// ChunkManager.Copy, which for RemoteChunkManager is a server-side CopyObject:
+// no segment bytes pass through the worker at all, and the task itself reports
+// GetBufferSize() == 0. Only the concurrency scales, with how many copies the
+// import exec pool can run at once.
 func (t *copySegmentTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	return taskresource.EstimateCopySegment(len(t.task.Load().GetIdMappings()))
 }
 
 // SetTaskTime records a task lifecycle timestamp.

@@ -127,13 +127,13 @@ func segmentRowCount(fieldBinlogs []*datapb.FieldBinlog) int64 {
 	return 0
 }
 
-// vectorFieldByteSize mirrors the DataType switch in
+// VectorFieldByteSize mirrors the DataType switch in
 // internal/datanode/index/task_index.go's Execute, because that is the sizing
 // the actual index-build path applies: BinaryVector packs 8 dims/byte,
 // Float16/BFloat16 use 2 bytes/dim, FloatVector uses 4 bytes/dim. The two
 // must stay in step -- internal/datanode/index is cgo-bound so it cannot be
 // imported here to share the code directly.
-func vectorFieldByteSize(dataType schemapb.DataType, dim, numRows int64) int64 {
+func VectorFieldByteSize(dataType schemapb.DataType, dim, numRows int64) int64 {
 	switch dataType {
 	case schemapb.DataType_BinaryVector:
 		return dim / 8 * numRows
@@ -211,7 +211,7 @@ func sumFieldBinlogMemoryForField(logs []*datapb.FieldBinlog, fieldID int64) int
 }
 
 // estimateFieldMemorySize sizes the field an index build targets. For
-// vector types with a closed-form size (see vectorFieldByteSize) it uses
+// vector types with a closed-form size (see VectorFieldByteSize) it uses
 // Dim x NumRows directly, exactly as the build path does; for everything
 // else (e.g. ArrayOfVector, or a legacy request that never filled Dim) it
 // falls back to the field's own binlog bytes, matching
@@ -221,7 +221,7 @@ func estimateFieldMemorySize(req *workerpb.CreateJobRequest) int64 {
 	if dataType == schemapb.DataType_None {
 		dataType = req.GetFieldType()
 	}
-	if size := vectorFieldByteSize(dataType, req.GetDim(), req.GetNumRows()); size > 0 {
+	if size := VectorFieldByteSize(dataType, req.GetDim(), req.GetNumRows()); size > 0 {
 		return size
 	}
 
@@ -413,7 +413,7 @@ func RequirementForAnalyze(req *workerpb.AnalyzeRequest) Requirement {
 		dataType = req.GetFieldType()
 	}
 
-	return EstimateAnalyze(vectorFieldByteSize(dataType, req.GetDim(), totalRows), req.GetMaxTrainSizeRatio())
+	return EstimateAnalyze(VectorFieldByteSize(dataType, req.GetDim(), totalRows), req.GetMaxTrainSizeRatio())
 }
 
 // LegacySlotToRequirement converts a scalar slot into a requirement. It is the

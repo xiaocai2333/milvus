@@ -86,12 +86,28 @@ func (at *analyzeTask) GetTaskSlot() int64 {
 	return Params.DataCoordCfg.AnalyzeTaskSlotUsage.GetAsInt64()
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (convertible via EstimateAnalyze; today the coordinator ships a flat 65535-slot constant.)
+// GetResourceRequirement sizes the kmeans training set from the input segments'
+// row counts and the target field's per-row width, which is how the DataNode's
+// RequirementForAnalyze does it too -- AnalyzeRequest's per-segment SegmentStats
+// carries row counts, not byte figures.
+//
+// Analyze is the largest memory consumer of any DataNode task: task_analyze.go
+// sets TrainSize = GetMemoryCount() x MaxTrainSizeRatio, a fraction of the WHOLE
+// NODE regardless of how much data exists. Charging that is what makes the task
+// oversized under default ratios, which is how the guard reproduces the
+// one-at-a-time behaviour the old 65535-slot constant used to buy.
 func (at *analyzeTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	var totalRows int64
+	for _, segID := range at.GetSegmentIDs() {
+		if segment := at.meta.GetHealthySegment(context.Background(), segID); segment != nil {
+			totalRows += segment.GetNumOfRows()
+		}
+	}
+	// The ratio is the one DataCoord fills into the request itself (see
+	// AnalyzeRequest construction below), so both sides apply the same figure.
+	return taskresource.EstimateAnalyze(
+		taskresource.VectorFieldByteSize(at.GetFieldType(), at.GetDim(), totalRows),
+		Params.DataCoordCfg.ClusteringCompactionMaxTrainSizeRatio.GetAsFloat())
 }
 
 func (at *analyzeTask) SetState(state indexpb.JobState, failReason string) {

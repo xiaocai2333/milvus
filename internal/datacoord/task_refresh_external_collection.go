@@ -94,12 +94,11 @@ func (t *refreshExternalCollectionTask) GetTaskSlot() int64 {
 	return 1
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (a metadata refresh; flat charge.)
+// GetResourceRequirement is a flat charge: a refresh reads collection metadata,
+// not segment data, so nothing about the collection's size changes its
+// footprint.
 func (t *refreshExternalCollectionTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	return taskresource.EstimateRefreshExternalCollection()
 }
 
 func (t *refreshExternalCollectionTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {

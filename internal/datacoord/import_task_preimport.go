@@ -93,12 +93,11 @@ func (p *preImportTask) GetTaskSlot() int64 {
 	return int64(CalculateTaskSlot(p, p.importMeta))
 }
 
-// GetResourceRequirement returns the zero Requirement: this task type's
-// coordinator-side estimate has not been converted to bytes yet, so the
-// scheduler places it on the node's reported state alone. Not "free" --
-// see the Task interface. (same as importTask.)
+// GetResourceRequirement sizes the pre-import; see importTask's note. A
+// pre-import reads a fixed buffer per file rather than one scaled by vchannels
+// and partitions.
 func (p *preImportTask) GetResourceRequirement() taskresource.Requirement {
-	return taskresource.Requirement{}
+	return importTaskRequirement(p, p.importMeta)
 }
 
 func (p *preImportTask) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {
