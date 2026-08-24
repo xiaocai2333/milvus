@@ -214,7 +214,7 @@ func TestOversizedRequirementStillDispatches(t *testing.T) {
 
 	got := pickNodeByDimensions([]*nodeSlotEntry{a, b}, 0,
 		taskresource.Requirement{Memory: 100 * gib})
-	assert.Equal(t, int64(2), got, "the emptiest node takes it and the worker serialises it")
+	assert.Equal(t, int64(2), got, "the emptiest node takes it and the worker serializes it")
 }
 
 // An unconverted task type reports a zero requirement. That must not read as

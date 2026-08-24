@@ -95,7 +95,7 @@ func (at *analyzeTask) GetTaskSlot() int64 {
 // sets TrainSize = GetMemoryCount() x MaxTrainSizeRatio, a fraction of the WHOLE
 // NODE regardless of how much data exists. Charging that is what makes the task
 // oversized under default ratios, which is how the guard reproduces the
-// one-at-a-time behaviour the old 65535-slot constant used to buy.
+// one-at-a-time behavior the old 65535-slot constant used to buy.
 func (at *analyzeTask) GetResourceRequirement() taskresource.Requirement {
 	var totalRows int64
 	for _, segID := range at.GetSegmentIDs() {

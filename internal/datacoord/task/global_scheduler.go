@@ -255,7 +255,7 @@ func newNodeSlotHeapFromEntries(entries []*nodeSlotEntry) typeutil.Heap[*nodeSlo
 // Scoring on absolutes would make a bigger node win merely for being bigger,
 // which is the opposite of load balancing on a heterogeneous fleet.
 //
-// The third term penalises SKEW -- how far apart the two dimensions' utilisations
+// The third term penalizes SKEW -- how far apart the two dimensions' utilisations
 // would sit. Without it the scheduler happily drives a node to "CPU exhausted,
 // half its memory stranded", and that stranded half can never be used again
 // until something finishes. This is Kubernetes' BalancedAllocation, and it is

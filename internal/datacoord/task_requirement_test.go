@@ -137,7 +137,7 @@ func TestUnresolvableSegmentReportsUnknown(t *testing.T) {
 
 // Analyze is the largest memory consumer of any DataNode task: it allocates a
 // fraction of the WHOLE NODE regardless of how much data exists. The charge has
-// to reflect that, or the guard stops serialising it the way the old
+// to reflect that, or the guard stops serializing it the way the old
 // 65535-slot constant did.
 func TestAnalyzeChargesTheNodeFraction(t *testing.T) {
 	paramtable.Init()
