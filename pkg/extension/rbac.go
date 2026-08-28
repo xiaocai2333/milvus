@@ -27,7 +27,7 @@ type CredentialStore interface {
 // RBACBootstrapper seeds the accounts and roles a deployment form needs before
 // it serves traffic.
 //
-// It runs once during rootcoord initialisation, single-threaded and before any
+// It runs once during rootcoord initialization, single-threaded and before any
 // request is accepted, so an implementation needs no locking of its own. It must
 // be idempotent: rootcoord initializes on every restart.
 type RBACBootstrapper interface {

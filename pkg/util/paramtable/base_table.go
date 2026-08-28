@@ -18,8 +18,10 @@ package paramtable
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -84,7 +86,22 @@ var defaultYaml = []string{"milvus.yaml", "_test.yaml", "default.yaml", "user.ya
 // single-threaded, before anything else touches paramtable - and nothing
 // here enforces it, deliberately: a lock or an after-Init panic would imply
 // this is a runtime switch, and it is a boot-time declaration.
+//
+// The name itself is checked, because the failure mode of a bad one is not
+// local: the file source rejects a present file with a non-yaml extension
+// (and a directory, which is what an empty name resolves to), and that
+// rejection drops EVERY local yaml source with only a warning logged. A
+// bare file name with a .yaml/.yml extension is the whole contract; anything
+// else is a wiring mistake and stops the process here, where the caller is
+// looking, rather than at the first parameter read that comes back as a
+// compiled-in default.
 func UsePrimaryConfigName(name string) {
+	if name == "" || name != filepath.Base(name) {
+		panic(fmt.Sprintf("paramtable: primary config name %q must be a bare file name", name))
+	}
+	if ext := filepath.Ext(name); ext != ".yaml" && ext != ".yml" {
+		panic(fmt.Sprintf("paramtable: primary config name %q must end in .yaml or .yml", name))
+	}
 	defaultYaml[0] = name
 }
 

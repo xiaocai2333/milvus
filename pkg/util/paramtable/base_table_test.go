@@ -163,4 +163,20 @@ func TestUsePrimaryConfigName(t *testing.T) {
 	assert.Equal(t, "kite.yaml", PrimaryConfigName())
 	assert.Equal(t, []string{"kite.yaml", "_test.yaml", "default.yaml", "user.yaml"}, defaultYaml,
 		"only the primary entry may change; the layering of the others is load-bearing")
+
+	UsePrimaryConfigName("kite.yml")
+	assert.Equal(t, "kite.yml", PrimaryConfigName())
+}
+
+// A bad primary name does not fail locally: the file source rejects it and
+// drops every local yaml source with a warning, so the process runs on
+// compiled-in defaults. The name is therefore refused at the declaration.
+func TestUsePrimaryConfigNameRefusesABadName(t *testing.T) {
+	old := PrimaryConfigName()
+	defer UsePrimaryConfigName(old)
+
+	for _, bad := range []string{"", "kite", "kite.conf", "conf/kite.yaml", "../kite.yaml"} {
+		assert.Panics(t, func() { UsePrimaryConfigName(bad) }, "name %q", bad)
+		assert.Equal(t, old, PrimaryConfigName(), "a refused name must not be installed")
+	}
 }

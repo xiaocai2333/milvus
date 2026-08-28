@@ -82,6 +82,22 @@ func TestSetProviderRefusesATypedNilCapability(t *testing.T) {
 	assert.Contains(t, err.Error(), string(CapIndexDrain))
 }
 
+// The provider itself can be a typed nil too - a nil *concreteProvider in the
+// interface - which passes the untyped-nil check and would panic on the first
+// method call. It is refused up front like a typed-nil capability.
+func TestSetProviderRefusesATypedNilProvider(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+
+	var p *fakeProvider
+	assert.NotPanics(t, func() {
+		err := SetProvider(p)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "typed nil")
+	})
+	assert.Nil(t, installed.Load(), "a failed install must leave no trace")
+}
+
 type typedNilDrainer struct{}
 
 func (*typedNilDrainer) AllowVectorIndexDropWhileLoaded(context.Context, int64, string) bool {

@@ -167,6 +167,12 @@ func SetProvider(p Provider) error {
 	if p == nil {
 		return merr.WrapErrServiceInternal("extension: nil provider")
 	}
+	// The same typed-nil trap the capability fields get below: a nil
+	// *concreteProvider stored in the interface passes the check above and
+	// then panics on p.Capabilities(). Catch it here, before the first call.
+	if v := reflect.ValueOf(p); v.Kind() == reflect.Ptr && v.IsNil() {
+		return merr.WrapErrServiceInternalMsg("extension: provider is a typed nil (%T)", p)
+	}
 	c := p.Capabilities()
 	for _, id := range p.Requires() {
 		if !c.has(id) {
@@ -193,8 +199,8 @@ var zeroCaps = &Capabilities{}
 // provider was installed. The pointer is READ-ONLY by contract: the table is
 // written once by SetProvider and shared by every caller, and it is returned
 // by pointer precisely so the hot paths (Search, Query, Insert, per-channel
-// routing) pay one atomic load and one nil comparison rather than copying an
-// eight-field struct per call.
+// routing) pay one atomic load and one nil comparison rather than copying the
+// whole struct per call.
 func Caps() *Capabilities {
 	if b := installed.Load(); b != nil {
 		return &b.caps
