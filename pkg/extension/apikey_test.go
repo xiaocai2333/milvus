@@ -17,6 +17,7 @@
 package extension
 
 import (
+	"context"
 	"testing"
 
 	"github.com/cockroachdb/errors"
@@ -30,7 +31,7 @@ type fakeVerifier struct {
 	seen     []string
 }
 
-func (f *fakeVerifier) Verify(rawToken string) (string, error) {
+func (f *fakeVerifier) Verify(_ context.Context, rawToken string) (string, error) {
 	f.seen = append(f.seen, rawToken)
 	return f.user, f.err
 }
@@ -65,7 +66,7 @@ func TestInstalledVerifierIsReachableThroughCaps(t *testing.T) {
 	got := Caps().APIKey
 	assert.NotNil(t, got)
 
-	user, err := got.Verify("tok-1")
+	user, err := got.Verify(context.Background(), "tok-1")
 	assert.NoError(t, err)
 	assert.Equal(t, "alice", user)
 	assert.Equal(t, []string{"tok-1"}, v.seen, "the raw token must reach the verifier unchanged")
@@ -73,7 +74,13 @@ func TestInstalledVerifierIsReachableThroughCaps(t *testing.T) {
 }
 
 func TestVerifierErrorIsPropagated(t *testing.T) {
-	v := &fakeVerifier{err: errors.New("boom")}
-	_, err := v.Verify("tok")
-	assert.ErrorContains(t, err, "boom")
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+
+	want := errors.New("boom")
+	v := &fakeVerifier{err: want}
+	assert.NoError(t, SetProvider(fakeProvider{name: "testprovider", caps: Capabilities{APIKey: v}}))
+
+	_, err := Caps().APIKey.Verify(context.Background(), "tok")
+	assert.ErrorIs(t, err, want, "an error from Verify must survive install, Caps, and the call unwrapped and unreplaced")
 }

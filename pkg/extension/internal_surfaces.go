@@ -16,6 +16,27 @@
 
 package extension
 
+// InternalListeners is what a form asks InternalSurfaces to open. It is a
+// struct so that a later need - a TLS configuration, a separate metrics port
+// - can be carried as a new field without a new method (see the package
+// evolution policy).
+type InternalListeners struct {
+	// GRPCPort is the port of the internal-domain gRPC listener, which
+	// serves the unauthenticated MilvusService. Zero leaves it closed.
+	GRPCPort int
+
+	// RESTPort is the port of the internal REST listener, which serves the
+	// unauthenticated /v2/vectordb surface and /metrics. Zero leaves it
+	// closed.
+	RESTPort int
+
+	// BindAddress is the interface both listeners bind to. Empty binds every
+	// interface, which is what the fork this replaces did; a form whose
+	// internal domain reaches the pod on one interface names it here so the
+	// unauthenticated surface is not reachable on the others.
+	BindAddress string
+}
+
 // InternalSurfaces declares the unauthenticated internal-domain listeners a
 // deployment form serves its own control plane on.
 //
@@ -42,10 +63,12 @@ package extension
 //
 // With no provider installed - or the capability nil - no listener is opened
 // and milvus serves exactly the surfaces it always did.
+//
+// FROZEN under the package evolution policy: there is no inert answer to
+// "which ports", so there is no Noop base and no method is ever added; what
+// the listeners need is carried by fields on InternalListeners.
 type InternalSurfaces interface {
-	// InternalDomainPorts returns the ports for the internal-domain gRPC
-	// listener (the unauthenticated MilvusService) and the internal REST
-	// listener (unauthenticated /v2/vectordb plus /metrics). A zero disables
-	// that listener individually.
-	InternalDomainPorts() (grpcPort int, restPort int)
+	// InternalDomainListeners returns the listeners to open. It is called
+	// once, while the proxy starts.
+	InternalDomainListeners() InternalListeners
 }

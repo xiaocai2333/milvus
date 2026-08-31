@@ -22,9 +22,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type stubInternalSurfaces struct{ grpcPort, restPort int }
+type stubInternalSurfaces struct{ listeners InternalListeners }
 
-func (s stubInternalSurfaces) InternalDomainPorts() (int, int) { return s.grpcPort, s.restPort }
+func (s stubInternalSurfaces) InternalDomainListeners() InternalListeners { return s.listeners }
 
 func TestInternalSurfacesAbsentWithoutProvider(t *testing.T) {
 	ResetForTest()
@@ -36,7 +36,7 @@ func TestInternalSurfacesIsInstalledAndRequirable(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
 
-	surfaces := stubInternalSurfaces{grpcPort: 19531, restPort: 9092}
+	surfaces := stubInternalSurfaces{listeners: InternalListeners{GRPCPort: 19531, RESTPort: 9092, BindAddress: "10.0.0.7"}}
 	assert.NoError(t, SetProvider(fakeProvider{
 		name:     "testprovider",
 		requires: []CapabilityID{CapInternalSurfaces},
@@ -45,9 +45,11 @@ func TestInternalSurfacesIsInstalledAndRequirable(t *testing.T) {
 
 	got := Caps().InternalSurfaces
 	assert.Equal(t, surfaces, got)
-	grpcPort, restPort := got.InternalDomainPorts()
-	assert.Equal(t, 19531, grpcPort, "the gRPC port must reach the seam unchanged")
-	assert.Equal(t, 9092, restPort, "the REST port must reach the seam unchanged")
+	listeners := got.InternalDomainListeners()
+	assert.Equal(t, 19531, listeners.GRPCPort, "the gRPC port must reach the seam unchanged")
+	assert.Equal(t, 9092, listeners.RESTPort, "the REST port must reach the seam unchanged")
+	assert.Equal(t, "10.0.0.7", listeners.BindAddress,
+		"the bind address must reach the seam, or the unauthenticated surface opens on every interface")
 }
 
 func TestSetProviderRejectsMissingInternalSurfaces(t *testing.T) {

@@ -46,14 +46,18 @@ type fakeAdmissionChecker struct {
 	createDatabaseErr    error
 	seenCreateCollection CoordClient
 	seenCreateDatabase   CoordClient
+	seenCollectionReq    *milvuspb.CreateCollectionRequest
+	seenDatabaseReq      *milvuspb.CreateDatabaseRequest
 }
 
-func (f *fakeAdmissionChecker) CheckCreateCollection(ctx context.Context, coord CoordClient) error {
+func (f *fakeAdmissionChecker) CheckCreateCollection(ctx context.Context, req *milvuspb.CreateCollectionRequest, coord CoordClient) error {
+	f.seenCollectionReq = req
 	f.seenCreateCollection = coord
 	return f.createCollectionErr
 }
 
-func (f *fakeAdmissionChecker) CheckCreateDatabase(ctx context.Context, coord CoordClient) error {
+func (f *fakeAdmissionChecker) CheckCreateDatabase(ctx context.Context, req *milvuspb.CreateDatabaseRequest, coord CoordClient) error {
+	f.seenDatabaseReq = req
 	f.seenCreateDatabase = coord
 	return f.createDatabaseErr
 }
@@ -87,14 +91,19 @@ func TestInstalledAdmissionCheckerIsReachableThroughCaps(t *testing.T) {
 	assert.NotNil(t, got)
 
 	coord := fakeCoordClient{}
+	collReq := &milvuspb.CreateCollectionRequest{DbName: "tenant-db", CollectionName: "coll"}
+	dbReq := &milvuspb.CreateDatabaseRequest{DbName: "tenant-db"}
 
-	assert.NoError(t, got.CheckCreateCollection(context.Background(), coord))
+	assert.NoError(t, got.CheckCreateCollection(context.Background(), collReq, coord))
 	assert.Equal(t, CoordClient(coord), checker.seenCreateCollection,
 		"the CoordClient passed to CheckCreateCollection must reach the implementation unchanged")
+	assert.Same(t, collReq, checker.seenCollectionReq,
+		"the request must reach the implementation, or a per-database quota has no database to count in")
 
-	assert.NoError(t, got.CheckCreateDatabase(context.Background(), coord))
+	assert.NoError(t, got.CheckCreateDatabase(context.Background(), dbReq, coord))
 	assert.Equal(t, CoordClient(coord), checker.seenCreateDatabase,
 		"the CoordClient passed to CheckCreateDatabase must reach the implementation unchanged")
+	assert.Same(t, dbReq, checker.seenDatabaseReq)
 }
 
 func TestAdmissionCheckerErrorIsPropagated(t *testing.T) {
@@ -108,11 +117,20 @@ func TestAdmissionCheckerErrorIsPropagated(t *testing.T) {
 
 	coord := fakeCoordClient{}
 
-	collErr := Caps().Admission.CheckCreateCollection(context.Background(), coord)
+	collErr := Caps().Admission.CheckCreateCollection(context.Background(), &milvuspb.CreateCollectionRequest{}, coord)
 	assert.ErrorIs(t, collErr, wantCollErr,
 		"an error from CheckCreateCollection must survive install, Caps, and the call unwrapped and unreplaced")
 
-	dbErr := Caps().Admission.CheckCreateDatabase(context.Background(), coord)
+	dbErr := Caps().Admission.CheckCreateDatabase(context.Background(), &milvuspb.CreateDatabaseRequest{}, coord)
 	assert.ErrorIs(t, dbErr, wantDBErr,
 		"an error from CheckCreateDatabase must survive install, Caps, and the call unwrapped and unreplaced")
+}
+
+// NoopAdmissionChecker admits everything: an inert default that refused would
+// stop a stock binary from creating a single collection.
+func TestNoopAdmissionCheckerAdmits(t *testing.T) {
+	type embedder struct{ NoopAdmissionChecker }
+	var c AdmissionChecker = embedder{}
+	assert.NoError(t, c.CheckCreateCollection(context.Background(), &milvuspb.CreateCollectionRequest{}, fakeCoordClient{}))
+	assert.NoError(t, c.CheckCreateDatabase(context.Background(), &milvuspb.CreateDatabaseRequest{}, fakeCoordClient{}))
 }

@@ -27,24 +27,24 @@ import (
 )
 
 // fakeCredentialStore is a no-op CredentialStore used only to prove that the
-// store handed to Bootstrap is the same instance SetProvider was given.
+// store handed to Bootstrap is the same instance the seam passed in.
 type fakeCredentialStore struct{}
 
-func (fakeCredentialStore) HasCredential(context.Context, string) (bool, error)    { return false, nil }
-func (fakeCredentialStore) CreateCredential(context.Context, string, string) error { return nil }
+func (fakeCredentialStore) HasCredential(context.Context, string) (bool, error)   { return false, nil }
+func (fakeCredentialStore) AlterCredential(context.Context, string, string) error { return nil }
 func (fakeCredentialStore) CreateRole(context.Context, string, *milvuspb.RoleEntity) error {
 	return nil
 }
 
-func (fakeCredentialStore) AlterUserRole(context.Context, string, *milvuspb.UserEntity, *milvuspb.RoleEntity, milvuspb.OperateUserRoleType) error {
+func (fakeCredentialStore) OperateUserRole(context.Context, string, *milvuspb.UserEntity, *milvuspb.RoleEntity, milvuspb.OperateUserRoleType) error {
 	return nil
 }
 
-func (fakeCredentialStore) ListUser(context.Context, string, *milvuspb.UserEntity, bool) ([]*milvuspb.UserResult, error) {
+func (fakeCredentialStore) SelectUser(context.Context, string, *milvuspb.UserEntity, bool) ([]*milvuspb.UserResult, error) {
 	return nil, nil
 }
 
-func (fakeCredentialStore) AlterGrant(context.Context, string, *milvuspb.GrantEntity, milvuspb.OperatePrivilegeType) error {
+func (fakeCredentialStore) OperatePrivilege(context.Context, string, *milvuspb.GrantEntity, milvuspb.OperatePrivilegeType) error {
 	return nil
 }
 
@@ -93,7 +93,7 @@ func TestInstalledRBACBootstrapperIsReachableThroughCaps(t *testing.T) {
 	store := fakeCredentialStore{}
 	assert.NoError(t, got.Bootstrap(context.Background(), store))
 	assert.True(t, b.called)
-	assert.Equal(t, store, b.seen, "the store passed to Bootstrap must be the one SetProvider received")
+	assert.Equal(t, store, b.seen, "the store passed to Bootstrap must be the one the seam handed over")
 }
 
 func TestBootstrapErrorIsPropagated(t *testing.T) {
@@ -106,4 +106,12 @@ func TestBootstrapErrorIsPropagated(t *testing.T) {
 
 	err := Caps().RBACBootstrap.Bootstrap(context.Background(), fakeCredentialStore{})
 	assert.ErrorIs(t, err, want, "an error from Bootstrap must survive install, Caps, and the call unwrapped and unreplaced")
+}
+
+// NoopRBACBootstrapper seeds nothing and succeeds, so a form that embeds it
+// and has no accounts to seed does not fail rootcoord's start-up.
+func TestNoopRBACBootstrapperSeedsNothing(t *testing.T) {
+	type embedder struct{ NoopRBACBootstrapper }
+	var b RBACBootstrapper = embedder{}
+	assert.NoError(t, b.Bootstrap(context.Background(), fakeCredentialStore{}))
 }
