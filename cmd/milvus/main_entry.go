@@ -33,11 +33,24 @@ import (
 
 // Main is the process entry point, exported so a distribution can build its own
 // main package around it instead of duplicating the startup preamble. The body
-// is the former cmd/main.go moved unchanged apart from two adaptations: it
+// is the former cmd/main.go moved unchanged apart from three adaptations: it
 // reads args instead of the os.Args global (with the inner slice renamed to
-// subArgs), and the original if/else became an if block that always returns
-// followed by an unconditional tail call.
+// subArgs), the original if/else became an if block that always returns
+// followed by an unconditional tail call, and args is copied on entry.
+//
+// args is the full argument vector, program name first, as os.Args is. Main
+// does not modify the caller's slice: the subprocess branch below deletes an
+// element in place, which on os.Args was invisible and on an exported API
+// would hand the caller back a shortened vector with a cleared tail.
+//
+// A distribution installs its extension provider and anything else that must
+// precede component start-up before calling Main; nothing runs earlier than
+// the first line here except package initialization, which is also why the
+// primary configuration file name is a link-time or environment setting
+// (see paramtable.PrimaryConfigName) rather than a call.
 func Main(args []string) {
+	args = slices.Clone(args)
+
 	// after 2.6.0, we enable streaming service by default.
 	// TODO: after remove all streamingutil.IsStreamingServiceEnabled(), we can remove this code.
 	streamingutil.SetStreamingServiceEnabled()

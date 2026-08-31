@@ -16,10 +16,24 @@
 
 package milvus
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // Main must return normally on too few arguments, taking the usage branch
-// rather than panicking or exiting. That is the contract a distribution's own main relies on.
+// rather than panicking or exiting. That is the contract a distribution's own
+// main relies on.
 func TestMainWithoutSubcommandReturns(t *testing.T) {
 	Main([]string{"milvus"})
+}
+
+// Main must leave the caller's argument vector as it found it: a distribution
+// may keep using its own os.Args after the call.
+func TestMainDoesNotModifyCallerArgs(t *testing.T) {
+	args := []string{"milvus", "unknown-command"}
+	want := append([]string(nil), args...)
+	Main(args)
+	assert.Equal(t, want, args)
 }
