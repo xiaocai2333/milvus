@@ -76,10 +76,13 @@ const (
 	// milvus binary.
 	defaultPrimaryConfigName = "milvus.yaml"
 
-	// PrimaryConfigNameEnvKey names the environment variable that replaces
+	// MilvusPrimaryConfigEnvKey names the environment variable that replaces
 	// the primary configuration file name for the process. See
-	// PrimaryConfigName.
-	PrimaryConfigNameEnvKey = "MILVUS_PRIMARY_CONFIG"
+	// PrimaryConfigName. Like MilvusConfigRefreshIntervalEnvKey it is read
+	// directly with os.Getenv, before any config source exists; the env
+	// source will also ingest it as an ordinary key (primaryconfig), which
+	// nothing reads and which is harmless.
+	MilvusPrimaryConfigEnvKey = "MILVUS_PRIMARY_CONFIG"
 )
 
 // primaryConfigName is the link-time primary configuration file name. A
@@ -94,13 +97,21 @@ const (
 // paramtable.Get()`, and Get calls Init - which run before any main or init
 // function a form could write. Nothing a form calls at run time is early
 // enough, so the name has to be decided before the process starts: at link
-// time here, or in the environment (PrimaryConfigNameEnvKey), which takes
+// time here, or in the environment (MilvusPrimaryConfigEnvKey), which takes
 // precedence so an operator can override a build.
 var primaryConfigName = defaultPrimaryConfigName
 
 // resolvePrimaryConfigName returns the primary configuration file name for
 // this process and whether it was set explicitly (link time or environment)
 // rather than left at the default.
+//
+// It runs for EVERY table NewBaseTable builds, including one whose file list
+// the Files option then replaces (NewBaseTableFromYamlOnly, the embedded
+// build): the name is a process-wide declaration, and a bad one is refused
+// at the first table whichever that is, rather than only at the first table
+// that would have read the file. A name that coincides with another entry
+// of the list (user.yaml, say) is accepted and loads that file twice, which
+// is redundant but not wrong.
 //
 // The name is checked, because the failure mode of a bad one is not local:
 // the file source rejects a present file with a non-yaml extension (and a
@@ -112,7 +123,7 @@ var primaryConfigName = defaultPrimaryConfigName
 func resolvePrimaryConfigName() (name string, explicit bool) {
 	name = primaryConfigName
 	explicit = name != defaultPrimaryConfigName
-	if fromEnv := os.Getenv(PrimaryConfigNameEnvKey); fromEnv != "" {
+	if fromEnv := os.Getenv(MilvusPrimaryConfigEnvKey); fromEnv != "" {
 		name = fromEnv
 		explicit = true
 	}
@@ -127,7 +138,7 @@ func resolvePrimaryConfigName() (name string, explicit bool) {
 
 // PrimaryConfigName reports the primary configuration file name every
 // paramtable of this process reads in milvus.yaml's position: the link-time
-// primaryConfigName, overridden by PrimaryConfigNameEnvKey when set. The
+// primaryConfigName, overridden by MilvusPrimaryConfigEnvKey when set. The
 // rest of the file list (_test.yaml, default.yaml, user.yaml) keeps its
 // meaning whatever the primary is. A missing primary file is skipped exactly
 // as a missing milvus.yaml is - the table then runs on the compiled-in

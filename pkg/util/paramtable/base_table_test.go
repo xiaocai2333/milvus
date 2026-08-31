@@ -185,7 +185,7 @@ func TestPrimaryConfigNameFromLinkTime(t *testing.T) {
 // built binary at another file without rebuilding it.
 func TestPrimaryConfigNameEnvOverridesLinkTime(t *testing.T) {
 	setPrimaryConfigNameVar(t, "kite.yaml")
-	t.Setenv(PrimaryConfigNameEnvKey, "kite-dev.yaml")
+	t.Setenv(MilvusPrimaryConfigEnvKey, "kite-dev.yaml")
 	assert.Equal(t, "kite-dev.yaml", PrimaryConfigName())
 	assert.Equal(t, "kite-dev.yaml", defaultYamlFiles()[0])
 }
@@ -206,7 +206,7 @@ func TestPrimaryConfigNameRefusesABadName(t *testing.T) {
 			continue // an empty environment variable is "unset", not a name
 		}
 		t.Run("env:"+bad, func(t *testing.T) {
-			t.Setenv(PrimaryConfigNameEnvKey, bad)
+			t.Setenv(MilvusPrimaryConfigEnvKey, bad)
 			assert.Panics(t, func() { PrimaryConfigName() })
 		})
 	}
@@ -225,14 +225,14 @@ func TestPrimaryConfigIsReadEndToEnd(t *testing.T) {
 	native := NewBaseTable(SkipRemote(true), SkipEnv(true))
 	assert.Equal(t, "frommilvus", native.Get("primaryprobe"), "a stock table reads milvus.yaml")
 
-	t.Setenv(PrimaryConfigNameEnvKey, "kite.yaml")
+	t.Setenv(MilvusPrimaryConfigEnvKey, "kite.yaml")
 	replaced := NewBaseTable(SkipRemote(true), SkipEnv(true))
 	assert.Equal(t, "fromkite", replaced.Get("primaryprobe"),
 		"a table built under the replaced name must read that file, not milvus.yaml")
 
 	// A missing primary is skipped, as a missing milvus.yaml is: the table
 	// comes up on defaults rather than failing.
-	t.Setenv(PrimaryConfigNameEnvKey, "absent.yaml")
+	t.Setenv(MilvusPrimaryConfigEnvKey, "absent.yaml")
 	assert.NotPanics(t, func() {
 		missing := NewBaseTable(SkipRemote(true), SkipEnv(true))
 		assert.Empty(t, missing.Get("primaryprobe"), "neither file is read when the primary is absent")
