@@ -1,17 +1,74 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package extension is milvus's deployment-form extension framework.
 //
 // A distribution links its own implementation of the capability interfaces and
 // installs one Provider at boot. A stock milvus binary installs none, so every
 // capability is nil and each seam falls through to the native path unchanged.
 //
-// Relation to hookutil: milvus's older extension point (internal/util/hookutil)
-// loads a .so at start-up and covers request observation and API-key
-// verification for the dedicated cloud form. The two coexist deliberately:
-// hookutil stays the surface for binary plug-ins built out of tree, while
-// this package is for forms compiled into the binary, whose capabilities need
-// typed interfaces and places hookutil never reaches (coordinator internals,
-// listeners, load semantics). A capability is added here, never to hookutil;
-// hookutil is frozen at what its existing users need.
+// # What consumes the table
+//
+// This package defines the table and the interfaces; it does not consult
+// them. The seams - the places in proxy, rootcoord, querycoord and the
+// coordinator server that resolve a capability and act on it - are added by
+// the changes that wire each interface, and every doc comment below that
+// describes what a seam does is the contract those changes must meet, not a
+// description of code that already exists. Until a seam lands, the
+// corresponding capability is declared but inert, and a form implementing it
+// gets nothing from it yet. The design document
+// (docs/design-docs/design_docs/20260831-in_tree_extension_mechanism.md)
+// tracks which seams have landed.
+//
+// # Evolution policy
+//
+// The table and the interfaces are consumed by code outside this repository,
+// so they change under one rule set, written down once here and referenced by
+// the types:
+//
+//   - Capabilities gains fields; it never loses or renames one. A new
+//     capability is a new field with a new interface, which keeps every
+//     existing Provider compiling.
+//   - An interface a FORM implements either carries a Noop base type (every
+//     method has an inert answer, and NoopXxx gives it) or is FROZEN. A method
+//     may be added to an interface with a Noop base only together with its
+//     inert default, so an implementation that embeds the base keeps
+//     compiling and keeps the native behavior for the new method. A FROZEN
+//     interface never gains a method: a need it cannot express becomes a new
+//     Capabilities field. Each interface says which it is.
+//   - An interface MILVUS implements and hands to a form (MixCoord,
+//     ProxyConnections, CoordClient, CredentialStore) may gain methods freely
+//     and never loses one; a form only calls these.
+//   - Structs a form receives or returns (QueryPlacement,
+//     ResourceGroupUpdate, ShardLeaderReadiness, InternalListeners) gain
+//     fields, never lose them, so a later decision can be carried without a
+//     new method.
+//
+// # Relation to hookutil
+//
+// milvus's older extension point (internal/util/hookutil) loads a .so at
+// start-up and covers request observation and API-key verification for the
+// dedicated cloud form. The two coexist deliberately: hookutil stays the
+// surface for binary plug-ins built out of tree, while this package is for
+// forms compiled into the binary, whose capabilities need typed interfaces and
+// places hookutil never reaches (coordinator internals, listeners, load
+// semantics). A capability is added here, never to hookutil; hookutil is
+// frozen at what its existing users need. Where both could answer the same
+// question - API-key verification - the seam consults this package first and
+// falls back to hookutil only when the capability is nil.
 package extension
 
 import (
@@ -64,9 +121,12 @@ const (
 // Capabilities is the table a Provider fills in. A nil field means the
 // capability is not taken over and the native path applies.
 //
-// Fields are only ever added, never removed or renamed: adding a field is
-// additive and keeps existing implementations compiling, whereas adding a
-// method to an interface would break every one of them.
+// Fields are only ever added, never removed or renamed - see the evolution
+// policy in the package documentation. Adding a capability means adding a
+// field here, a CapabilityID above, and one line in entries below; the
+// registry tests walk entries against the CapabilityID list, so a field
+// forgotten in entries fails the tests instead of being silently
+// unrequirable.
 type Capabilities struct {
 	ProxyExt          ProxyExtension
 	APIKey            APIKeyVerifier
@@ -79,40 +139,19 @@ type Capabilities struct {
 	InternalSurfaces  InternalSurfaces
 }
 
-func (c Capabilities) has(id CapabilityID) bool {
-	switch id {
-	case CapProxyExtension:
-		return c.ProxyExt != nil
-	case CapAPIKey:
-		return c.APIKey != nil
-	case CapRBACBootstrap:
-		return c.RBACBootstrap != nil
-	case CapAdmission:
-		return c.Admission != nil
-	case CapCoordinatorEngine:
-		return c.CoordinatorEngine != nil
-	case CapResourceGroupInterceptor:
-		return c.ResourceGroups != nil
-	case CapIndexDrain:
-		return c.IndexDrain != nil
-	case CapLoadPlacementScope:
-		return c.LoadPlacement != nil
-	case CapInternalSurfaces:
-		return c.InternalSurfaces != nil
-	default:
-		return false
-	}
+// capabilityEntry is one row of the table in a form the registry can walk:
+// the identifier and the interface value stored under it.
+type capabilityEntry struct {
+	id  CapabilityID
+	val any
 }
 
-// typedNilCapability reports the first capability field holding a typed nil:
-// an interface that is non-nil (so has() counts it as supplied) wrapping a nil
-// pointer (so its first method call panics). reflect runs once, at install
-// time, never on a hot path.
-func (c Capabilities) typedNilCapability() (CapabilityID, bool) {
-	fields := []struct {
-		id  CapabilityID
-		val any
-	}{
+// entries is the ONE place the table's fields are enumerated. has,
+// typedNilCapability and the registry tests all go through it, so a
+// capability is either listed here - and therefore requirable, typed-nil
+// checked and tested - or does not exist.
+func (c Capabilities) entries() []capabilityEntry {
+	return []capabilityEntry{
 		{CapProxyExtension, c.ProxyExt},
 		{CapAPIKey, c.APIKey},
 		{CapRBACBootstrap, c.RBACBootstrap},
@@ -123,15 +162,39 @@ func (c Capabilities) typedNilCapability() (CapabilityID, bool) {
 		{CapLoadPlacementScope, c.LoadPlacement},
 		{CapInternalSurfaces, c.InternalSurfaces},
 	}
-	for _, f := range fields {
-		if f.val == nil {
+}
+
+// lookup returns the value stored under id and whether id names a
+// capability at all. The second result is what lets SetProvider tell a
+// mistyped requirement from a real one that was not supplied.
+func (c Capabilities) lookup(id CapabilityID) (any, bool) {
+	for _, e := range c.entries() {
+		if e.id == id {
+			return e.val, true
+		}
+	}
+	return nil, false
+}
+
+func (c Capabilities) has(id CapabilityID) bool {
+	v, known := c.lookup(id)
+	return known && v != nil
+}
+
+// typedNilCapability reports the first capability field holding a typed nil:
+// an interface that is non-nil (so has() counts it as supplied) wrapping a nil
+// pointer (so its first method call panics). reflect runs once, at install
+// time, never on a hot path.
+func (c Capabilities) typedNilCapability() (CapabilityID, bool) {
+	for _, e := range c.entries() {
+		if e.val == nil {
 			continue
 		}
-		v := reflect.ValueOf(f.val)
+		v := reflect.ValueOf(e.val)
 		switch v.Kind() {
 		case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
 			if v.IsNil() {
-				return f.id, true
+				return e.id, true
 			}
 		}
 	}
@@ -146,7 +209,8 @@ type Provider interface {
 	// fails when any of them is absent from the table, so a wiring mistake stops
 	// the process instead of silently degrading to the native path.
 	Requires() []CapabilityID
-	// Capabilities returns the table.
+	// Capabilities returns the table. SetProvider calls it exactly once and
+	// stores what it returned; a later call would not be consulted.
 	Capabilities() Capabilities
 }
 
@@ -161,8 +225,11 @@ var installed atomic.Pointer[box]
 // It may be called at most once, before any component starts - nothing
 // enforces the ordering, but a provider installed after a component consulted
 // the table has already been ignored by that component, so the requirement is
-// on the wiring (cmd/milvus installs before roles start), not on this
-// function.
+// on the wiring (a distribution's main installs before it calls
+// cmd/milvus.Main), not on this function.
+//
+// Every error it returns is merr.ErrServiceInternal: a failed installation is
+// a wiring bug in the binary, never a request or a transient condition.
 func SetProvider(p Provider) error {
 	if p == nil {
 		return merr.WrapErrServiceInternal("extension: nil provider")
@@ -175,7 +242,11 @@ func SetProvider(p Provider) error {
 	}
 	c := p.Capabilities()
 	for _, id := range p.Requires() {
-		if !c.has(id) {
+		v, known := c.lookup(id)
+		if !known {
+			return merr.WrapErrServiceInternalMsg("extension: provider %q requires unknown capability %q", p.Name(), id)
+		}
+		if v == nil {
 			return merr.WrapErrServiceInternalMsg("extension: provider %q requires capability %q but did not supply it", p.Name(), id)
 		}
 	}
@@ -186,7 +257,14 @@ func SetProvider(p Provider) error {
 		return merr.WrapErrServiceInternalMsg("extension: provider %q supplies capability %q as a typed nil, which would panic at its first use", p.Name(), id)
 	}
 	if !installed.CompareAndSwap(nil, &box{provider: p, caps: c}) {
-		return merr.WrapErrServiceInternalMsg("extension: provider %q already installed", installed.Load().provider.Name())
+		// Load again rather than trusting the CAS: under the test tag the
+		// slot can be cleared between the two, and a nil here must not turn
+		// a clear error into a panic.
+		name := "<unknown>"
+		if prev := installed.Load(); prev != nil && prev.provider != nil {
+			name = prev.provider.Name()
+		}
+		return merr.WrapErrServiceInternalMsg("extension: provider %q already installed, refusing %q", name, p.Name())
 	}
 	return nil
 }
@@ -196,11 +274,17 @@ func SetProvider(p Provider) error {
 var zeroCaps = &Capabilities{}
 
 // Caps returns the installed capability table, or the zero table when no
-// provider was installed. The pointer is READ-ONLY by contract: the table is
-// written once by SetProvider and shared by every caller, and it is returned
-// by pointer precisely so the hot paths (Search, Query, Insert, per-channel
-// routing) pay one atomic load and one nil comparison rather than copying the
-// whole struct per call.
+// provider was installed.
+//
+// The pointer is READ-ONLY by contract, and the contract is all there is: the
+// table is written once by SetProvider and shared by every caller, and it is
+// returned by pointer precisely so the hot paths (Search, Query, Insert,
+// per-channel routing) pay one atomic load and one nil comparison rather than
+// copying the whole struct per call. A caller that assigns through it
+// bypasses SetProvider's checks and races every other reader; nothing stops
+// that, deliberately, because the alternatives - a copy per call, or a
+// getter per capability - would put the cost on every request to guard
+// against a misuse no seam has a reason to commit.
 func Caps() *Capabilities {
 	if b := installed.Load(); b != nil {
 		return &b.caps
