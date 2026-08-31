@@ -22,24 +22,68 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 func TestNoopProxyExtensionIsInert(t *testing.T) {
 	n := NoopProxyExtension{}
+	ctx := context.Background()
 
-	assert.Nil(t, n.InterceptDML(context.Background(), "Insert", &milvuspb.InsertRequest{}),
+	assert.NoError(t, n.InterceptDML(ctx, DMLInsert, &milvuspb.InsertRequest{}),
 		"the native default must not reject a write, or a stock binary would refuse its own DML")
+	assert.NoError(t, n.InterceptAdminRPC(ctx, AdminCreateCredential),
+		"the native default must not withhold an administrative RPC")
 
-	assert.NoError(t, n.OnConnect(1, &commonpb.ClientInfo{}),
+	assert.NoError(t, n.OnConnect(ctx, 1, &commonpb.ClientInfo{}),
 		"the native default must not refuse a connection, or a stock binary could not be connected to")
+	assert.NotPanics(t, func() { n.OnDisconnect(1) })
 
 	// Start must return rather than block, and must not panic on a nil
 	// registry: a caller is entitled to hand it one, and the inert default
 	// never touches it.
-	n.Start(context.Background(), nil)
+	n.Start(ctx, nil)
+}
+
+// TestShortCircuitCannotBeProducedByAPassingCheck pins the reason the reject
+// hooks return error rather than *commonpb.Status: merr.Status(nil) is a
+// non-nil success status, so a Status-returning hook written as
+// `return merr.Status(check())` would have short-circuited on the pass path.
+// With error as the type the same idiom is `return check()`, and a passing
+// check falls through by construction.
+func TestShortCircuitCannotBeProducedByAPassingCheck(t *testing.T) {
+	require.NotNil(t, merr.Status(nil), "the trap this test guards against: a nil error becomes a non-nil status")
+
+	check := func(pass bool) error {
+		if pass {
+			return nil
+		}
+		return merr.WrapErrServiceUnavailable("not yet")
+	}
+
+	var e ProxyExtension = checkingProxyExtension{check: check}
+	assert.NoError(t, e.InterceptDML(context.Background(), DMLInsert, &milvuspb.InsertRequest{}),
+		"a passing check must fall through")
+	assert.ErrorIs(t, e.InterceptAdminRPC(context.Background(), AdminGetReplicas), merr.ErrServiceUnavailable,
+		"a failing check must short-circuit with the sentinel it chose, unwrapped and unreplaced")
+}
+
+// checkingProxyExtension is the shape a real implementation takes: embed the
+// Noop base, override the hooks in use, forward a check's error.
+type checkingProxyExtension struct {
+	NoopProxyExtension
+	check func(pass bool) error
+}
+
+func (c checkingProxyExtension) InterceptDML(context.Context, DMLOp, proto.Message) error {
+	return c.check(true)
+}
+
+func (c checkingProxyExtension) InterceptAdminRPC(context.Context, AdminOp) error {
+	return c.check(false)
 }
 
 // TestNoopRewriteRequestParamsReturnsItsArgumentsUntouched pins the one inert
@@ -67,31 +111,41 @@ func TestNoopRewriteRequestParamsReturnsItsArgumentsUntouched(t *testing.T) {
 }
 
 // TestNoopProxyExtensionFallsThroughOnLoadSemantics pins the inert answer for
-// the load-semantics group. nil is "fall through", and it is the only answer a
-// stock binary can give: a success status is what an implementation of these
-// returns, and a native default that answered one would turn every load,
-// release and progress query in a community build into a no-op that reported
-// success - the collection never loaded, the client never told.
+// the load-semantics group. (false, nil) and (nil, nil) are "fall through",
+// and they are the only answers a stock binary can give: handled == true is
+// what an implementation returns, and a native default that answered it would
+// turn every load, release and progress query in a community build into a
+// no-op that reported success - the collection never loaded, the client never
+// told.
 func TestNoopProxyExtensionFallsThroughOnLoadSemantics(t *testing.T) {
 	n := NoopProxyExtension{}
 	ctx := context.Background()
 
-	assert.Nil(t, n.InterceptLoadCollection(ctx, &milvuspb.LoadCollectionRequest{CollectionName: "coll"}),
-		"a stock binary must load the collection its client asked for")
-	assert.Nil(t, n.InterceptLoadCollection(ctx, &milvuspb.LoadCollectionRequest{CollectionName: "coll", Refresh: true}),
-		"a stock binary must let a refresh reach querycoord")
-	assert.Nil(t, n.InterceptReleaseCollection(ctx, &milvuspb.ReleaseCollectionRequest{CollectionName: "coll"}),
-		"a stock binary must release the collection its client asked for")
-	assert.Nil(t, n.InterceptLoadPartitions(ctx, &milvuspb.LoadPartitionsRequest{CollectionName: "coll"}),
-		"a stock binary must load the partitions its client asked for")
-	assert.Nil(t, n.InterceptLoadPartitions(ctx, &milvuspb.LoadPartitionsRequest{CollectionName: "coll", Refresh: true}),
-		"a stock binary must let a refresh reach querycoord")
-	assert.Nil(t, n.InterceptReleasePartitions(ctx, &milvuspb.ReleasePartitionsRequest{CollectionName: "coll"}),
-		"a stock binary must release the partitions its client asked for")
-	assert.Nil(t, n.InterceptGetLoadState(ctx, &milvuspb.GetLoadStateRequest{CollectionName: "coll"}),
-		"a stock binary must report the load state it actually has")
-	assert.Nil(t, n.InterceptGetLoadingProgress(ctx, &milvuspb.GetLoadingProgressRequest{CollectionName: "coll"}),
-		"a stock binary must report the loading progress it actually has")
+	fallsThrough := func(t *testing.T, handled bool, err error, msg string) {
+		t.Helper()
+		assert.False(t, handled, msg)
+		assert.NoError(t, err, msg)
+	}
+
+	handled, err := n.InterceptLoadCollection(ctx, &milvuspb.LoadCollectionRequest{CollectionName: "coll"})
+	fallsThrough(t, handled, err, "a stock binary must load the collection its client asked for")
+	handled, err = n.InterceptLoadCollection(ctx, &milvuspb.LoadCollectionRequest{CollectionName: "coll", Refresh: true})
+	fallsThrough(t, handled, err, "a stock binary must let a refresh reach querycoord")
+	handled, err = n.InterceptReleaseCollection(ctx, &milvuspb.ReleaseCollectionRequest{CollectionName: "coll"})
+	fallsThrough(t, handled, err, "a stock binary must release the collection its client asked for")
+	handled, err = n.InterceptLoadPartitions(ctx, &milvuspb.LoadPartitionsRequest{CollectionName: "coll"})
+	fallsThrough(t, handled, err, "a stock binary must load the partitions its client asked for")
+	handled, err = n.InterceptLoadPartitions(ctx, &milvuspb.LoadPartitionsRequest{CollectionName: "coll", Refresh: true})
+	fallsThrough(t, handled, err, "a stock binary must let a refresh reach querycoord")
+	handled, err = n.InterceptReleasePartitions(ctx, &milvuspb.ReleasePartitionsRequest{CollectionName: "coll"})
+	fallsThrough(t, handled, err, "a stock binary must release the partitions its client asked for")
+
+	state, err := n.InterceptGetLoadState(ctx, &milvuspb.GetLoadStateRequest{CollectionName: "coll"})
+	assert.Nil(t, state, "a stock binary must report the load state it actually has")
+	assert.NoError(t, err)
+	progress, err := n.InterceptGetLoadingProgress(ctx, &milvuspb.GetLoadingProgressRequest{CollectionName: "coll"})
+	assert.Nil(t, progress, "a stock binary must report the loading progress it actually has")
+	assert.NoError(t, err)
 }
 
 // TestNoopProxyExtensionEmbedsWithoutOverride checks the promise the doc
@@ -102,23 +156,45 @@ func TestNoopProxyExtensionEmbedsWithoutOverride(t *testing.T) {
 	type embedder struct{ NoopProxyExtension }
 
 	var e ProxyExtension = embedder{}
-	assert.Nil(t, e.InterceptDML(context.Background(), "Insert", &milvuspb.InsertRequest{}),
+	ctx := context.Background()
+	assert.NoError(t, e.InterceptDML(ctx, DMLInsert, &milvuspb.InsertRequest{}),
 		"an implementation that overrides nothing must inherit the inert answer")
+	assert.NoError(t, e.InterceptAdminRPC(ctx, AdminSelectUser))
 
 	params := []*commonpb.KeyValuePair{{Key: "metric_type", Value: "L2"}}
-	ctx := context.Background()
 	gotCtx, cleaned := e.RewriteRequestParams(ctx, params)
 	assert.True(t, ctx == gotCtx,
 		"an embedder that overrides nothing must inherit the pass-through, not a nil method value")
 	assert.Equal(t, params, cleaned)
-	assert.NoError(t, e.OnConnect(1, nil))
-	e.Start(context.Background(), nil)
+	assert.NoError(t, e.OnConnect(ctx, 1, nil))
+	e.OnDisconnect(1)
+	e.Start(ctx, nil)
 
-	assert.Nil(t, e.InterceptLoadCollection(ctx, &milvuspb.LoadCollectionRequest{}),
-		"an embedder that overrides nothing must inherit the fall-through, not take over the load")
-	assert.Nil(t, e.InterceptReleaseCollection(ctx, &milvuspb.ReleaseCollectionRequest{}))
-	assert.Nil(t, e.InterceptLoadPartitions(ctx, &milvuspb.LoadPartitionsRequest{}))
-	assert.Nil(t, e.InterceptReleasePartitions(ctx, &milvuspb.ReleasePartitionsRequest{}))
-	assert.Nil(t, e.InterceptGetLoadState(ctx, &milvuspb.GetLoadStateRequest{}))
-	assert.Nil(t, e.InterceptGetLoadingProgress(ctx, &milvuspb.GetLoadingProgressRequest{}))
+	handled, err := e.InterceptLoadCollection(ctx, &milvuspb.LoadCollectionRequest{})
+	assert.False(t, handled, "an embedder that overrides nothing must inherit the fall-through, not take over the load")
+	assert.NoError(t, err)
+	handled, err = e.InterceptReleaseCollection(ctx, &milvuspb.ReleaseCollectionRequest{})
+	assert.False(t, handled)
+	assert.NoError(t, err)
+	handled, err = e.InterceptLoadPartitions(ctx, &milvuspb.LoadPartitionsRequest{})
+	assert.False(t, handled)
+	assert.NoError(t, err)
+	handled, err = e.InterceptReleasePartitions(ctx, &milvuspb.ReleasePartitionsRequest{})
+	assert.False(t, handled)
+	assert.NoError(t, err)
+	state, err := e.InterceptGetLoadState(ctx, &milvuspb.GetLoadStateRequest{})
+	assert.Nil(t, state)
+	assert.NoError(t, err)
+	progress, err := e.InterceptGetLoadingProgress(ctx, &milvuspb.GetLoadingProgressRequest{})
+	assert.Nil(t, progress)
+	assert.NoError(t, err)
+}
+
+// The op constants are the whole vocabulary a seam may use, and their values
+// are the RPC names, which is what the seams and the access log print.
+func TestOpConstantsAreTheRPCNames(t *testing.T) {
+	assert.Equal(t, DMLOp("Insert"), DMLInsert)
+	assert.Equal(t, DMLOp("Import"), DMLImport)
+	assert.Equal(t, AdminOp("OperatePrivilegeV2"), AdminOperatePrivilegeV2)
+	assert.Equal(t, AdminOp("CreateReplicateStream"), AdminCreateReplicateStream)
 }

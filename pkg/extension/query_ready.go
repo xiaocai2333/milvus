@@ -64,7 +64,14 @@ type QueryPlacement struct {
 // leaked it is gone.
 //
 // The receiver is a pointer and Finish is cleared as it runs, so a caller that
-// releases twice does not release the underlying pin twice.
+// releases twice through the SAME value does not release the underlying pin
+// twice. That is the whole guarantee: Release is not goroutine-safe, and a
+// COPY of the placement carries its own Finish, so a caller that copies the
+// struct and releases both copies releases the pin twice. The seam keeps one
+// placement per request, on one goroutine, and defers Release on it - the
+// shape TestQueryPlacementReleaseIsReachableThroughADefer pins - and an
+// implementation that needs more than that wraps its own Finish in a
+// sync.Once.
 func (p *QueryPlacement) Release() {
 	if p == nil || p.Finish == nil {
 		return
