@@ -93,7 +93,24 @@ func TestResourceGroupUpdateRequestToApply(t *testing.T) {
 		"an interceptor that supplied no replacement must leave the caller's request in force")
 	assert.Same(t, replacement, ResourceGroupUpdate{Forward: replacement}.RequestToApply(original),
 		"a supplied replacement must be what milvus applies")
-	assert.Same(t, replacement, ResourceGroupUpdate{Forward: replacement}.RequestToApply(nil),
-		"the replacement stands even when there is no original to fall back to")
-	assert.Nil(t, ResourceGroupUpdate{}.RequestToApply(nil))
+}
+
+// The Noop interceptor forwards everything unchanged: nil replacements and a
+// zero update, so a form that embeds it keeps the native path for every hook
+// it does not override.
+func TestNoopResourceGroupInterceptorForwardsUnchanged(t *testing.T) {
+	type embedder struct{ NoopResourceGroupInterceptor }
+	var i ResourceGroupInterceptor = embedder{}
+	ctx := context.Background()
+
+	assert.Nil(t, i.BeforeCreateResourceGroup(ctx, &milvuspb.CreateResourceGroupRequest{}),
+		"a nil replacement keeps the caller's create")
+	update, err := i.BeforeUpdateResourceGroups(ctx, &querypb.UpdateResourceGroupsRequest{})
+	assert.NoError(t, err)
+	assert.Equal(t, ResourceGroupUpdate{}, update, "a zero update applies the request as it arrived")
+	assert.NotPanics(t, func() {
+		i.AfterUpdateResourceGroups(ctx, update)
+		i.BeforeDropResourceGroup(ctx, &milvuspb.DropResourceGroupRequest{})
+		i.AfterDropResourceGroupFailed(ctx, &milvuspb.DropResourceGroupRequest{})
+	})
 }

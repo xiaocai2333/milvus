@@ -40,11 +40,28 @@ import (
 // interface as soon as nothing calls it. The collection-wide GetShardLeaders
 // was removed on those grounds once GetShardLeadersByRG replaced it; it comes
 // back only alongside a caller that genuinely wants the flattened,
-// resource-group-blind view.
+// resource-group-blind view. milvus implements this interface; under the
+// package evolution policy it may gain methods and never loses one once a
+// form outside this repository calls it.
 //
-// Every parameter and result is either committed proto or a plain struct
-// declared in this package, which keeps the interface reachable from this
-// module: pkg/v3 is a separate Go module and must not import internal/.
+// Every parameter and result is either a proto from milvus-proto or
+// pkg/proto, or a plain struct declared in this package, which keeps the
+// interface reachable from this module: pkg/v3 is a separate Go module and
+// must not import internal/. The pkg/proto types (querypb, indexpb) are
+// milvus's internal wire protos and carry no cross-version compatibility
+// promise; an in-tree form is compiled against the same revision and needs
+// none.
+//
+// # Re-entrancy
+//
+// Calls on this interface run through the coordinator's own handlers, and
+// those handlers consult the SAME provider's other capabilities:
+// UpdateResourceGroups passes through ResourceGroupInterceptor, LoadCollection
+// through LoadPlacementScope. An engine that calls MixCoord while holding a
+// lock its own interceptor needs deadlocks against itself. Release the lock
+// first, or make the interceptor recognize its own engine's requests.
+//
+// # Methods with no coordinator RPC behind them
 //
 // The other three methods have no coordinator RPC behind them. Two of them
 // exist for the same reason: the eight RPCs answer per collection, while a
@@ -57,12 +74,14 @@ import (
 //   - GetShardLeadersByRG maps onto querycoordv2 Server.GetShardLeaderReadinessByResourceGroup.
 //   - InvalidateShardLeaderCache maps onto the coordinator's proxy client manager.
 //
-// The seam that supplies this interface is responsible for those mappings, and
-// must fail loudly at coordinator start if the concrete coordinator cannot
-// provide any one of them. An engine that silently read a collection-wide
-// answer in place of a per-resource-group one would call a resource group ready
-// before it holds any data, or before it has a shard leader of its own - which
-// is the admission bug the first two methods exist to close.
+// The first two are added to querycoord by a separate change (#52716) and
+// this interface is only wirable once it has merged; the seam that supplies
+// this interface is responsible for those mappings, and must fail loudly at
+// coordinator start if the concrete coordinator cannot provide any one of
+// them. An engine that silently read a collection-wide answer in place of a
+// per-resource-group one would call a resource group ready before it holds
+// any data, or before it has a shard leader of its own - which is the
+// admission bug the first two methods exist to close.
 //
 // Returned percentages follow the querycoord contract: -1 means no replica of
 // the collection lives in that resource group at all, which is distinct from 0
@@ -89,6 +108,15 @@ type MixCoord interface {
 	// Shard-leader readiness, restricted to the replicas in one resource
 	// group. See ShardLeaderReadiness, and the type comment above for the
 	// mapping onto querycoordv2 Server.GetShardLeaderReadinessByResourceGroup.
+	//
+	// An empty rgName is the absence of a filter: the answer is then about
+	// the whole collection, and the no-replica verdict is worded as
+	// ShardLeadersReasonNoReplica. A named group that does not exist is
+	// merr.ErrResourceGroupNotFound with Reason ResourceGroupNotFound.
+	//
+	// When err != nil the struct is unspecified: classify on the error with
+	// merr.IsRetryableErr (a coordinator still coming up is retriable, a
+	// misspelled group is not) and read the struct only on err == nil.
 	GetShardLeadersByRG(ctx context.Context, collectionID int64, rgName string) (ShardLeaderReadiness, error)
 
 	// InvalidateShardLeaderCache drops every proxy's cached shard leaders for
@@ -136,6 +164,8 @@ type MixCoord interface {
 // coordinator that has not started. An implementation must therefore expect
 // its own handlers to be reachable in the window between the two, and answer
 // them as not-ready rather than touching state Start has yet to build.
+//
+// NoopCoordinatorEngine is the Noop base under the package evolution policy.
 type CoordinatorEngine interface {
 	// RegisterOnCoordinator lets the engine hang its own gRPC services on the
 	// coordinator's server. milvus never learns which services those are,
@@ -168,3 +198,15 @@ type CoordinatorEngine interface {
 	// boot must be crash-safe rather than Stop-dependent.
 	Stop() error
 }
+
+// NoopCoordinatorEngine registers nothing, starts nothing and stops cleanly:
+// the inert answer at every lifecycle step.
+type NoopCoordinatorEngine struct{}
+
+var _ CoordinatorEngine = NoopCoordinatorEngine{}
+
+func (NoopCoordinatorEngine) RegisterOnCoordinator(grpc.ServiceRegistrar) {}
+
+func (NoopCoordinatorEngine) Start(context.Context, MixCoord) error { return nil }
+
+func (NoopCoordinatorEngine) Stop() error { return nil }

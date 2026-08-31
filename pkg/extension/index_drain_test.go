@@ -93,3 +93,22 @@ func TestResourceGroupAndIndexDrainAreIndependent(t *testing.T) {
 	assert.NotNil(t, Caps().IndexDrain)
 	assert.Nil(t, Caps().ResourceGroups)
 }
+
+// The Noop drainer keeps milvus's refusal: a form that embeds it and overrides
+// nothing must not have suppressed the one protection a loaded collection has.
+func TestNoopIndexDrainerKeepsTheRefusal(t *testing.T) {
+	type embedder struct{ NoopIndexDrainer }
+	var d IndexDrainer = embedder{}
+	ctx := context.Background()
+
+	assert.False(t, d.AllowVectorIndexDropWhileLoaded(ctx, 1, "idx"),
+		"the inert answer must leave the native refusal in place")
+	assert.False(t, d.BeginDropIndex(ctx, &indexpb.DropIndexRequest{}),
+		"the inert answer must not ask for AfterDropIndex")
+	assert.False(t, d.CollectionDraining(ctx, 1))
+	assert.NotPanics(t, func() {
+		d.AfterDropIndex(ctx, &indexpb.DropIndexRequest{})
+		d.AbortDropIndex(ctx, &indexpb.DropIndexRequest{})
+		d.AfterCreateIndex(ctx, &indexpb.CreateIndexRequest{})
+	})
+}

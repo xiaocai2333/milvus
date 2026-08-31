@@ -213,3 +213,36 @@ func TestCoordinatorEngineLifecycleErrorsArePropagated(t *testing.T) {
 		"an error from Stop must survive install, Caps, and the call unwrapped and unreplaced")
 	assert.True(t, engine.stopped)
 }
+
+// The Noop engine is the inert answer at every lifecycle step, so a form that
+// embeds it and has no control plane to run does not fail coordinator start.
+func TestNoopCoordinatorEngineIsInert(t *testing.T) {
+	type embedder struct{ NoopCoordinatorEngine }
+	var e CoordinatorEngine = embedder{}
+
+	reg := &recordingServiceRegistrar{}
+	e.RegisterOnCoordinator(reg)
+	assert.Empty(t, reg.names, "the inert engine must register no service")
+	assert.NoError(t, e.Start(context.Background(), fakeMixCoord{}))
+	assert.NoError(t, e.Stop())
+}
+
+// Every reason constant must be distinct: callers compare them, and two
+// outcomes sharing a string would be indistinguishable in a log line.
+func TestShardLeadersReasonsAreDistinct(t *testing.T) {
+	reasons := []string{
+		ShardLeadersReasonCoordinatorNotReady,
+		ShardLeadersReasonResourceGroupNotFound,
+		ShardLeadersReasonNoReplicaInResourceGroup,
+		ShardLeadersReasonNoReplica,
+		ShardLeadersReasonCollectionNotLoaded,
+		ShardLeadersReasonNoChannelTarget,
+		ShardLeadersReasonShardsWithoutLeader,
+	}
+	seen := map[string]bool{}
+	for _, r := range reasons {
+		assert.NotEmpty(t, r)
+		assert.False(t, seen[r], "duplicate reason %q", r)
+		seen[r] = true
+	}
+}

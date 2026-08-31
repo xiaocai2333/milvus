@@ -69,3 +69,11 @@ func TestLoadPlacementIsRequirable(t *testing.T) {
 		caps:     Capabilities{LoadPlacement: stubLoadPlacementScope{}},
 	}), "supplying it must satisfy the requirement")
 }
+
+// The Noop scope answers false, which is the native reading and the safe
+// default the interface doc requires of an implementation that cannot decide.
+func TestNoopLoadPlacementScopeIsTheNativeReading(t *testing.T) {
+	type embedder struct{ NoopLoadPlacementScope }
+	var s LoadPlacementScope = embedder{}
+	assert.False(t, s.ScopedToNamedResourceGroups(context.Background(), 1, []string{"rg-a"}))
+}

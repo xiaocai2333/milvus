@@ -53,6 +53,20 @@ import (
 // Every method is called from milvus's own request goroutines, concurrently
 // and without any lock of milvus's held, so an implementation does its own
 // synchronization.
+//
+// # Mutation
+//
+// Every request handed to these methods is READ-ONLY; milvus performs the
+// drop or the create on the same object afterwards.
+//
+// # The bracket is closed on every path
+//
+// A BeginDropIndex that returned true is followed by exactly one of
+// AfterDropIndex and AbortDropIndex. The seam guarantees this with a defer
+// around the drop, so a drop that panicked reports Abort rather than leaving
+// the bracket open; an implementation may rely on it.
+//
+// NoopIndexDrainer is the Noop base under the package evolution policy.
 type IndexDrainer interface {
 	// AllowVectorIndexDropWhileLoaded reports whether milvus may drop a vector
 	// index whose collection is loaded, instead of refusing the request.
@@ -71,7 +85,12 @@ type IndexDrainer interface {
 	// that refuses concurrent drops while one is draining needs to tell the
 	// drop that opened the drain (allowed - it is the one being asked about)
 	// from a second drop arriving during it (refused). It is the raw name off
-	// the request, empty when the request named none.
+	// the request. It is EMPTY in two cases the implementation must not
+	// confuse: a request that named no index, and a DropAll request, which
+	// names none because it means every index on the collection. The
+	// DropIndexRequest BeginDropIndex saw carries DropAll and PartitionIDs,
+	// so an implementation keys the drain it opened on the request, not on
+	// the name.
 	AllowVectorIndexDropWhileLoaded(ctx context.Context, collectionID int64, indexName string) bool
 
 	// BeginDropIndex runs before milvus performs a drop, and reports whether
@@ -119,3 +138,24 @@ type IndexDrainer interface {
 	// with no provider installed is always.
 	CollectionDraining(ctx context.Context, collectionID int64) bool
 }
+
+// NoopIndexDrainer keeps milvus's refusal and observes nothing: the inert
+// answer, which a form that embeds it and cannot take a collection out of
+// service must keep.
+type NoopIndexDrainer struct{}
+
+var _ IndexDrainer = NoopIndexDrainer{}
+
+func (NoopIndexDrainer) AllowVectorIndexDropWhileLoaded(context.Context, int64, string) bool {
+	return false
+}
+
+func (NoopIndexDrainer) BeginDropIndex(context.Context, *indexpb.DropIndexRequest) bool { return false }
+
+func (NoopIndexDrainer) AfterDropIndex(context.Context, *indexpb.DropIndexRequest) {}
+
+func (NoopIndexDrainer) AbortDropIndex(context.Context, *indexpb.DropIndexRequest) {}
+
+func (NoopIndexDrainer) AfterCreateIndex(context.Context, *indexpb.CreateIndexRequest) {}
+
+func (NoopIndexDrainer) CollectionDraining(context.Context, int64) bool { return false }

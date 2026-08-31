@@ -86,6 +86,14 @@ import "context"
 //
 // With no provider installed the capability is nil, milvus asks nothing, and
 // every load request is read as the whole placement exactly as before.
+//
+// # Concurrency
+//
+// The method is called from querycoord's load path, from concurrent load
+// jobs and without any lock of milvus's held. It runs while a load is being
+// recorded, so it must be cheap and must not call back into the coordinator.
+//
+// NoopLoadPlacementScope is the Noop base under the package evolution policy.
 type LoadPlacementScope interface {
 	// ScopedToNamedResourceGroups reports whether this load request states the
 	// placement of only the resource groups it names.
@@ -99,4 +107,14 @@ type LoadPlacementScope interface {
 	// implementation that cannot decide says false, and the request keeps the
 	// meaning it has always had.
 	ScopedToNamedResourceGroups(ctx context.Context, collectionID int64, resourceGroups []string) bool
+}
+
+// NoopLoadPlacementScope reads every load request as the whole placement,
+// which is the native meaning.
+type NoopLoadPlacementScope struct{}
+
+var _ LoadPlacementScope = NoopLoadPlacementScope{}
+
+func (NoopLoadPlacementScope) ScopedToNamedResourceGroups(context.Context, int64, []string) bool {
+	return false
 }

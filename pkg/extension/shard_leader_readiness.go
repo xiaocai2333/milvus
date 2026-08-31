@@ -34,11 +34,23 @@ package extension
 // enough to say WHY the answer is no: which shards are missing a leader, out
 // of how many, and a reason for the outcomes that are not about a specific
 // shard at all.
-// The reason strings below mirror internal/querycoordv2/utils, which computes
-// them; the two sets must stay identically valued, or callers comparing
-// against these constants go blind. The DTO is duplicated rather than shared
-// because the dependency points outward: querycoord's computation layer does
-// not import this package.
+//
+// This type and the reason constants are the ONE definition. The querycoord
+// code that computes the verdict (internal/querycoordv2/utils) imports this
+// package and returns this type: pkg/v3 is a module internal/ imports
+// everywhere, so nothing stops it, and a second copy in querycoord would have
+// to be kept identically valued by hand - which had already failed once, when
+// two reasons were added on one side and not the other. Adding a reason means
+// adding a constant here; there is nowhere else to add it.
+//
+// # Error versus verdict
+//
+// The producers return (ShardLeaderReadiness, error). When err != nil the
+// struct is UNSPECIFIED beyond what the producer chose to fill in - one
+// producer sets Reason to CoordinatorNotReady alongside a not-ready error,
+// another returns the zero struct - so a caller must classify on the error
+// first, with merr.IsRetryableErr, and read the struct only when err == nil.
+// Reading Reason on an error path misses whichever producer left it empty.
 type ShardLeaderReadiness struct {
 	// Ready is true only when every shard of the collection has a serviceable
 	// leader inside a replica that lives in the requested resource group. It is
@@ -68,11 +80,22 @@ type ShardLeaderReadiness struct {
 
 // The reasons a resource group is not ready to serve. They are ordinary
 // strings rather than a named type so that they cost a caller nothing to log
-// or ignore.
+// or ignore. Two of them are worded for the unfiltered form of the question
+// (an empty resource group name asks about the whole collection, see
+// MixCoord.GetShardLeadersByRG), because callers compare these strings and
+// "no replica lives in this resource group" would be a false statement when
+// no group was named.
 const (
 	// ShardLeadersReasonCoordinatorNotReady means the coordinator's query meta
 	// is not initialized yet, so no answer can be given at all.
 	ShardLeadersReasonCoordinatorNotReady = "coordinator query meta is not ready"
+
+	// ShardLeadersReasonResourceGroupNotFound means the named resource group
+	// does not exist. It is reported alongside merr.ErrResourceGroupNotFound
+	// rather than folded into NoReplicaInResourceGroup: both mean waiting
+	// will not help, but only this one tells the caller it misspelled the
+	// group.
+	ShardLeadersReasonResourceGroupNotFound = "the resource group does not exist"
 
 	// ShardLeadersReasonNoReplicaInResourceGroup means no replica of the
 	// collection lives in this resource group. Nothing is loading here; the
@@ -80,6 +103,10 @@ const (
 	// the shard-leader counterpart of the -1 that GetReplicaLoadPercentByRG
 	// reports, and is distinct from a replica that exists and carries nothing.
 	ShardLeadersReasonNoReplicaInResourceGroup = "no replica of the collection lives in this resource group"
+
+	// ShardLeadersReasonNoReplica is NoReplicaInResourceGroup for the
+	// unfiltered question: the collection has no replica anywhere.
+	ShardLeadersReasonNoReplica = "the collection has no replica"
 
 	// ShardLeadersReasonCollectionNotLoaded means a replica record exists but
 	// the collection is not currently registered as loaded, for example because

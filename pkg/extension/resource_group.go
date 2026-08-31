@@ -36,6 +36,9 @@ type ResourceGroupUpdate struct {
 	// Applied reports that the interceptor already carried the whole update
 	// out itself. milvus then applies nothing and answers the caller success.
 	// An interceptor that wants the call to fail returns an error instead.
+	//
+	// Applied takes precedence over Forward: when both are set, Forward is
+	// ignored, since there is nothing left for milvus to apply.
 	Applied bool
 
 	// FollowUpGroups is carried, untouched, to AfterUpdateResourceGroups once
@@ -81,6 +84,24 @@ func (u ResourceGroupUpdate) RequestToApply(original *querypb.UpdateResourceGrou
 // what BeforeCreateResourceGroup and BeforeUpdateResourceGroups return, so an
 // adjustment is expressed by returning a replacement, which keeps the caller's
 // request - which milvus may still log or retry - intact.
+//
+// # Errors
+//
+// The one method that may fail reports its error to the caller through
+// merr.Status, so the error must be or wrap a merr sentinel; anything else
+// collapses to UnexpectedError.
+//
+// # Concurrency
+//
+// Every method is called from the coordinator's request goroutines,
+// concurrently and without any lock of milvus's held. The Before/After pair
+// of one update runs on the same goroutine, but another update's pair may
+// interleave with it, which is why FollowUpGroups exists: the state a
+// Before decision needs afterwards travels with the call, not in the
+// interceptor.
+//
+// NoopResourceGroupInterceptor is the Noop base under the package evolution
+// policy.
 type ResourceGroupInterceptor interface {
 	// BeforeCreateResourceGroup runs before milvus creates a resource group.
 	//
@@ -132,4 +153,26 @@ type ResourceGroupInterceptor interface {
 	// sides diverging in silence. A committed drop is not reported: the
 	// Before hook saw everything there was to see.
 	AfterDropResourceGroupFailed(ctx context.Context, req *milvuspb.DropResourceGroupRequest)
+}
+
+// NoopResourceGroupInterceptor forwards every request unchanged and observes
+// nothing, which is what a stock binary does.
+type NoopResourceGroupInterceptor struct{}
+
+var _ ResourceGroupInterceptor = NoopResourceGroupInterceptor{}
+
+func (NoopResourceGroupInterceptor) BeforeCreateResourceGroup(context.Context, *milvuspb.CreateResourceGroupRequest) *milvuspb.CreateResourceGroupRequest {
+	return nil
+}
+
+func (NoopResourceGroupInterceptor) BeforeUpdateResourceGroups(context.Context, *querypb.UpdateResourceGroupsRequest) (ResourceGroupUpdate, error) {
+	return ResourceGroupUpdate{}, nil
+}
+
+func (NoopResourceGroupInterceptor) AfterUpdateResourceGroups(context.Context, ResourceGroupUpdate) {}
+
+func (NoopResourceGroupInterceptor) BeforeDropResourceGroup(context.Context, *milvuspb.DropResourceGroupRequest) {
+}
+
+func (NoopResourceGroupInterceptor) AfterDropResourceGroupFailed(context.Context, *milvuspb.DropResourceGroupRequest) {
 }
