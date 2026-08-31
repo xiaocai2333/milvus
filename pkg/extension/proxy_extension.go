@@ -299,15 +299,17 @@ type ProxyExtension interface {
 	// leaves unset is the zero status, which is success - so a form that
 	// means to report a failure returns an error instead, or sets the status.
 	//
-	// (nil, nil) falls through to the native lookup, unchanged.
+	// (nil, nil) falls through to the native lookup, unchanged. When both
+	// returns are non-nil the error wins and the response is ignored, the
+	// same precedence the load group gives (false, err).
 	InterceptGetLoadState(ctx context.Context, req *milvuspb.GetLoadStateRequest) (*milvuspb.GetLoadStateResponse, error)
 
 	// InterceptGetLoadingProgress is consulted at the entry of
 	// GetLoadingProgress, after the proxy's health check and before the
 	// collection is looked up.
 	//
-	// MAY REPLACE: as InterceptGetLoadState, and with the same ownership of the
-	// whole response.
+	// MAY REPLACE: as InterceptGetLoadState, with the same ownership of the
+	// whole response and the same precedence of error over response.
 	//
 	// The response carries two numbers, and a form that replaces it answers for
 	// both: RefreshProgress reports how far along the re-pull a Refresh asked

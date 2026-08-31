@@ -35,10 +35,20 @@ type CredentialStore interface {
 	// A missing credential is not an error.
 	HasCredential(ctx context.Context, username string) (bool, error)
 	// AlterCredential stores an already-encrypted password for username. It
-	// is an UPSERT, as its rootcoord namesake is: an existing credential is
+	// is an UPSERT, as its catalog namesake is: an existing credential is
 	// overwritten without complaint, so a bootstrapper that must not reset a
 	// password an operator changed checks HasCredential first. The caller
 	// does the encryption; milvus does not see the plaintext.
+	//
+	// SEAM NOTE: the name is the catalog's (Catalog.AlterCredential), NOT
+	// IMetaTable.AlterCredential. The latter takes a broadcast result and is
+	// the WAL-replicated path the CreateCredential RPC uses; it needs the
+	// streaming service, which is not up while rootcoord initializes, and
+	// Bootstrap runs exactly then. The seam implements this method the way
+	// rootcoord seeds its own root account at init - MetaTable.InitCredential:
+	// Catalog.GetCredential to test presence, Catalog.AlterCredential to
+	// write - and the role methods below the way initRbac does, through the
+	// MetaTable's direct CreateRole/OperateUserRole/OperatePrivilege.
 	AlterCredential(ctx context.Context, username, encryptedPassword string) error
 
 	CreateRole(ctx context.Context, tenant string, entity *milvuspb.RoleEntity) error

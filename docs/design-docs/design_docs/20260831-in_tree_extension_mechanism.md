@@ -179,10 +179,12 @@ panics.
 
 ### Shard-leader readiness
 
-`ShardLeaderReadiness` and its reason constants are defined once, here;
-querycoord (`internal/querycoordv2/utils`, #52716) imports and returns this
-type. When a producer returns an error the struct is unspecified; callers
-classify on the error with `merr.IsRetryableErr` first.
+`ShardLeaderReadiness` and its reason constants are defined once, here.
+querycoord's computation (`internal/querycoordv2/utils`, added by #52716) is
+to import and return this type; #52716 currently carries its own copy with
+identical values, and whichever of the two PRs merges second makes the switch.
+When a producer returns an error the struct is unspecified; callers classify
+on the error with `merr.IsRetryableErr` first.
 
 ### Relation to hookutil
 
@@ -203,7 +205,7 @@ the tests that exercise the fall-through and the takeover path.
 | `ProxyExtension.OnConnect/OnDisconnect/Start` | proxy Connect + connection manager | pending |
 | `ProxyExtension.RewriteRequestParams/EnsureQueryReady` | proxy Search/HybridSearch/Query | pending |
 | `APIKeyVerifier` | proxy authentication interceptor | pending |
-| `RBACBootstrapper` | rootcoord init | pending |
+| `RBACBootstrapper` | rootcoord init, writing through the catalog as `MetaTable.InitCredential`/`initRbac` do (the broadcast path is not up yet) | pending |
 | `AdmissionChecker` | rootcoord CreateCollection/CreateDatabase | pending |
 | `CoordinatorEngine` | distributed/mixcoord server | pending, after #52716 |
 | `ResourceGroupInterceptor` | querycoord resource-group handlers | pending |

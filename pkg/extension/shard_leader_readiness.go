@@ -35,13 +35,15 @@ package extension
 // of how many, and a reason for the outcomes that are not about a specific
 // shard at all.
 //
-// This type and the reason constants are the ONE definition. The querycoord
-// code that computes the verdict (internal/querycoordv2/utils) imports this
-// package and returns this type: pkg/v3 is a module internal/ imports
-// everywhere, so nothing stops it, and a second copy in querycoord would have
-// to be kept identically valued by hand - which had already failed once, when
-// two reasons were added on one side and not the other. Adding a reason means
-// adding a constant here; there is nowhere else to add it.
+// This type and the reason constants are meant to be the ONE definition. The
+// querycoord code that computes the verdict (internal/querycoordv2/utils,
+// added by #52716) is to import this package and return this type: pkg/v3 is
+// a module internal/ imports everywhere, so nothing stops it, and a second
+// copy in querycoord has to be kept identically valued by hand - which had
+// already failed once, when two reasons were added on one side and not the
+// other. As of this change #52716 still carries its own copy; whichever of
+// the two merges second makes the switch, and until then the values here are
+// kept equal to #52716's. Adding a reason means adding a constant here.
 //
 // # Error versus verdict
 //
