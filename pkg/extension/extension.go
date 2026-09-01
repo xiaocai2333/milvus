@@ -50,8 +50,8 @@
 //     interface never gains a method: a need it cannot express becomes a new
 //     Capabilities field. Each interface says which it is.
 //   - An interface MILVUS implements and hands to a form (MixCoord,
-//     ProxyConnections, CoordClient, CredentialStore) may gain methods freely
-//     and never loses one; a form only calls these.
+//     ProxyConnections, CredentialStore) may gain methods freely and never
+//     loses one; a form only calls these.
 //   - Structs a form receives or returns (QueryPlacement,
 //     ResourceGroupUpdate, ShardLeaderReadiness, InternalListeners) gain
 //     fields, never lose them, so a later decision can be carried without a
@@ -89,10 +89,6 @@ const (
 
 	// CapRBACBootstrap is account and role seeding at rootcoord startup.
 	CapRBACBootstrap CapabilityID = "rbac_bootstrap"
-
-	// CapAdmission is per-instance admission checking on DDL such as
-	// collection and database creation.
-	CapAdmission CapabilityID = "admission"
 
 	// CapCoordinatorEngine is control-plane machinery hosted in the
 	// coordinator process, with its own gRPC services on the coordinator's
@@ -133,7 +129,6 @@ const (
 type Capabilities struct {
 	ProxyExt          ProxyExtension
 	RBACBootstrap     RBACBootstrapper
-	Admission         AdmissionChecker
 	CoordinatorEngine CoordinatorEngine
 	ResourceGroups    ResourceGroupInterceptor
 	IndexDrain        IndexDrainer
@@ -174,7 +169,6 @@ func (c Capabilities) entries() []capabilityEntry {
 	return []capabilityEntry{
 		{CapProxyExtension, c.ProxyExt},
 		{CapRBACBootstrap, c.RBACBootstrap},
-		{CapAdmission, c.Admission},
 		{CapCoordinatorEngine, c.CoordinatorEngine},
 		{CapResourceGroupInterceptor, c.ResourceGroups},
 		{CapIndexDrain, c.IndexDrain},

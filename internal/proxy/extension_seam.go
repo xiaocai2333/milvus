@@ -20,9 +20,7 @@ import (
 	"context"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/proxy/connection"
-	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/v3/extension"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -207,61 +205,3 @@ func observeResourceGroupSQLatency(ctx context.Context, queryType, dbName, colle
 		resourceGroup,
 	).Observe(float64(latencyMs))
 }
-
-// mixCoordAdmissionClient adapts types.MixCoordClient to extension.CoordClient.
-//
-// The two are not structurally interchangeable even though MixCoordClient
-// embeds rootcoordpb.RootCoordClient, which declares both methods: the
-// generated gRPC client stub signatures carry a trailing variadic
-// ...grpc.CallOption parameter that extension.CoordClient's plain two-argument
-// signature does not, so Go's structural interface check rejects passing a
-// types.MixCoordClient as an extension.CoordClient directly. This adapter
-// only narrows the call shape; every call is forwarded unchanged.
-type mixCoordAdmissionClient struct {
-	types.MixCoordClient
-}
-
-func (c mixCoordAdmissionClient) ListDatabases(ctx context.Context, req *milvuspb.ListDatabasesRequest) (*milvuspb.ListDatabasesResponse, error) {
-	return c.MixCoordClient.ListDatabases(ctx, req)
-}
-
-func (c mixCoordAdmissionClient) ShowCollections(ctx context.Context, req *milvuspb.ShowCollectionsRequest) (*milvuspb.ShowCollectionsResponse, error) {
-	return c.MixCoordClient.ShowCollections(ctx, req)
-}
-
-// admissionChecker returns the installed admission checker, or nil when the
-// native path applies and no admission work should be done at all.
-func admissionChecker() extension.AdmissionChecker {
-	return extension.Caps().Admission
-}
-
-// checkCreateCollectionAdmission consults the installed admission checker
-// before a collection is created. With no provider installed it returns nil
-// and never touches coord, so a stock binary pays no cost for the seam.
-//
-// Callers must run this only after establishing that the target collection
-// does not already exist: re-creating an existing collection must surface
-// rootcoord's own "already exists" or schema-mismatch error, not a quota
-// rejection, or a retry against an instance already at its cap would see
-// ResourceExhausted instead of the real (harmless) answer.
-//
-// This is the single production entry point for collection-creation
-// admission (task.go's createCollectionTask.PreExecute calls it directly);
-// keep it that way rather than resolving admissionChecker() a second time at
-// the call site.
-func checkCreateCollectionAdmission(ctx context.Context, req *milvuspb.CreateCollectionRequest, coord types.MixCoordClient) error {
-	c := admissionChecker()
-	if c == nil {
-		return nil
-	}
-	return c.CheckCreateCollection(ctx, req, mixCoordAdmissionClient{coord})
-}
-
-// The database-creation path has no equivalent checkCreateDatabaseAdmission
-// wrapper: createDatabaseTask.PreExecute follows the same admission-first,
-// existence-only-on-rejection order as the collection path, but its rejection
-// fallback (GetDatabaseInfo) lives on the task's own dependencies, so the
-// task resolves admissionChecker() itself and calls CheckCreateDatabase
-// directly. The two spellings are the same consultation - one capability
-// read, one call - differing only in where the code lives;
-// extension.Caps() but the only one for that path.

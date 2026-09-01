@@ -108,7 +108,7 @@ type ResourceGroupInterceptor interface {
 	// MAY REPLACE: the returned request is created in place of the original.
 	// Returning nil keeps the original.
 	//
-	// It cannot refuse the create. Refusing user DDL is what AdmissionChecker
+	// It cannot refuse the create. Refusing user DDL is what milvus's own quota
 	// is for, and a second interface able to reject the same request would
 	// leave two places to look when one is rejected. The create may still fail
 	// afterwards in milvus, so an implementation that registers state here must

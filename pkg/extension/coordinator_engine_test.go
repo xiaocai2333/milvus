@@ -125,11 +125,11 @@ func TestCapabilitiesReportsCoordinatorEnginePresence(t *testing.T) {
 }
 
 func TestCapCoordinatorEngineIsNotConfusedWithAnotherCapability(t *testing.T) {
-	// A table that supplies only admission must not answer yes for the
+	// A table that supplies only the index drain must not answer yes for the
 	// coordinator engine, and vice versa: the has() switch must key on the
 	// right field.
-	assert.False(t, Capabilities{Admission: &fakeAdmissionChecker{}}.has(CapCoordinatorEngine))
-	assert.False(t, Capabilities{CoordinatorEngine: &fakeCoordinatorEngine{}}.has(CapAdmission))
+	assert.False(t, Capabilities{IndexDrain: stubIndexDrainer{}}.has(CapCoordinatorEngine))
+	assert.False(t, Capabilities{CoordinatorEngine: &fakeCoordinatorEngine{}}.has(CapIndexDrain))
 }
 
 func TestSetProviderRejectsMissingCoordinatorEngineCapability(t *testing.T) {
