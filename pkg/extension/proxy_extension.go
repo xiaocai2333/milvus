@@ -132,7 +132,6 @@ type ProxyConnections interface {
 // serviceable, an explicit load is not work to do. What each may replace, and
 // the one condition under which it must not, is on the method.
 type ProxyExtension interface {
-
 	// OnConnect runs during the Connect handshake, before the connection is
 	// registered, and binds it to whatever the client declared about itself.
 	// ctx is the Connect RPC's context - it carries the authenticated user,

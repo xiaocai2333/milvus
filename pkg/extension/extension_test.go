@@ -237,6 +237,7 @@ func (stubHook) Mock(ctx context.Context, req interface{}, fullMethod string) (b
 func (stubHook) Before(ctx context.Context, req interface{}, fullMethod string) (context.Context, error) {
 	return ctx, nil
 }
+
 func (stubHook) After(ctx context.Context, result interface{}, err error, fullMethod string) error {
 	return nil
 }
