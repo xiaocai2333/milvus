@@ -22,37 +22,31 @@ import (
 
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/pkg/v3/extension"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
-// ShardLeaderReadiness is the answer type of
-// ShardLeaderReadinessByResourceGroup. It lives in this package - querycoord's
-// computation layer - so that both Server and the observers, which hold the
-// same read-only stores and cannot import the querycoordv2 root package, can
-// consume it.
-type ShardLeaderReadiness struct {
-	Ready         bool
-	Reason        string
-	TotalShards   int
-	UnreadyShards []string
-}
+// ShardLeaderReadiness is pkg/extension's type, aliased here so querycoord's
+// computation layer and the extension contract cannot drift apart. There was a
+// second, hand-synced copy in this package and it had already fallen behind
+// once, when two reasons were added on one side and not the other; an alias
+// makes that impossible rather than merely discouraged.
+//
+// The alias keeps every existing caller compiling: utils.ShardLeaderReadiness
+// and utils.ShardLeadersReasonXxx still resolve, and they now name the one
+// definition.
+type ShardLeaderReadiness = extension.ShardLeaderReadiness
 
 // The reason strings are part of the answer: callers compare against these
 // constants rather than parsing prose, so treat their values as an API.
 const (
-	ShardLeadersReasonCoordinatorNotReady = "coordinator query meta is not ready"
-	// ShardLeadersReasonResourceGroupNotFound accompanies ErrResourceGroupNotFound:
-	// the named group does not exist at all, which is the request's own
-	// mistake and not a statement about the collection.
-	ShardLeadersReasonResourceGroupNotFound    = "the resource group does not exist"
-	ShardLeadersReasonNoReplicaInResourceGroup = "no replica of the collection lives in this resource group"
-	// ShardLeadersReasonNoReplica is the rgName == "" form of the reason
-	// above: with no filter the condition is about the whole collection, not
-	// about a group, and the wording is part of the contract.
-	ShardLeadersReasonNoReplica           = "the collection has no replica"
-	ShardLeadersReasonCollectionNotLoaded = "the collection is not registered as loaded"
-	ShardLeadersReasonNoChannelTarget     = "the collection has no shard in the current target, it may be recovering"
-	ShardLeadersReasonShardsWithoutLeader = "some shards have no serviceable leader in this resource group"
+	ShardLeadersReasonCoordinatorNotReady      = extension.ShardLeadersReasonCoordinatorNotReady
+	ShardLeadersReasonResourceGroupNotFound    = extension.ShardLeadersReasonResourceGroupNotFound
+	ShardLeadersReasonNoReplicaInResourceGroup = extension.ShardLeadersReasonNoReplicaInResourceGroup
+	ShardLeadersReasonNoReplica                = extension.ShardLeadersReasonNoReplica
+	ShardLeadersReasonCollectionNotLoaded      = extension.ShardLeadersReasonCollectionNotLoaded
+	ShardLeadersReasonNoChannelTarget          = extension.ShardLeadersReasonNoChannelTarget
+	ShardLeadersReasonShardsWithoutLeader      = extension.ShardLeadersReasonShardsWithoutLeader
 )
 
 // ShardLeaderReadinessByResourceGroup answers a narrower question than

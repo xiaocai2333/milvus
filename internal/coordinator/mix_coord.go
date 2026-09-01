@@ -1080,14 +1080,7 @@ func (s *mixCoordImpl) GetLoadPercentageByResourceGroup(ctx context.Context, col
 	if err := merr.CheckHealthy(s.GetStateCode()); err != nil {
 		return 0, err
 	}
-	// PENDING #52716: querycoord's per-resource-group load percentage arrives
-	// with that PR. Until then the scoped question has no scoped answer, and
-	// answering the collection-wide one would be wrong in exactly the way
-	// that PR exists to fix - a group at 0% reported as loaded because a
-	// sibling group finished. Refuse instead, so a form that installs an
-	// engine before #52716 lands fails loudly rather than routing on a
-	// misleading number.
-	return 0, merr.WrapErrServiceUnavailable("per-resource-group load percentage is not available yet")
+	return s.queryCoordServer.GetLoadPercentageByResourceGroup(ctx, collectionID, rgName)
 }
 
 // GetShardLeaderReadinessByResourceGroup exposes querycoord's
@@ -1101,10 +1094,7 @@ func (s *mixCoordImpl) GetShardLeaderReadinessByResourceGroup(ctx context.Contex
 	if err := merr.CheckHealthy(s.GetStateCode()); err != nil {
 		return extension.ShardLeaderReadiness{}, err
 	}
-	// PENDING #52716, for the same reason as GetLoadPercentageByResourceGroup
-	// above: readiness scoped to a resource group cannot be derived from the
-	// collection-wide answer, so there is nothing honest to return yet.
-	return extension.ShardLeaderReadiness{}, merr.WrapErrServiceUnavailable("per-resource-group shard leader readiness is not available yet")
+	return s.queryCoordServer.GetShardLeaderReadinessByResourceGroup(ctx, collectionID, rgName)
 }
 
 // InvalidateShardLeaderCache drops one collection's cached shard leaders on

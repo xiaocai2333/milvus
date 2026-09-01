@@ -94,21 +94,17 @@ type Server struct {
 	grpc_health_v1.UnimplementedHealthServer
 	milvuspb.UnimplementedMilvusServiceServer
 
-	ctx          context.Context
-	wg           sync.WaitGroup
-	grpcHTTPWg   sync.WaitGroup
-	proxy        types.ProxyComponent
-	httpListener net.Listener
-	// The internal-domain listeners a form's extension declares; nil when
-	// none is installed. See internal_domain.go.
-	internalDomainGrpcServer *grpc.Server
-	internalDomainHTTPServer *http.Server
-	grpcListener             net.Listener
-	tcpServer                cmux.CMux
-	httpServer               *http.Server
-	grpcInternalServer       *grpc.Server
-	grpcExternalServer       *grpc.Server
-	listenerManager          *listenerManager
+	ctx                context.Context
+	wg                 sync.WaitGroup
+	grpcHTTPWg         sync.WaitGroup
+	proxy              types.ProxyComponent
+	httpListener       net.Listener
+	grpcListener       net.Listener
+	tcpServer          cmux.CMux
+	httpServer         *http.Server
+	grpcInternalServer *grpc.Server
+	grpcExternalServer *grpc.Server
+	listenerManager    *listenerManager
 
 	serverID atomic.Int64
 
@@ -642,11 +638,6 @@ func (s *Server) start() error {
 		}
 	}
 
-	if err := s.startInternalDomainServers(); err != nil {
-		mlog.Error(context.TODO(), "failed to start the internal-domain listeners", mlog.Err(err))
-		return err
-	}
-
 	return nil
 }
 
@@ -702,8 +693,6 @@ func (s *Server) Stop() (err error) {
 			logger.Info(s.ctx, "Proxy stop internal grpc server")
 			utils.GracefulStopGRPCServer(s.grpcInternalServer)
 		}
-
-		s.stopInternalDomainServers()
 
 		if s.listenerManager != nil {
 			s.listenerManager.Close()
