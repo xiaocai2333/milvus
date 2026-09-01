@@ -1605,10 +1605,24 @@ func PasswordVerify(ctx context.Context, username, rawPwd string) bool {
 	return passwordVerify(ctx, username, rawPwd, privilege.GetPrivilegeCache())
 }
 
-func VerifyAPIKey(rawToken string) (string, error) {
+func VerifyAPIKey(ctx context.Context, rawToken string) (string, error) {
+	// Extension seam, see extension_seam.go: with no verifier installed this
+	// is one atomic load and the native hook path below applies unchanged.
+	if v := apiKeyVerifier(); v != nil {
+		user, err := v.Verify(ctx, rawToken)
+		if err != nil {
+			mlog.Warn(ctx, "fail to verify apikey", mlog.Err(err))
+			return "", merr.WrapErrParameterInvalidMsg("invalid apikey")
+		}
+		if user == "" {
+			mlog.Warn(ctx, "installed verifier returned no username for apikey")
+			return "", merr.WrapErrParameterInvalidMsg("invalid apikey")
+		}
+		return user, nil
+	}
 	user, err := hookutil.GetHook().VerifyAPIKey(rawToken)
 	if err != nil {
-		mlog.Warn(context.TODO(), "fail to verify apikey with hook", mlog.Err(err))
+		mlog.Warn(ctx, "fail to verify apikey with hook", mlog.Err(err))
 		return "", merr.WrapErrParameterInvalidMsg("invalid API key")
 	}
 	return user, nil

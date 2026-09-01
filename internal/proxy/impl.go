@@ -57,6 +57,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/segcore"
 	"github.com/milvus-io/milvus/internal/util/streamingutil/status"
 	"github.com/milvus-io/milvus/pkg/v3/common"
+	"github.com/milvus-io/milvus/pkg/v3/extension"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/mq/msgstream"
@@ -775,6 +776,10 @@ func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCol
 		return merr.Status(err), nil
 	}
 
+	if handled, err := interceptLoadCollection(ctx, request); handled {
+		return merr.Status(err), nil
+	}
+
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-LoadCollection")
 	defer sp.End()
 	method := "LoadCollection"
@@ -826,6 +831,10 @@ func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCol
 // ReleaseCollection remove the loaded collection from query nodes.
 func (node *Proxy) ReleaseCollection(ctx context.Context, request *milvuspb.ReleaseCollectionRequest) (*commonpb.Status, error) {
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return merr.Status(err), nil
+	}
+
+	if handled, err := interceptReleaseCollection(ctx, request); handled {
 		return merr.Status(err), nil
 	}
 
@@ -1668,6 +1677,10 @@ func (node *Proxy) LoadPartitions(ctx context.Context, request *milvuspb.LoadPar
 		return merr.Status(err), nil
 	}
 
+	if handled, err := interceptLoadPartitions(ctx, request); handled {
+		return merr.Status(err), nil
+	}
+
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-LoadPartitions")
 	defer sp.End()
 	method := "LoadPartitions"
@@ -1717,6 +1730,10 @@ func (node *Proxy) LoadPartitions(ctx context.Context, request *milvuspb.LoadPar
 // ReleasePartitions release specific partitions from query nodes.
 func (node *Proxy) ReleasePartitions(ctx context.Context, request *milvuspb.ReleasePartitionsRequest) (*commonpb.Status, error) {
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return merr.Status(err), nil
+	}
+
+	if handled, err := interceptReleasePartitions(ctx, request); handled {
 		return merr.Status(err), nil
 	}
 
@@ -1904,6 +1921,14 @@ func (node *Proxy) GetLoadingProgress(ctx context.Context, request *milvuspb.Get
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return &milvuspb.GetLoadingProgressResponse{Status: merr.Status(err)}, nil
 	}
+
+	if resp, err := interceptGetLoadingProgress(ctx, request); resp != nil || err != nil {
+		if err != nil {
+			return &milvuspb.GetLoadingProgressResponse{Status: merr.Status(err)}, nil
+		}
+		return resp, nil
+	}
+
 	method := "GetLoadingProgress"
 	tr := timerecord.NewTimeRecorder(method)
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetLoadingProgress")
@@ -1978,6 +2003,14 @@ func (node *Proxy) GetLoadState(ctx context.Context, request *milvuspb.GetLoadSt
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return &milvuspb.GetLoadStateResponse{Status: merr.Status(err)}, nil
 	}
+
+	if resp, err := interceptGetLoadState(ctx, request); resp != nil || err != nil {
+		if err != nil {
+			return &milvuspb.GetLoadStateResponse{Status: merr.Status(err)}, nil
+		}
+		return resp, nil
+	}
+
 	method := "GetLoadState"
 	tr := timerecord.NewTimeRecorder(method)
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetLoadState")
@@ -2481,6 +2514,12 @@ func (node *Proxy) Insert(ctx context.Context, request *milvuspb.InsertRequest) 
 		}, nil
 	}
 
+	if err := interceptDML(ctx, extension.DMLInsert, request); err != nil {
+		return &milvuspb.MutationResult{
+			Status: merr.Status(err),
+		}, nil
+	}
+
 	// Check for external collection - insert is not supported
 	if err := checkExternalCollectionBlockedForWrite(ctx, node.getMetaCache(), request.GetDbName(), request.GetCollectionName(), "insert"); err != nil {
 		return &milvuspb.MutationResult{
@@ -2621,6 +2660,12 @@ func (node *Proxy) Delete(ctx context.Context, request *milvuspb.DeleteRequest) 
 		}, nil
 	}
 
+	if err := interceptDML(ctx, extension.DMLDelete, request); err != nil {
+		return &milvuspb.MutationResult{
+			Status: merr.Status(err),
+		}, nil
+	}
+
 	// Check for external collection - delete is not supported
 	if err := checkExternalCollectionBlockedForWrite(ctx, node.getMetaCache(), request.GetDbName(), request.GetCollectionName(), "delete"); err != nil {
 		return &milvuspb.MutationResult{
@@ -2713,6 +2758,12 @@ func (node *Proxy) Upsert(ctx context.Context, request *milvuspb.UpsertRequest) 
 	mlog.Debug(context.TODO(), "Start processing upsert request in Proxy")
 
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return &milvuspb.MutationResult{
+			Status: merr.Status(err),
+		}, nil
+	}
+
+	if err := interceptDML(ctx, extension.DMLUpsert, request); err != nil {
 		return &milvuspb.MutationResult{
 			Status: merr.Status(err),
 		}, nil
@@ -2867,6 +2918,21 @@ func GetCollectionRateSubLabel(req any) string {
 
 // Search searches the most similar records of requests.
 func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) (*milvuspb.SearchResults, error) {
+	// The cleaned parameters replace the request's own, here at the entry, so
+	// that every attempt the retry below makes sends the same stripped request.
+	ctx, request.SearchParams = rewriteRequestParams(ctx, request.GetSearchParams())
+
+	// Ahead of the retry loop, so one readiness answer covers every attempt
+	// node.search makes, and so the resource group it named is on the context
+	// every attempt runs under.
+	ctx, placement, readyErr := ensureQueryReady(ctx, node, request.GetDbName(), request.GetCollectionName())
+	defer placement.Release()
+	if readyErr != nil {
+		return &milvuspb.SearchResults{
+			Status: merr.Status(readyErr),
+		}, nil
+	}
+
 	var err error
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
@@ -3113,6 +3179,8 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 		collectionName,
 	).Observe(float64(searchDur))
 
+	observeResourceGroupSQLatency(ctx, metrics.SearchLabel, dbName, collectionName, searchDur)
+
 	if Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() {
 		metrics.ProxyScannedRemoteMB.WithLabelValues(
 			nodeID,
@@ -3156,6 +3224,22 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 }
 
 func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSearchRequest) (*milvuspb.SearchResults, error) {
+	// A hybrid search carries the reserved parameter on its rank params; see
+	// the note in Search on why this runs outside the retry.
+	// RankParams only, not the sub-requests' SearchParams: a form's routing
+	// parameter names the cluster for the whole hybrid search, and the
+	// top-level params are where clients put it (the fork this generalizes
+	// read exactly this field). Sub-request params are left untouched.
+	ctx, request.RankParams = rewriteRequestParams(ctx, request.GetRankParams())
+
+	ctx, placement, readyErr := ensureQueryReady(ctx, node, request.GetDbName(), request.GetCollectionName())
+	defer placement.Release()
+	if readyErr != nil {
+		return &milvuspb.SearchResults{
+			Status: merr.Status(readyErr),
+		}, nil
+	}
+
 	var err error
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
@@ -3348,6 +3432,8 @@ func (node *Proxy) hybridSearch(ctx context.Context, request *milvuspb.HybridSea
 		dbName,
 		collectionName,
 	).Observe(float64(searchDur))
+
+	observeResourceGroupSQLatency(ctx, metrics.HybridSearchLabel, dbName, collectionName, searchDur)
 
 	if Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() {
 		metrics.ProxyScannedRemoteMB.WithLabelValues(
@@ -3652,6 +3738,14 @@ func (node *Proxy) Flush(ctx context.Context, request *milvuspb.FlushRequest) (*
 		return resp, nil
 	}
 
+	// Flush is a write-path operation even though it moves no rows: it seals
+	// segments and forces them out, which only means something on an instance
+	// that accepted the writes behind them.
+	if err := interceptDML(ctx, extension.DMLFlush, request); err != nil {
+		resp.Status = merr.Status(err)
+		return resp, nil
+	}
+
 	// Check for external collection - flush is not supported
 	for _, collName := range request.GetCollectionNames() {
 		if err := checkExternalCollectionBlockedForWrite(ctx, node.getMetaCache(), request.GetDbName(), collName, "flush"); err != nil {
@@ -3810,6 +3904,9 @@ func (node *Proxy) query(ctx context.Context, qt *queryTask, sp trace.Span) (*mi
 			request.DbName,
 			request.CollectionName,
 		).Observe(float64(tr.ElapseSpan().Milliseconds()))
+
+		observeResourceGroupSQLatency(ctx, queryLabel, request.GetDbName(), request.GetCollectionName(),
+			tr.ElapseSpan().Milliseconds())
 	}
 
 	succeeded = true
@@ -3818,6 +3915,25 @@ func (node *Proxy) query(ctx context.Context, qt *queryTask, sp trace.Span) (*mi
 
 // Query get the records by primary keys.
 func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (*milvuspb.QueryResults, error) {
+	// Ahead of the task, which captures ctx: the task and everything it starts
+	// must run under the context the rewrite returned.
+	ctx, request.QueryParams = rewriteRequestParams(ctx, request.GetQueryParams())
+
+	// The gate sits on the RPC entry rather than on node.query, which the
+	// search pipeline's requery operator re-enters with the ids a search has
+	// already returned. That sub-query runs inside a request which has already
+	// passed the gate and is still holding its placement, so gating it again
+	// would ask a second time for readiness the caller already holds - and on a
+	// form where readiness takes a lock or a pin, the outer request is exactly
+	// what the inner one would be waiting on.
+	ctx, placement, readyErr := ensureQueryReady(ctx, node, request.GetDbName(), request.GetCollectionName())
+	defer placement.Release()
+	if readyErr != nil {
+		return &milvuspb.QueryResults{
+			Status: merr.Status(readyErr),
+		}, nil
+	}
+
 	qt := &queryTask{
 		baseTask: baseTask{
 			metaCache: node.getMetaCache(),
@@ -4199,6 +4315,11 @@ func (node *Proxy) FlushAll(ctx context.Context, request *milvuspb.FlushAllReque
 		Status: merr.Success(),
 	}
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		resp.Status = merr.Status(err)
+		return resp, nil
+	}
+
+	if err := interceptDML(ctx, extension.DMLFlushAll, request); err != nil {
 		resp.Status = merr.Status(err)
 		return resp, nil
 	}
@@ -4701,6 +4822,11 @@ func (node *Proxy) LoadBalance(ctx context.Context, req *milvuspb.LoadBalanceReq
 
 // GetReplicas gets replica info
 func (node *Proxy) GetReplicas(ctx context.Context, req *milvuspb.GetReplicasRequest) (*milvuspb.GetReplicasResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminGetReplicas); err != nil {
+		return &milvuspb.GetReplicasResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetReplicas")
 	defer sp.End()
 
@@ -4829,6 +4955,11 @@ func (node *Proxy) GetCompactionStateWithPlans(ctx context.Context, req *milvusp
 
 // GetFlushState gets the flush state of the collection based on the provided flush ts and segment IDs.
 func (node *Proxy) GetFlushState(ctx context.Context, req *milvuspb.GetFlushStateRequest) (*milvuspb.GetFlushStateResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminGetFlushState); err != nil {
+		return &milvuspb.GetFlushStateResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetFlushState")
 	defer sp.End()
 
@@ -4874,6 +5005,11 @@ func (node *Proxy) GetFlushState(ctx context.Context, req *milvuspb.GetFlushStat
 
 // GetFlushAllState checks if all DML messages before `FlushAllTs` have been flushed.
 func (node *Proxy) GetFlushAllState(ctx context.Context, req *milvuspb.GetFlushAllStateRequest) (*milvuspb.GetFlushAllStateResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminGetFlushAllState); err != nil {
+		return &milvuspb.GetFlushAllStateResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetFlushAllState")
 	defer sp.End()
 	mlog.Debug(context.TODO(), "receive GetFlushAllState request")
@@ -5093,6 +5229,11 @@ func (node *Proxy) UpdateCredentialCache(ctx context.Context, request *proxypb.U
 }
 
 func (node *Proxy) CreateCredential(ctx context.Context, req *milvuspb.CreateCredentialRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminCreateCredential); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-CreateCredential")
 	defer sp.End()
 
@@ -5149,6 +5290,11 @@ func (node *Proxy) CreateCredential(ctx context.Context, req *milvuspb.CreateCre
 }
 
 func (node *Proxy) UpdateCredential(ctx context.Context, req *milvuspb.UpdateCredentialRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminUpdateCredential); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-UpdateCredential")
 	defer sp.End()
 
@@ -5230,6 +5376,11 @@ func (node *Proxy) UpdateCredential(ctx context.Context, req *milvuspb.UpdateCre
 }
 
 func (node *Proxy) DeleteCredential(ctx context.Context, req *milvuspb.DeleteCredentialRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminDeleteCredential); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-DeleteCredential")
 	defer sp.End()
 
@@ -5257,6 +5408,11 @@ func (node *Proxy) DeleteCredential(ctx context.Context, req *milvuspb.DeleteCre
 }
 
 func (node *Proxy) ListCredUsers(ctx context.Context, req *milvuspb.ListCredUsersRequest) (*milvuspb.ListCredUsersResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminListCredUsers); err != nil {
+		return &milvuspb.ListCredUsersResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-ListCredUsers")
 	defer sp.End()
 
@@ -5286,6 +5442,11 @@ func (node *Proxy) ListCredUsers(ctx context.Context, req *milvuspb.ListCredUser
 }
 
 func (node *Proxy) CreateRole(ctx context.Context, req *milvuspb.CreateRoleRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminCreateRole); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-CreateRole")
 	defer sp.End()
 
@@ -5320,6 +5481,11 @@ func (node *Proxy) CreateRole(ctx context.Context, req *milvuspb.CreateRoleReque
 }
 
 func (node *Proxy) AlterRole(ctx context.Context, req *milvuspb.AlterRoleRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminAlterRole); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-AlterRole")
 	defer sp.End()
 
@@ -5351,6 +5517,11 @@ func (node *Proxy) AlterRole(ctx context.Context, req *milvuspb.AlterRoleRequest
 }
 
 func (node *Proxy) DropRole(ctx context.Context, req *milvuspb.DropRoleRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminDropRole); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-DropRole")
 	defer sp.End()
 
@@ -5381,6 +5552,11 @@ func (node *Proxy) DropRole(ctx context.Context, req *milvuspb.DropRoleRequest) 
 }
 
 func (node *Proxy) OperateUserRole(ctx context.Context, req *milvuspb.OperateUserRoleRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminOperateUserRole); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-OperateUserRole")
 	defer sp.End()
 
@@ -5408,6 +5584,11 @@ func (node *Proxy) OperateUserRole(ctx context.Context, req *milvuspb.OperateUse
 }
 
 func (node *Proxy) SelectRole(ctx context.Context, req *milvuspb.SelectRoleRequest) (*milvuspb.SelectRoleResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminSelectRole); err != nil {
+		return &milvuspb.SelectRoleResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-SelectRole")
 	defer sp.End()
 
@@ -5439,6 +5620,11 @@ func (node *Proxy) SelectRole(ctx context.Context, req *milvuspb.SelectRoleReque
 }
 
 func (node *Proxy) SelectUser(ctx context.Context, req *milvuspb.SelectUserRequest) (*milvuspb.SelectUserResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminSelectUser); err != nil {
+		return &milvuspb.SelectUserResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-SelectUser")
 	defer sp.End()
 
@@ -5527,6 +5713,11 @@ func (node *Proxy) validateOperatePrivilegeV2Params(req *milvuspb.OperatePrivile
 }
 
 func (node *Proxy) OperatePrivilegeV2(ctx context.Context, req *milvuspb.OperatePrivilegeV2Request) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminOperatePrivilegeV2); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-OperatePrivilegeV2")
 	defer sp.End()
 
@@ -5597,6 +5788,11 @@ func (node *Proxy) OperatePrivilegeV2(ctx context.Context, req *milvuspb.Operate
 }
 
 func (node *Proxy) OperatePrivilege(ctx context.Context, req *milvuspb.OperatePrivilegeRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminOperatePrivilege); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-OperatePrivilege")
 	defer sp.End()
 
@@ -5683,6 +5879,11 @@ func (node *Proxy) validGrantParams(req *milvuspb.SelectGrantRequest) error {
 }
 
 func (node *Proxy) SelectGrant(ctx context.Context, req *milvuspb.SelectGrantRequest) (*milvuspb.SelectGrantResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminSelectGrant); err != nil {
+		return &milvuspb.SelectGrantResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-SelectGrant")
 	defer sp.End()
 
@@ -5728,6 +5929,11 @@ func (node *Proxy) SelectGrant(ctx context.Context, req *milvuspb.SelectGrantReq
 }
 
 func (node *Proxy) BackupRBAC(ctx context.Context, req *milvuspb.BackupRBACMetaRequest) (*milvuspb.BackupRBACMetaResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminBackupRBAC); err != nil {
+		return &milvuspb.BackupRBACMetaResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-BackupRBAC")
 	defer sp.End()
 
@@ -5747,6 +5953,11 @@ func (node *Proxy) BackupRBAC(ctx context.Context, req *milvuspb.BackupRBACMetaR
 }
 
 func (node *Proxy) RestoreRBAC(ctx context.Context, req *milvuspb.RestoreRBACMetaRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminRestoreRBAC); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-RestoreRBAC")
 	defer sp.End()
 
@@ -6341,6 +6552,16 @@ func (node *Proxy) Connect(ctx context.Context, request *milvuspb.ConnectRequest
 		Reserved:   make(map[string]string),
 	}
 
+	// Bind the connection before it is registered: an extension that refuses
+	// the client's declaration must not leave a registered connection behind
+	// that nothing will ever bind or collect.
+	if err := onConnect(ctx, int64(ts), request.GetClientInfo()); err != nil {
+		logger.Info(ctx, "connect failed, extension refused the connection", mlog.Err(err))
+		return &milvuspb.ConnectResponse{
+			Status: merr.Status(err),
+		}, nil
+	}
+
 	connection.GetManager().Register(ctx, int64(ts), request.GetClientInfo())
 
 	return &milvuspb.ConnectResponse{
@@ -6351,6 +6572,11 @@ func (node *Proxy) Connect(ctx context.Context, request *milvuspb.ConnectRequest
 }
 
 func (node *Proxy) ReplicateMessage(ctx context.Context, req *milvuspb.ReplicateMessageRequest) (*milvuspb.ReplicateMessageResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminReplicateMessage); err != nil {
+		return &milvuspb.ReplicateMessageResponse{Status: merr.Status(err)}, nil
+	}
 	return &milvuspb.ReplicateMessageResponse{
 		Status: merr.Status(merr.WrapErrServiceUnavailable("not supported in streaming mode")),
 	}, nil
@@ -6399,6 +6625,14 @@ func (node *Proxy) GetVersion(ctx context.Context, request *milvuspb.GetVersionR
 
 func (node *Proxy) ImportV2(ctx context.Context, req *internalpb.ImportRequest) (*internalpb.ImportResponse, error) {
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return &internalpb.ImportResponse{Status: merr.Status(err)}, nil
+	}
+
+	// Extension seam, see extension_seam.go. Import is in the DML table
+	// because it is bulk INSERT: a form that refuses streaming writes and
+	// left this open would simply have taught its tenants a slower syntax
+	// for the same forbidden write. Import (v1) funnels through here.
+	if err := interceptDML(ctx, extension.DMLImport, req); err != nil {
 		return &internalpb.ImportResponse{Status: merr.Status(err)}, nil
 	}
 
@@ -6589,6 +6823,11 @@ func (node *Proxy) RegisterRestRouter(router gin.IRouter) {
 }
 
 func (node *Proxy) CreatePrivilegeGroup(ctx context.Context, req *milvuspb.CreatePrivilegeGroupRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminCreatePrivilegeGroup); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-CreatePrivilegeGroup")
 	defer sp.End()
 
@@ -6616,6 +6855,11 @@ func (node *Proxy) CreatePrivilegeGroup(ctx context.Context, req *milvuspb.Creat
 }
 
 func (node *Proxy) DropPrivilegeGroup(ctx context.Context, req *milvuspb.DropPrivilegeGroupRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminDropPrivilegeGroup); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-DropPrivilegeGroup")
 	defer sp.End()
 
@@ -6643,6 +6887,11 @@ func (node *Proxy) DropPrivilegeGroup(ctx context.Context, req *milvuspb.DropPri
 }
 
 func (node *Proxy) ListPrivilegeGroups(ctx context.Context, req *milvuspb.ListPrivilegeGroupsRequest) (*milvuspb.ListPrivilegeGroupsResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminListPrivilegeGroups); err != nil {
+		return &milvuspb.ListPrivilegeGroupsResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-ListPrivilegeGroups")
 	defer sp.End()
 
@@ -6669,6 +6918,11 @@ func (node *Proxy) ListPrivilegeGroups(ctx context.Context, req *milvuspb.ListPr
 }
 
 func (node *Proxy) OperatePrivilegeGroup(ctx context.Context, req *milvuspb.OperatePrivilegeGroupRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminOperatePrivilegeGroup); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-OperatePrivilegeGroup")
 	defer sp.End()
 
@@ -6912,6 +7166,11 @@ func (node *Proxy) ListFileResources(ctx context.Context, req *milvuspb.ListFile
 
 // UpdateReplicateConfiguration applies a full replacement of the current replication configuration across Milvus clusters.
 func (node *Proxy) UpdateReplicateConfiguration(ctx context.Context, req *milvuspb.UpdateReplicateConfigurationRequest) (*commonpb.Status, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminUpdateReplicateConfiguration); err != nil {
+		return merr.Status(err), nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-UpdateReplicateConfiguration")
 	defer sp.End()
 
@@ -6930,6 +7189,11 @@ func (node *Proxy) UpdateReplicateConfiguration(ctx context.Context, req *milvus
 
 // GetReplicateConfiguration returns the current cross-cluster replication configuration.
 func (node *Proxy) GetReplicateConfiguration(ctx context.Context, req *milvuspb.GetReplicateConfigurationRequest) (*milvuspb.GetReplicateConfigurationResponse, error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminGetReplicateConfiguration); err != nil {
+		return &milvuspb.GetReplicateConfigurationResponse{Status: merr.Status(err)}, nil
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetReplicateConfiguration")
 	defer sp.End()
 
@@ -6959,6 +7223,11 @@ func (node *Proxy) GetReplicateConfiguration(ctx context.Context, req *milvuspb.
 // GetReplicateInfo retrieves replication-related metadata from a target Milvus cluster.
 // TODO: sheep, only get target checkpoint
 func (node *Proxy) GetReplicateInfo(ctx context.Context, req *milvuspb.GetReplicateInfoRequest) (resp *milvuspb.GetReplicateInfoResponse, err error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(ctx, extension.AdminGetReplicateInfo); err != nil {
+		return nil, err
+	}
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-GetReplicateInfo")
 	defer sp.End()
 
@@ -7024,6 +7293,11 @@ func (node *Proxy) GetReplicateInfo(ctx context.Context, req *milvuspb.GetReplic
 
 // CreateReplicateStream establishes a replication stream on the target Milvus cluster.
 func (node *Proxy) CreateReplicateStream(stream milvuspb.MilvusService_CreateReplicateStreamServer) (err error) {
+	// Extension seam, see extension_seam.go: a form may withhold this RPC
+	// from tenants; with none installed the answer is nil and nothing changes.
+	if err := interceptAdminRPC(stream.Context(), extension.AdminCreateReplicateStream); err != nil {
+		return err
+	}
 	ctx := stream.Context()
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-CreateReplicateStream")
 	defer sp.End()

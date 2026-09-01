@@ -1449,7 +1449,7 @@ func TestVerifyAPIKeyDoesNotExposeSecret(t *testing.T) {
 		hookutil.SetTestHook(hookutil.DefaultHook{})
 	})
 
-	_, err := VerifyAPIKey(rawToken)
+	_, err := VerifyAPIKey(context.Background(), rawToken)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), rawToken)
 

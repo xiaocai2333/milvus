@@ -94,17 +94,21 @@ type Server struct {
 	grpc_health_v1.UnimplementedHealthServer
 	milvuspb.UnimplementedMilvusServiceServer
 
-	ctx                context.Context
-	wg                 sync.WaitGroup
-	grpcHTTPWg         sync.WaitGroup
-	proxy              types.ProxyComponent
-	httpListener       net.Listener
-	grpcListener       net.Listener
-	tcpServer          cmux.CMux
-	httpServer         *http.Server
-	grpcInternalServer *grpc.Server
-	grpcExternalServer *grpc.Server
-	listenerManager    *listenerManager
+	ctx          context.Context
+	wg           sync.WaitGroup
+	grpcHTTPWg   sync.WaitGroup
+	proxy        types.ProxyComponent
+	httpListener net.Listener
+	// The internal-domain listeners a form's extension declares; nil when
+	// none is installed. See internal_domain.go.
+	internalDomainGrpcServer *grpc.Server
+	internalDomainHTTPServer *http.Server
+	grpcListener             net.Listener
+	tcpServer                cmux.CMux
+	httpServer               *http.Server
+	grpcInternalServer       *grpc.Server
+	grpcExternalServer       *grpc.Server
+	listenerManager          *listenerManager
 
 	serverID atomic.Int64
 
@@ -127,18 +131,20 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 }
 
 func authenticate(c *gin.Context) {
-	username, password, ok := httpserver.ParseUsernamePassword(c)
-	if ok {
-		if proxy.PasswordVerify(c, username, password) {
-			mlog.Debug(context.TODO(), "auth successful", mlog.String("username", username))
-			c.Set(httpserver.ContextUsername, username)
-			c.Set(httpserver.ContextToken, fmt.Sprintf("%s%s%s", username, util.CredentialSeparator, password))
-			return
+	if !proxy.ExternalListenerRequiresAPIKey() {
+		username, password, ok := httpserver.ParseUsernamePassword(c)
+		if ok {
+			if proxy.PasswordVerify(c, username, password) {
+				mlog.Debug(context.TODO(), "auth successful", mlog.String("username", username))
+				c.Set(httpserver.ContextUsername, username)
+				c.Set(httpserver.ContextToken, fmt.Sprintf("%s%s%s", username, util.CredentialSeparator, password))
+				return
+			}
 		}
 	}
 	rawToken := httpserver.GetAuthorization(c)
 	if rawToken != "" && !strings.Contains(rawToken, util.CredentialSeparator) {
-		user, err := proxy.VerifyAPIKey(rawToken)
+		user, err := proxy.VerifyAPIKey(c.Request.Context(), rawToken)
 		if err == nil {
 			c.Set(httpserver.ContextUsername, user)
 			c.Set(httpserver.ContextToken, rawToken)
@@ -636,6 +642,11 @@ func (s *Server) start() error {
 		}
 	}
 
+	if err := s.startInternalDomainServers(); err != nil {
+		mlog.Error(context.TODO(), "failed to start the internal-domain listeners", mlog.Err(err))
+		return err
+	}
+
 	return nil
 }
 
@@ -691,6 +702,8 @@ func (s *Server) Stop() (err error) {
 			logger.Info(s.ctx, "Proxy stop internal grpc server")
 			utils.GracefulStopGRPCServer(s.grpcInternalServer)
 		}
+
+		s.stopInternalDomainServers()
 
 		if s.listenerManager != nil {
 			s.listenerManager.Close()
