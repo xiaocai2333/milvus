@@ -21,7 +21,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -101,7 +104,9 @@ func TestCreateReplicateStreamConsultsTheHook(t *testing.T) {
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
 	err := node.CreateReplicateStream(fakeReplicateStream{ctx: context.Background()})
-	assert.ErrorIs(t, err, merr.ErrServiceUnimplemented)
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err),
+		"a stream refusal travels as a gRPC status, and must not be the codes.Unknown a client retries")
 }
 
 // refusingStreamHook withholds only the replicate stream, so the test cannot

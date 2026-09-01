@@ -12,7 +12,6 @@ import (
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
-	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -61,22 +60,15 @@ func HookInterceptor(ctx context.Context, req any, userName, fullMethod string, 
 
 // hookError is how a hook's refusal reaches the client.
 //
-// A plugin's error keeps the treatment it has always had: wrapped as
-// InvalidArgument, because a bare error carries no classification and the SDK
-// would otherwise retry a permanent refusal forever - the reason the original
-// comment gave for not using merr here.
-//
-// An error that IS a merr sentinel already carries that classification, and
-// flattening it would destroy the very thing it was chosen for: a hook that
-// refuses a write with a retriable ErrServiceUnavailable means the client
-// should come back, and one that withholds an RPC with ErrServiceUnimplemented
-// means it never should. Those are returned as they are.
+// A refusal that must carry a classification the caller can act on does not
+// come through here at all: the hook answers it from Mock, with the RPC's own
+// response carrying merr.Status, which is how every milvus handler reports a
+// refusal and what an SDK surfaces immediately. An error returned here can
+// only become a gRPC status, and a bare error becomes codes.Unknown, which
+// clients retry - the reason the original comment gives for not using merr.
 func hookError(err error) error {
 	if err == nil {
 		return nil
-	}
-	if merr.IsMilvusError(err) {
-		return err
 	}
 	// NOTE: don't use the merr, because it will cause the wrong retry behavior in the sdk
 	return status.Error(codes.InvalidArgument, "detail: "+err.Error())

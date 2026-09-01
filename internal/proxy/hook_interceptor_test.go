@@ -212,31 +212,11 @@ func TestUpdateProxyFunctionCallMetric(t *testing.T) {
 	})
 }
 
-// A hook that refuses with a plain error keeps the treatment plugins have
-// always had - InvalidArgument, so the SDK does not retry a refusal forever -
-// while one that refuses with a merr sentinel keeps its classification, which
-// is the whole reason a caller would choose a sentinel over a bare error.
-func TestHookErrorKeepsMilvusErrorClassification(t *testing.T) {
-	assert.NoError(t, hookError(nil))
-
-	plain := hookError(errors.New("refused"))
-	require.Error(t, plain)
-	assert.Equal(t, codes.InvalidArgument, status.Code(plain))
-	assert.Contains(t, plain.Error(), "refused")
-	assert.False(t, merr.IsMilvusError(plain))
-
-	// Retriable: the client should come back.
-	unavailable := merr.WrapErrServiceUnavailable("no writable node")
-	assert.ErrorIs(t, hookError(unavailable), merr.ErrServiceUnavailable)
-
-	// Permanent: the client never should.
-	unimplemented := merr.WrapErrServiceUnimplemented(errors.New("withheld"))
-	assert.ErrorIs(t, hookError(unimplemented), merr.ErrServiceUnimplemented)
-}
-
-// The interceptor is the path that error actually travels, so the
-// classification has to survive the whole way out, not just the helper.
-func TestInterceptorPropagatesAMilvusErrorFromBefore(t *testing.T) {
+// A refusal returned from Before reaches the client as InvalidArgument, not
+// as codes.Unknown: a bare error would be retried by the SDK forever, which is
+// what the note in hookError is about. A hook that needs the caller to see a
+// classification answers from Mock instead.
+func TestABeforeRefusalIsNotRetriableAtTheTransport(t *testing.T) {
 	// Consume the lazy plugin init first, or the GetHook inside the
 	// interceptor would run it and put the default hook back over this one.
 	hookutil.InitOnceHook()
@@ -246,5 +226,7 @@ func TestInterceptorPropagatesAMilvusErrorFromBefore(t *testing.T) {
 	_, err := UnaryServerHookInterceptor()(context.Background(), &req{},
 		&grpc.UnaryServerInfo{FullMethod: "insert"},
 		func(ctx context.Context, req interface{}) (interface{}, error) { return nil, nil })
-	assert.ErrorIs(t, err, merr.ErrServiceUnavailable)
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.False(t, merr.IsMilvusError(err))
 }
