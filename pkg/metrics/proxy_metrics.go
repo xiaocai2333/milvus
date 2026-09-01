@@ -500,17 +500,6 @@ var (
 			Name:      "scanned_total_mb",
 			Help:      "the scanned total megabytes",
 		}, []string{nodeIDLabelName, msgTypeLabelName, databaseLabelName, collectionName})
-
-	// ProxyQuotaAdmissionFailOpen records admission checks that admitted a
-	// request because the check itself failed, so the bypass is visible
-	// rather than silent.
-	ProxyQuotaAdmissionFailOpen = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: milvusNamespace,
-			Subsystem: typeutil.ProxyRole,
-			Name:      "quota_admission_fail_open_total",
-			Help:      "count of quota-admission calls that failed open due to a count RPC error",
-		}, []string{"resource", "rpc"})
 )
 
 // RegisterProxy registers Proxy metrics
@@ -583,7 +572,6 @@ func RegisterProxy(registry *prometheus.Registry) {
 
 	registry.MustRegister(ProxyScannedRemoteMB)
 	registry.MustRegister(ProxyScannedTotalMB)
-	registry.MustRegister(ProxyQuotaAdmissionFailOpen)
 	RegisterStreamingServiceClient(registry)
 	RegisterLoggingMetrics(registry)
 }
@@ -624,6 +612,7 @@ func proxyCollectionScopedMetrics() []partialMatchDeleter {
 		ProxySearchSparseNumNonZeros,
 		ProxyScannedRemoteMB,
 		ProxyScannedTotalMB,
+		ProxyResourceGroupSQLatency,
 	}
 }
 
