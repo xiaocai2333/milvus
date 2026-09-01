@@ -19,10 +19,7 @@ package extension
 import (
 	"context"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 )
 
 // ProxyConnections is the slice of the proxy's connection registry a
@@ -61,71 +58,6 @@ type ProxyConnections interface {
 	// registry - and for the window described on OnConnect.
 	Connected(identifier int64) bool
 }
-
-// DMLOp names the write path InterceptDML is consulted on. The constants
-// below are the complete set a seam may pass; each states the concrete type
-// of the req it arrives with, so an implementation can assert on it.
-type DMLOp string
-
-const (
-	// DMLInsert carries a *milvuspb.InsertRequest.
-	DMLInsert DMLOp = "Insert"
-	// DMLDelete carries a *milvuspb.DeleteRequest.
-	DMLDelete DMLOp = "Delete"
-	// DMLUpsert carries a *milvuspb.UpsertRequest.
-	DMLUpsert DMLOp = "Upsert"
-	// DMLFlush carries a *milvuspb.FlushRequest.
-	DMLFlush DMLOp = "Flush"
-	// DMLFlushAll carries a *milvuspb.FlushAllRequest.
-	DMLFlushAll DMLOp = "FlushAll"
-	// DMLImport carries a *internalpb.ImportRequest (pkg/proto/internalpb),
-	// NOT the public *milvuspb.ImportRequest: the public Import RPC converts
-	// its request and funnels into ImportV2, and the seam sits in ImportV2 so
-	// that both entry points are covered once. An implementation that asserts
-	// the public type gets nil.
-	DMLImport DMLOp = "Import"
-)
-
-// AdminOp names the administrative RPC InterceptAdminRPC is consulted on.
-// The constants below are the complete set a seam may pass; the value is the
-// RPC's name in the MilvusService.
-type AdminOp string
-
-const (
-	AdminGetReplicas      AdminOp = "GetReplicas"
-	AdminGetFlushState    AdminOp = "GetFlushState"
-	AdminGetFlushAllState AdminOp = "GetFlushAllState"
-
-	// The four below are RPC names, not secrets; gosec's G101 keys on the
-	// word "credential".
-	AdminCreateCredential AdminOp = "CreateCredential" //nolint:gosec
-	AdminUpdateCredential AdminOp = "UpdateCredential" //nolint:gosec
-	AdminDeleteCredential AdminOp = "DeleteCredential" //nolint:gosec
-	AdminListCredUsers    AdminOp = "ListCredUsers"    //nolint:gosec
-
-	AdminCreateRole         AdminOp = "CreateRole"
-	AdminDropRole           AdminOp = "DropRole"
-	AdminAlterRole          AdminOp = "AlterRole"
-	AdminOperateUserRole    AdminOp = "OperateUserRole"
-	AdminSelectRole         AdminOp = "SelectRole"
-	AdminSelectUser         AdminOp = "SelectUser"
-	AdminOperatePrivilege   AdminOp = "OperatePrivilege"
-	AdminOperatePrivilegeV2 AdminOp = "OperatePrivilegeV2"
-	AdminSelectGrant        AdminOp = "SelectGrant"
-	AdminBackupRBAC         AdminOp = "BackupRBAC"
-	AdminRestoreRBAC        AdminOp = "RestoreRBAC"
-
-	AdminCreatePrivilegeGroup  AdminOp = "CreatePrivilegeGroup"
-	AdminDropPrivilegeGroup    AdminOp = "DropPrivilegeGroup"
-	AdminListPrivilegeGroups   AdminOp = "ListPrivilegeGroups"
-	AdminOperatePrivilegeGroup AdminOp = "OperatePrivilegeGroup"
-
-	AdminReplicateMessage             AdminOp = "ReplicateMessage"
-	AdminUpdateReplicateConfiguration AdminOp = "UpdateReplicateConfiguration"
-	AdminGetReplicateConfiguration    AdminOp = "GetReplicateConfiguration"
-	AdminGetReplicateInfo             AdminOp = "GetReplicateInfo"
-	AdminCreateReplicateStream        AdminOp = "CreateReplicateStream"
-)
 
 // ProxyExtension is the proxy-side capability. NoopProxyExtension is the
 // native default and the Noop base under the package evolution policy:
@@ -200,124 +132,6 @@ const (
 // serviceable, an explicit load is not work to do. What each may replace, and
 // the one condition under which it must not, is on the method.
 type ProxyExtension interface {
-	// InterceptDML is consulted before a write reaches the write path - before
-	// the task is built and before the request is forwarded anywhere. It is
-	// NOT the first thing the handler does: the handler's trace span, its
-	// stats and the rate-limit interceptor may already have run, so a refused
-	// write can still appear in those. op names the write path and states
-	// the concrete type of req; ctx carries the caller's deadline and any
-	// request-scoped values.
-	//
-	// MAY REJECT: a non-nil error is the whole answer to the RPC and the
-	// write does not happen. nil falls through to the native write. There is
-	// no "handled" answer here: milvus cannot be told a write was performed
-	// elsewhere.
-	InterceptDML(ctx context.Context, op DMLOp, req proto.Message) error
-
-	// InterceptAdminRPC is consulted at the entry of the administrative RPCs
-	// a deployment form withholds from its tenants; op names the RPC.
-	//
-	// MAY REJECT: a non-nil error is the whole answer to the RPC. nil falls
-	// through to the native handler.
-	//
-	// The seam runs in the handler, which every listener shares, so an
-	// implementation that withholds an RPC from tenants while its control
-	// plane still manages accounts distinguishes the callers by provenance:
-	// ctx carries FromInternalDomain for requests that arrived on an
-	// internal-domain listener, and those are the control plane's.
-	InterceptAdminRPC(ctx context.Context, op AdminOp) error
-
-	// InterceptLoadCollection is consulted at the entry of LoadCollection,
-	// after the proxy's health check and before the load task is built.
-	//
-	// MAY REPLACE: handled == true is the whole answer to the RPC. No task is
-	// built, querycoord never hears of the request, and the collection is
-	// left exactly as it was; err is what the client is told, nil meaning
-	// success. A form that decides for itself when a collection becomes
-	// serviceable - one that loads it on the first query that needs it - has
-	// nothing for an explicit load to do, and letting the native load run as
-	// well would place replicas it did not ask for and does not track.
-	//
-	// MUST NOT REPLACE A REFRESH: a request with Refresh set is not a load.
-	// querycoord answers it from a branch of its own that re-pulls the target of
-	// a collection which must ALREADY be loaded, returning CollectionNotLoaded
-	// when it is not. That is meaningful whatever a form does with ordinary
-	// loads, because the data behind a collection can change under it, and it is
-	// the only way a client can ask for the re-read. Replacing it reports
-	// success for work nothing did. Return (false, nil) for it.
-	//
-	// (false, nil) falls through to the native load, unchanged. (false, err)
-	// is not a valid answer and is treated as (true, err).
-	InterceptLoadCollection(ctx context.Context, req *milvuspb.LoadCollectionRequest) (handled bool, err error)
-
-	// InterceptReleaseCollection is consulted at the entry of ReleaseCollection,
-	// after the proxy's health check and before the release task is built.
-	//
-	// MAY REPLACE: as InterceptLoadCollection; handled == true means nothing
-	// is released. A form that reclaims replicas on a schedule of its own -
-	// an idle timeout, or the retirement of whatever it loaded them for -
-	// would otherwise have an explicit release take away replicas its own
-	// bookkeeping still believes in, and on such a form the client is not the
-	// owner of that decision.
-	//
-	// (false, nil) falls through to the native release, unchanged.
-	InterceptReleaseCollection(ctx context.Context, req *milvuspb.ReleaseCollectionRequest) (handled bool, err error)
-
-	// InterceptLoadPartitions is consulted at the entry of LoadPartitions, after
-	// the proxy's health check and before the load task is built.
-	//
-	// MAY REPLACE: as InterceptLoadCollection, at partition granularity.
-	//
-	// MUST NOT REPLACE A REFRESH: as InterceptLoadCollection. The two RPCs carry
-	// the same refresh mode and querycoord answers both from the same re-pull,
-	// so a form that lets one through and swallows the other has no contract at
-	// all - it has whichever of the two its clients happened to call.
-	//
-	// (false, nil) falls through to the native load, unchanged.
-	InterceptLoadPartitions(ctx context.Context, req *milvuspb.LoadPartitionsRequest) (handled bool, err error)
-
-	// InterceptReleasePartitions is consulted at the entry of ReleasePartitions,
-	// after the proxy's health check and before the release task is built.
-	//
-	// MAY REPLACE: as InterceptReleaseCollection, at partition granularity.
-	//
-	// (false, nil) falls through to the native release, unchanged.
-	InterceptReleasePartitions(ctx context.Context, req *milvuspb.ReleasePartitionsRequest) (handled bool, err error)
-
-	// InterceptGetLoadState is consulted at the entry of GetLoadState, after the
-	// proxy's health check and before the collection is looked up.
-	//
-	// MAY REPLACE: a non-nil response is returned to the client as the whole
-	// answer, and milvus reads nothing out of it; a non-nil error is the whole
-	// answer too, reported as a failed RPC. A form that admits a query by
-	// making its collection serviceable on the way in has no half-loaded
-	// state a client could act on: by the time a query can observe the
-	// collection it is loaded, and the native answer would describe replicas
-	// that form manages on its own schedule.
-	//
-	// An implementation that returns a response owns all of it. A Status it
-	// leaves unset is the zero status, which is success - so a form that
-	// means to report a failure returns an error instead, or sets the status.
-	//
-	// (nil, nil) falls through to the native lookup, unchanged. When both
-	// returns are non-nil the error wins and the response is ignored, the
-	// same precedence the load group gives (false, err).
-	InterceptGetLoadState(ctx context.Context, req *milvuspb.GetLoadStateRequest) (*milvuspb.GetLoadStateResponse, error)
-
-	// InterceptGetLoadingProgress is consulted at the entry of
-	// GetLoadingProgress, after the proxy's health check and before the
-	// collection is looked up.
-	//
-	// MAY REPLACE: as InterceptGetLoadState, with the same ownership of the
-	// whole response and the same precedence of error over response.
-	//
-	// The response carries two numbers, and a form that replaces it answers for
-	// both: RefreshProgress reports how far along the re-pull a Refresh asked
-	// for has got, and a canned response reporting only Progress leaves it at
-	// zero - which a client waiting on a refresh reads as "not started".
-	//
-	// (nil, nil) falls through to the native lookup, unchanged.
-	InterceptGetLoadingProgress(ctx context.Context, req *milvuspb.GetLoadingProgressRequest) (*milvuspb.GetLoadingProgressResponse, error)
 
 	// OnConnect runs during the Connect handshake, before the connection is
 	// registered, and binds it to whatever the client declared about itself.
@@ -456,36 +270,8 @@ type NoopProxyExtension struct{}
 
 var _ ProxyExtension = NoopProxyExtension{}
 
-func (NoopProxyExtension) InterceptDML(context.Context, DMLOp, proto.Message) error { return nil }
-
-func (NoopProxyExtension) InterceptAdminRPC(context.Context, AdminOp) error { return nil }
-
 // The load-semantics defaults all answer "fall through": a stock binary loads,
 // releases and reports on collections exactly as the community build does.
-
-func (NoopProxyExtension) InterceptLoadCollection(context.Context, *milvuspb.LoadCollectionRequest) (bool, error) {
-	return false, nil
-}
-
-func (NoopProxyExtension) InterceptReleaseCollection(context.Context, *milvuspb.ReleaseCollectionRequest) (bool, error) {
-	return false, nil
-}
-
-func (NoopProxyExtension) InterceptLoadPartitions(context.Context, *milvuspb.LoadPartitionsRequest) (bool, error) {
-	return false, nil
-}
-
-func (NoopProxyExtension) InterceptReleasePartitions(context.Context, *milvuspb.ReleasePartitionsRequest) (bool, error) {
-	return false, nil
-}
-
-func (NoopProxyExtension) InterceptGetLoadState(context.Context, *milvuspb.GetLoadStateRequest) (*milvuspb.GetLoadStateResponse, error) {
-	return nil, nil
-}
-
-func (NoopProxyExtension) InterceptGetLoadingProgress(context.Context, *milvuspb.GetLoadingProgressRequest) (*milvuspb.GetLoadingProgressResponse, error) {
-	return nil, nil
-}
 
 func (NoopProxyExtension) OnConnect(context.Context, int64, *commonpb.ClientInfo) error { return nil }
 

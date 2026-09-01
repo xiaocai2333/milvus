@@ -127,7 +127,7 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 }
 
 func authenticate(c *gin.Context) {
-	if !proxy.ExternalListenerRequiresAPIKey() {
+	if !proxy.Params.CommonCfg.RequireAPIKey.GetAsBool() {
 		username, password, ok := httpserver.ParseUsernamePassword(c)
 		if ok {
 			if proxy.PasswordVerify(c, username, password) {
@@ -140,7 +140,7 @@ func authenticate(c *gin.Context) {
 	}
 	rawToken := httpserver.GetAuthorization(c)
 	if rawToken != "" && !strings.Contains(rawToken, util.CredentialSeparator) {
-		user, err := proxy.VerifyAPIKey(c.Request.Context(), rawToken)
+		user, err := proxy.VerifyAPIKey(rawToken)
 		if err == nil {
 			c.Set(httpserver.ContextUsername, user)
 			c.Set(httpserver.ContextToken, rawToken)

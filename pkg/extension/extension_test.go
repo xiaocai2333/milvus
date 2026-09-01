@@ -46,7 +46,6 @@ type stubProxyExtension struct{ NoopProxyExtension }
 // fails a test instead of going unnoticed.
 var allCapabilityIDs = []CapabilityID{
 	CapProxyExtension,
-	CapAPIKey,
 	CapRBACBootstrap,
 	CapAdmission,
 	CapCoordinatorEngine,
@@ -54,6 +53,7 @@ var allCapabilityIDs = []CapabilityID{
 	CapIndexDrain,
 	CapLoadPlacementScope,
 	CapInternalSurfaces,
+	CapHook,
 }
 
 // fullCapabilities supplies every capability with a non-nil implementation,
@@ -61,7 +61,6 @@ var allCapabilityIDs = []CapabilityID{
 func fullCapabilities() Capabilities {
 	return Capabilities{
 		ProxyExt:          stubProxyExtension{},
-		APIKey:            &fakeVerifier{},
 		RBACBootstrap:     &fakeBootstrapper{},
 		Admission:         &fakeAdmissionChecker{},
 		CoordinatorEngine: &fakeCoordinatorEngine{},
@@ -69,6 +68,7 @@ func fullCapabilities() Capabilities {
 		IndexDrain:        stubIndexDrainer{},
 		LoadPlacement:     stubLoadPlacementScope{},
 		InternalSurfaces:  stubInternalSurfaces{},
+		Hook:              stubHook{},
 	}
 }
 
@@ -226,3 +226,21 @@ func (*typedNilDrainer) AfterDropIndex(context.Context, *indexpb.DropIndexReques
 func (*typedNilDrainer) AbortDropIndex(context.Context, *indexpb.DropIndexRequest)      {}
 func (*typedNilDrainer) AfterCreateIndex(context.Context, *indexpb.CreateIndexRequest)  {}
 func (*typedNilDrainer) CollectionDraining(context.Context, int64) bool                 { return false }
+
+// stubHook is a hook.Hook that answers nothing, which is all the registry
+// tests need: they only ever ask whether the field is filled in.
+type stubHook struct{}
+
+func (stubHook) Init(map[string]string) error { return nil }
+func (stubHook) Mock(ctx context.Context, req interface{}, fullMethod string) (bool, interface{}, error) {
+	return false, nil, nil
+}
+
+func (stubHook) Before(ctx context.Context, req interface{}, fullMethod string) (context.Context, error) {
+	return ctx, nil
+}
+func (stubHook) After(ctx context.Context, result interface{}, err error, fullMethod string) error {
+	return nil
+}
+func (stubHook) Release()                            {}
+func (stubHook) VerifyAPIKey(string) (string, error) { return "", nil }

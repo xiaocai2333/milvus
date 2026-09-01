@@ -59,22 +59,24 @@
 //
 // # Relation to hookutil
 //
-// milvus's older extension point (internal/util/hookutil) loads a .so at
-// start-up and covers request observation and API-key verification for the
-// dedicated cloud form. The two coexist deliberately: hookutil stays the
-// surface for binary plug-ins built out of tree, while this package is for
-// forms compiled into the binary, whose capabilities need typed interfaces and
-// places hookutil never reaches (coordinator internals, listeners, load
-// semantics). A capability is added here, never to hookutil; hookutil is
-// frozen at what its existing users need. Where both could answer the same
-// question - API-key verification - the seam consults this package first and
-// falls back to hookutil only when the capability is nil.
+// milvus's older extension point (internal/util/hookutil) covers the request
+// path: Mock, Before and After are consulted for every unary RPC, and
+// VerifyAPIKey answers the API key. That is not duplicated here. A form that
+// needs any of it fills in the Hook field and gets milvus's own mechanism,
+// unchanged; hookutil's only gap was that its sole installation path was
+// proxy.soPath, which dlopens a file a compiled-in form does not have.
+//
+// What this package adds is the places hookutil never reaches - coordinator
+// internals, listeners, load semantics, resource groups - and the typed
+// interfaces they need. hookutil itself is frozen at what its existing users
+// need: a capability is added here, never to it.
 package extension
 
 import (
 	"reflect"
 	"sync/atomic"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/hook"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -84,9 +86,6 @@ type CapabilityID string
 const (
 	// CapProxyExtension is the proxy-side behavior takeover.
 	CapProxyExtension CapabilityID = "proxy_extension"
-
-	// CapAPIKey is API key verification.
-	CapAPIKey CapabilityID = "api_key"
 
 	// CapRBACBootstrap is account and role seeding at rootcoord startup.
 	CapRBACBootstrap CapabilityID = "rbac_bootstrap"
@@ -116,6 +115,10 @@ const (
 	// CapInternalSurfaces is the unauthenticated internal-domain listeners a
 	// form serves its control plane on.
 	CapInternalSurfaces CapabilityID = "internal_surfaces"
+
+	// CapHook is milvus's own request hook, compiled into the binary rather
+	// than loaded from proxy.soPath.
+	CapHook CapabilityID = "hook"
 )
 
 // Capabilities is the table a Provider fills in. A nil field means the
@@ -129,7 +132,6 @@ const (
 // unrequirable.
 type Capabilities struct {
 	ProxyExt          ProxyExtension
-	APIKey            APIKeyVerifier
 	RBACBootstrap     RBACBootstrapper
 	Admission         AdmissionChecker
 	CoordinatorEngine CoordinatorEngine
@@ -137,6 +139,24 @@ type Capabilities struct {
 	IndexDrain        IndexDrainer
 	LoadPlacement     LoadPlacementScope
 	InternalSurfaces  InternalSurfaces
+
+	// Hook is milvus's own request hook (milvus-proto go-api/v3/hook), the
+	// interface whose Mock, Before and After the proxy's unary interceptor
+	// already consults for every RPC and whose VerifyAPIKey already answers
+	// the API key.
+	//
+	// It is here rather than as another interface of this package's own
+	// because it is not this package's to define: the interception a form
+	// needs on the request path is the interception milvus already performs,
+	// and the only thing that was missing was a way to install one without a
+	// .so. Filling this field is that way. hookutil installs it at start-up,
+	// and refuses to when proxy.soPath also names a plug-in, because two
+	// authorities for the same question is a deployment mistake rather than
+	// something to merge.
+	//
+	// The interface is milvus-proto's and FROZEN from this package's side. A
+	// need it cannot express becomes a new field here, not a method on it.
+	Hook hook.Hook
 }
 
 // capabilityEntry is one row of the table in a form the registry can walk:
@@ -153,7 +173,6 @@ type capabilityEntry struct {
 func (c Capabilities) entries() []capabilityEntry {
 	return []capabilityEntry{
 		{CapProxyExtension, c.ProxyExt},
-		{CapAPIKey, c.APIKey},
 		{CapRBACBootstrap, c.RBACBootstrap},
 		{CapAdmission, c.Admission},
 		{CapCoordinatorEngine, c.CoordinatorEngine},
@@ -161,6 +180,7 @@ func (c Capabilities) entries() []capabilityEntry {
 		{CapIndexDrain, c.IndexDrain},
 		{CapLoadPlacementScope, c.LoadPlacement},
 		{CapInternalSurfaces, c.InternalSurfaces},
+		{CapHook, c.Hook},
 	}
 }
 

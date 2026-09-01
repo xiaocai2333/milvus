@@ -32,20 +32,8 @@ import (
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/pkg/v3/extension"
-	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
-
-// dmlBlockingExtension records the operation names it sees and refuses every write.
-type dmlBlockingExtension struct {
-	extension.NoopProxyExtension
-	seen []string
-}
-
-func (d *dmlBlockingExtension) InterceptDML(ctx context.Context, op extension.DMLOp, req proto.Message) error {
-	d.seen = append(d.seen, string(op))
-	return merr.WrapErrServiceInternal("write is not served")
-}
 
 type testProvider struct{ caps extension.Capabilities }
 
@@ -53,177 +41,6 @@ func (testProvider) Name() string                           { return "test" }
 func (testProvider) Requires() []extension.CapabilityID     { return nil }
 func (p testProvider) Capabilities() extension.Capabilities { return p.caps }
 
-func installBlockingExtension(t *testing.T) *dmlBlockingExtension {
-	t.Helper()
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	ext := &dmlBlockingExtension{}
-	assert.NoError(t, extension.SetProvider(testProvider{
-		caps: extension.Capabilities{ProxyExt: ext},
-	}))
-	return ext
-}
-
-func TestProxyExtensionFallsBackToNoop(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	assert.Nil(t, interceptDML(context.Background(), "Insert", &milvuspb.InsertRequest{}), "the seam must be transparent when no provider is installed")
-}
-
-func TestInterceptDMLConsultsInstalledExtension(t *testing.T) {
-	ext := installBlockingExtension(t)
-
-	st := interceptDML(context.Background(), "Insert", &milvuspb.InsertRequest{})
-	assert.NotNil(t, st, "the seam must surface the status when the extension refuses the write")
-	assert.Equal(t, []string{"Insert"}, ext.seen, "the seam must pass the operation name through unchanged")
-}
-
-// Every write-path RPC consults the seam, not just Insert. Flush and FlushAll
-// are in the table although they move no rows: they seal segments and force
-// them out, which only means something on an instance that accepted the writes
-// behind them. Each case pins its own call site, so a refactor that drops one
-// handler's call fails that handler's case by name.
-func TestEveryWritePathIsGuardedByTheDMLSeam(t *testing.T) {
-	status := func(s *commonpb.Status) *commonpb.Status { return s }
-	cases := []struct {
-		op   string
-		call func(node *Proxy, ctx context.Context) *commonpb.Status
-	}{
-		{"Insert", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.Insert(ctx, &milvuspb.InsertRequest{DbName: "db", CollectionName: "coll"})
-			assert.NoError(t, err)
-			return status(resp.GetStatus())
-		}},
-		{"Delete", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.Delete(ctx, &milvuspb.DeleteRequest{DbName: "db", CollectionName: "coll"})
-			assert.NoError(t, err)
-			return status(resp.GetStatus())
-		}},
-		{"Upsert", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.Upsert(ctx, &milvuspb.UpsertRequest{DbName: "db", CollectionName: "coll"})
-			assert.NoError(t, err)
-			return status(resp.GetStatus())
-		}},
-		{"Flush", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.Flush(ctx, &milvuspb.FlushRequest{DbName: "db", CollectionNames: []string{"coll"}})
-			assert.NoError(t, err)
-			return status(resp.GetStatus())
-		}},
-		{"FlushAll", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.FlushAll(ctx, &milvuspb.FlushAllRequest{})
-			assert.NoError(t, err)
-			return status(resp.GetStatus())
-		}},
-		{"Import", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.ImportV2(ctx, &internalpb.ImportRequest{DbName: "db", CollectionName: "coll"})
-			assert.NoError(t, err)
-			return status(resp.GetStatus())
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.op, func(t *testing.T) {
-			ext := installBlockingExtension(t)
-			node := &Proxy{}
-			node.UpdateStateCode(commonpb.StateCode_Healthy)
-
-			st := tc.call(node, context.Background())
-
-			assert.NotNil(t, st)
-			assert.NotEqual(t, int32(0), st.GetCode(), "a refused write must not return a success status")
-			assert.Equal(t, []string{tc.op}, ext.seen,
-				"%s must go through the DML seam; this fails if a refactor moves the call site", tc.op)
-		})
-	}
-}
-
-type stubVerifier struct {
-	user     string
-	err      error
-	external bool
-}
-
-func (s stubVerifier) Verify(context.Context, string) (string, error) { return s.user, s.err }
-func (s stubVerifier) RequireAPIKeyOnExternalListener() bool          { return s.external }
-
-func TestVerifyAPIKeyUsesInstalledVerifier(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	assert.NoError(t, extension.SetProvider(testProvider{
-		caps: extension.Capabilities{APIKey: stubVerifier{user: "alice"}},
-	}))
-
-	user, err := VerifyAPIKey(context.Background(), "tok")
-	assert.NoError(t, err)
-	assert.Equal(t, "alice", user, "the installed verifier must decide the username")
-}
-
-func TestVerifyAPIKeyReportsVerifierRejection(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	assert.NoError(t, extension.SetProvider(testProvider{
-		caps: extension.Capabilities{APIKey: stubVerifier{err: errors.New("nope")}},
-	}))
-
-	_, err := VerifyAPIKey(context.Background(), "tok")
-	assert.Error(t, err, "a rejected token must not authenticate")
-}
-
-func TestVerifyAPIKeyFallsBackToNativeHookWithNoProviderInstalled(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	// InitOnceHook must run before SetMockAPIHook: its first run unconditionally
-	// (re)installs the default hook, which would otherwise clobber the mock
-	// installed below.
-	hookutil.InitOnceHook()
-	hookutil.SetMockAPIHook("native-user", nil)
-	t.Cleanup(func() { hookutil.SetMockAPIHook("", nil) })
-
-	user, err := VerifyAPIKey(context.Background(), "tok")
-	assert.NoError(t, err)
-	assert.Equal(t, "native-user", user,
-		"with no verifier installed VerifyAPIKey must still reach the native hook path, so a stock binary is unchanged")
-}
-
-func TestVerifyAPIKeyRejectsEmptyUsernameFromInstalledVerifier(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	assert.NoError(t, extension.SetProvider(testProvider{
-		caps: extension.Capabilities{APIKey: stubVerifier{user: ""}},
-	}))
-
-	_, err := VerifyAPIKey(context.Background(), "tok")
-	assert.Error(t, err, "an installed verifier that returns no username must not authenticate the request")
-}
-
-func TestExternalListenerPolicyDefaultsToOpen(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	assert.False(t, ExternalListenerRequiresAPIKey(),
-		"with no verifier installed the external listener keeps accepting passwords")
-}
-
-func TestExternalListenerPolicyFollowsVerifier(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	assert.NoError(t, extension.SetProvider(testProvider{
-		caps: extension.Capabilities{APIKey: stubVerifier{external: true}},
-	}))
-	assert.True(t, ExternalListenerRequiresAPIKey())
-}
-
-// recordingAdmissionChecker records how many times each check method ran and
-// which CoordClient it received, and returns err from both. The call counts
-// double as the zero-call proof for the idempotent-retry short-circuit: a
-// call site that skips admission for an already-existing target must never
-// move these off zero.
 type recordingAdmissionChecker struct {
 	collectionCalls int
 	databaseCalls   int
@@ -510,38 +327,6 @@ func TestCheckCreateDatabaseAdmissionPassesCoordThroughAtPreExecute(t *testing.T
 	}
 }
 
-// adminBlockingExtension records the operation names it sees and refuses every
-// administrative RPC.
-type adminBlockingExtension struct {
-	extension.NoopProxyExtension
-	seen []string
-}
-
-func (d *adminBlockingExtension) InterceptAdminRPC(ctx context.Context, op extension.AdminOp) error {
-	d.seen = append(d.seen, string(op))
-	return merr.ErrServiceUnimplemented
-}
-
-func installAdminBlockingExtension(t *testing.T) *adminBlockingExtension {
-	t.Helper()
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-
-	ext := &adminBlockingExtension{}
-	assert.NoError(t, extension.SetProvider(testProvider{
-		caps: extension.Capabilities{ProxyExt: ext},
-	}))
-	return ext
-}
-
-func TestInterceptAdminRPCIsTransparentWithNoProvider(t *testing.T) {
-	extension.ResetForTest()
-	t.Cleanup(extension.ResetForTest)
-	assert.Nil(t, interceptAdminRPC(context.Background(), "CreateRole"))
-}
-
-// fakeReplicateStream is the minimum CreateReplicateStream server: the seam
-// only reads the context off it.
 type fakeReplicateStream struct {
 	grpc.ServerStream
 	ctx context.Context
@@ -551,162 +336,32 @@ func (f fakeReplicateStream) Context() context.Context                  { return
 func (f fakeReplicateStream) Send(*milvuspb.ReplicateResponse) error    { return nil }
 func (f fakeReplicateStream) Recv() (*milvuspb.ReplicateRequest, error) { return nil, nil }
 
-// Every withheld administrative RPC consults the seam at its entry - before
-// health checks, argument validation, anything - so the refusal is uniform
-// across the whole table. Each case pins its own call site by name.
-func TestEveryAdminRPCIsGuardedByTheSeam(t *testing.T) {
-	cases := []struct {
-		op   string
-		call func(node *Proxy, ctx context.Context) *commonpb.Status
-	}{
-		{"GetReplicas", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.GetReplicas(ctx, &milvuspb.GetReplicasRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"GetFlushState", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"GetFlushAllState", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.GetFlushAllState(ctx, &milvuspb.GetFlushAllStateRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"CreateCredential", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.CreateCredential(ctx, &milvuspb.CreateCredentialRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"UpdateCredential", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.UpdateCredential(ctx, &milvuspb.UpdateCredentialRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"DeleteCredential", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.DeleteCredential(ctx, &milvuspb.DeleteCredentialRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"ListCredUsers", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.ListCredUsers(ctx, &milvuspb.ListCredUsersRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"CreateRole", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.CreateRole(ctx, &milvuspb.CreateRoleRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"DropRole", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.DropRole(ctx, &milvuspb.DropRoleRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"AlterRole", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.AlterRole(ctx, &milvuspb.AlterRoleRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"OperateUserRole", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.OperateUserRole(ctx, &milvuspb.OperateUserRoleRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"SelectRole", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.SelectRole(ctx, &milvuspb.SelectRoleRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"SelectUser", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.SelectUser(ctx, &milvuspb.SelectUserRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"OperatePrivilege", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.OperatePrivilege(ctx, &milvuspb.OperatePrivilegeRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"OperatePrivilegeV2", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.OperatePrivilegeV2(ctx, &milvuspb.OperatePrivilegeV2Request{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"SelectGrant", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.SelectGrant(ctx, &milvuspb.SelectGrantRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"BackupRBAC", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.BackupRBAC(ctx, &milvuspb.BackupRBACMetaRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"RestoreRBAC", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.RestoreRBAC(ctx, &milvuspb.RestoreRBACMetaRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"CreatePrivilegeGroup", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.CreatePrivilegeGroup(ctx, &milvuspb.CreatePrivilegeGroupRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"DropPrivilegeGroup", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.DropPrivilegeGroup(ctx, &milvuspb.DropPrivilegeGroupRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"ListPrivilegeGroups", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.ListPrivilegeGroups(ctx, &milvuspb.ListPrivilegeGroupsRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"OperatePrivilegeGroup", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.OperatePrivilegeGroup(ctx, &milvuspb.OperatePrivilegeGroupRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"ReplicateMessage", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.ReplicateMessage(ctx, &milvuspb.ReplicateMessageRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"UpdateReplicateConfiguration", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			st, err := node.UpdateReplicateConfiguration(ctx, &milvuspb.UpdateReplicateConfigurationRequest{})
-			assert.NoError(t, err)
-			return st
-		}},
-		{"GetReplicateConfiguration", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			resp, err := node.GetReplicateConfiguration(ctx, &milvuspb.GetReplicateConfigurationRequest{})
-			assert.NoError(t, err)
-			return resp.GetStatus()
-		}},
-		{"GetReplicateInfo", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			_, err := node.GetReplicateInfo(ctx, &milvuspb.GetReplicateInfoRequest{})
-			assert.Error(t, err, "GetReplicateInfoResponse carries no status; the refusal must be the call error")
-			return merr.Status(err)
-		}},
-		{"CreateReplicateStream", func(node *Proxy, ctx context.Context) *commonpb.Status {
-			err := node.CreateReplicateStream(fakeReplicateStream{ctx: ctx})
-			assert.Error(t, err)
-			return merr.Status(err)
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.op, func(t *testing.T) {
-			ext := installAdminBlockingExtension(t)
-			node := &Proxy{}
-			node.UpdateStateCode(commonpb.StateCode_Healthy)
+// CreateReplicateStream is the one RPC that consults the hook by hand, because
+// the interceptor that consults it for every other RPC is a unary one and an
+// interceptor chain binds to one of gRPC's two call kinds. That hand-written
+// call is exactly the kind a refactor can drop without anything failing, so it
+// is pinned here.
+func TestCreateReplicateStreamConsultsTheHook(t *testing.T) {
+	hookutil.InitOnceHook()
+	hookutil.SetTestHook(refusingStreamHook{})
+	defer hookutil.SetTestHook(hookutil.DefaultHook{})
 
-			st := tc.call(node, context.Background())
+	node := &Proxy{}
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
-			assert.NotNil(t, st)
-			assert.NotEqual(t, int32(0), st.GetCode(), "a withheld RPC must not return a success status")
-			assert.Equal(t, []string{tc.op}, ext.seen,
-				"%s must go through the admin seam; this fails if a refactor moves the call site", tc.op)
-		})
+	err := node.CreateReplicateStream(fakeReplicateStream{ctx: context.Background()})
+	assert.ErrorIs(t, err, merr.ErrServiceUnimplemented)
+}
+
+// refusingStreamHook withholds only the replicate stream, so the test cannot
+// pass by the RPC failing for some unrelated reason.
+type refusingStreamHook struct {
+	hookutil.DefaultHook
+}
+
+func (refusingStreamHook) Before(ctx context.Context, req interface{}, fullMethod string) (context.Context, error) {
+	if fullMethod == milvuspb.MilvusService_CreateReplicateStream_FullMethodName {
+		return ctx, merr.ErrServiceUnimplemented
 	}
+	return ctx, nil
 }

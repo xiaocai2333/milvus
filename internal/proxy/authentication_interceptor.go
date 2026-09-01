@@ -114,7 +114,7 @@ func AuthenticationInterceptorWithMetaCache(getMetaCache func() Cache) grpc_auth
 				return nil, status.Error(codes.Unauthenticated, "invalid token format")
 			}
 			if !strings.Contains(rawToken, util.CredentialSeparator) {
-				user, err := VerifyAPIKey(ctx, rawToken)
+				user, err := VerifyAPIKey(rawToken)
 				if err != nil {
 					mlog.Warn(ctx, "fail to verify apikey", mlog.Err(err))
 					return nil, status.Error(codes.Unauthenticated, "auth check failure, please check api key is correct")
@@ -127,7 +127,7 @@ func AuthenticationInterceptorWithMetaCache(getMetaCache func() Cache) grpc_auth
 			} else {
 				// Extension seam, see extension_seam.go: false with no verifier
 				// installed, so the native username and password path applies.
-				if ExternalListenerRequiresAPIKey() {
+				if Params.CommonCfg.RequireAPIKey.GetAsBool() {
 					mlog.Warn(ctx, "rejecting username and password authentication because the installed verifier requires api keys")
 					return nil, status.Error(codes.Unauthenticated, "auth check failure, please check username and password are correct")
 				}

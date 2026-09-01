@@ -19,8 +19,6 @@ package proxy
 import (
 	"context"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/proxy/connection"
@@ -36,34 +34,6 @@ import (
 // provider installed every seam resolves to the inert default, so a stock
 // binary behaves exactly as the community build.
 
-// interceptDML consults the extension at the entry of a write path. A non-nil
-// error rejects the write and is the whole answer to the RPC. Nil returns
-// directly rather than through the Noop fallback, matching every other
-// hot-path seam in this file: with no provider this is one pointer load and
-// one nil comparison, no interface dispatch.
-func interceptDML(ctx context.Context, op extension.DMLOp, req proto.Message) error {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return nil
-	}
-	return ext.InterceptDML(ctx, op, req)
-}
-
-// interceptAdminRPC consults the extension at the entry of the administrative
-// RPCs a deployment form may withhold from tenants (credentials, RBAC,
-// privilege groups, replication, flush/replica introspection). It runs before
-// anything else in the handler - a withheld RPC has no health or argument
-// semantics worth computing - and a non-nil status is the whole answer. The
-// handler is shared by every listener; an implementation that must let its
-// control plane through reads the internal-domain mark off ctx.
-func interceptAdminRPC(ctx context.Context, op extension.AdminOp) error {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return nil
-	}
-	return ext.InterceptAdminRPC(ctx, op)
-}
-
 // The load-semantics seams below sit at the entry of the six RPCs that decide
 // whether a collection is serviceable, each after its handler's own health
 // check and before it builds anything. handled == true (or a non-nil response)
@@ -76,64 +46,6 @@ func interceptAdminRPC(ctx context.Context, op extension.AdminOp) error {
 // therefore one atomic load and one nil comparison - no method call, no request
 // touched, no allocation - and the handler continues into the native path it
 // would have run without the seam at all.
-
-// interceptLoadCollection consults the extension before a collection is loaded.
-func interceptLoadCollection(ctx context.Context, req *milvuspb.LoadCollectionRequest) (handled bool, err error) {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return false, nil
-	}
-	return ext.InterceptLoadCollection(ctx, req)
-}
-
-// interceptReleaseCollection consults the extension before a collection is
-// released.
-func interceptReleaseCollection(ctx context.Context, req *milvuspb.ReleaseCollectionRequest) (handled bool, err error) {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return false, nil
-	}
-	return ext.InterceptReleaseCollection(ctx, req)
-}
-
-// interceptLoadPartitions consults the extension before partitions are loaded.
-func interceptLoadPartitions(ctx context.Context, req *milvuspb.LoadPartitionsRequest) (handled bool, err error) {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return false, nil
-	}
-	return ext.InterceptLoadPartitions(ctx, req)
-}
-
-// interceptReleasePartitions consults the extension before partitions are
-// released.
-func interceptReleasePartitions(ctx context.Context, req *milvuspb.ReleasePartitionsRequest) (handled bool, err error) {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return false, nil
-	}
-	return ext.InterceptReleasePartitions(ctx, req)
-}
-
-// interceptGetLoadState consults the extension before the load state of a
-// collection is read.
-func interceptGetLoadState(ctx context.Context, req *milvuspb.GetLoadStateRequest) (*milvuspb.GetLoadStateResponse, error) {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return nil, nil
-	}
-	return ext.InterceptGetLoadState(ctx, req)
-}
-
-// interceptGetLoadingProgress consults the extension before the loading
-// progress of a collection is read.
-func interceptGetLoadingProgress(ctx context.Context, req *milvuspb.GetLoadingProgressRequest) (*milvuspb.GetLoadingProgressResponse, error) {
-	ext := extension.Caps().ProxyExt
-	if ext == nil {
-		return nil, nil
-	}
-	return ext.InterceptGetLoadingProgress(ctx, req)
-}
 
 // The request-path seams below resolve extension.Caps().ProxyExt themselves and
 // return early on nil rather than going through proxyExtension() above. The
@@ -294,22 +206,6 @@ func observeResourceGroupSQLatency(ctx context.Context, queryType, dbName, colle
 		collectionName,
 		resourceGroup,
 	).Observe(float64(latencyMs))
-}
-
-// apiKeyVerifier returns the installed API key verifier, or nil when none is
-// installed and the native token path applies.
-func apiKeyVerifier() extension.APIKeyVerifier {
-	return extension.Caps().APIKey
-}
-
-// ExternalListenerRequiresAPIKey reports whether the external listener must
-// refuse username and password authentication. False with no verifier
-// installed, which is milvus's own behavior.
-func ExternalListenerRequiresAPIKey() bool {
-	if v := apiKeyVerifier(); v != nil {
-		return v.RequireAPIKeyOnExternalListener()
-	}
-	return false
 }
 
 // mixCoordAdmissionClient adapts types.MixCoordClient to extension.CoordClient.
