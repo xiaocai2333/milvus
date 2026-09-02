@@ -117,11 +117,7 @@ func TestInstalledCoordinatorEngineIsReachableThroughCaps(t *testing.T) {
 	// nothing here has to be kept in step with it. A nil carries the one
 	// property this test is about - that whatever milvus passes arrives
 	// unchanged - and the extras, which ARE narrow, are checked below.
-	extras := fakeExtras{pct: -1, readiness: ShardLeaderReadiness{
-		Reason:        ShardLeadersReasonShardsWithoutLeader,
-		TotalShards:   2,
-		UnreadyShards: []string{"coll-dmc1"},
-	}}
+	extras := fakeExtras{pct: -1}
 	assert.NoError(t, got.Start(ctx, nil, extras))
 	assert.Equal(t, "coordinator", engine.seenCtx.Value(ctxKey{}),
 		"the context must reach the implementation unchanged")
@@ -132,31 +128,16 @@ func TestInstalledCoordinatorEngineIsReachableThroughCaps(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int32(-1), pct,
 		"-1 must survive the interface: it means no replica in this resource group, which is not 0")
-
-	readiness, err := engine.seenExtras.GetShardLeadersByRG(ctx, 1, "rg-a")
-	assert.NoError(t, err)
-	assert.False(t, readiness.Ready,
-		"a not-ready verdict must survive the interface rather than degrading to the zero value of a bool nobody set")
-	assert.Equal(t, ShardLeadersReasonShardsWithoutLeader, readiness.Reason,
-		"the reason a resource group is not ready must survive the interface, or the caller can only log that it is not")
-	assert.Equal(t, 2, readiness.TotalShards)
-	assert.Equal(t, []string{"coll-dmc1"}, readiness.UnreadyShards,
-		"the shards that are missing a leader must survive the interface")
 }
 
 // fakeExtras is the narrow half of the coordinator view - the three answers
 // that have no RPC - which is small enough to be worth faking.
 type fakeExtras struct {
-	pct       int32
-	readiness ShardLeaderReadiness
+	pct int32
 }
 
 func (f fakeExtras) GetReplicaLoadPercentByRG(context.Context, int64, string) (int32, error) {
 	return f.pct, nil
-}
-
-func (f fakeExtras) GetShardLeadersByRG(context.Context, int64, string) (ShardLeaderReadiness, error) {
-	return f.readiness, nil
 }
 
 func (fakeExtras) InvalidateShardLeaderCache(context.Context, int64) error { return nil }
@@ -191,24 +172,4 @@ func TestNoopCoordinatorEngineIsInert(t *testing.T) {
 	assert.Empty(t, reg.names, "the inert engine must register no service")
 	assert.NoError(t, e.Start(context.Background(), nil, fakeExtras{}))
 	assert.NoError(t, e.Stop())
-}
-
-// Every reason constant must be distinct: callers compare them, and two
-// outcomes sharing a string would be indistinguishable in a log line.
-func TestShardLeadersReasonsAreDistinct(t *testing.T) {
-	reasons := []string{
-		ShardLeadersReasonCoordinatorNotReady,
-		ShardLeadersReasonResourceGroupNotFound,
-		ShardLeadersReasonNoReplicaInResourceGroup,
-		ShardLeadersReasonNoReplica,
-		ShardLeadersReasonCollectionNotLoaded,
-		ShardLeadersReasonNoChannelTarget,
-		ShardLeadersReasonShardsWithoutLeader,
-	}
-	seen := map[string]bool{}
-	for _, r := range reasons {
-		assert.NotEmpty(t, r)
-		assert.False(t, seen[r], "duplicate reason %q", r)
-		seen[r] = true
-	}
 }

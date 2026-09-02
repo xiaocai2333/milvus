@@ -23,7 +23,7 @@ import (
 // nil, so any coordinator method the seam touches other than the ones defined
 // here panics instead of quietly returning a zero value.
 type engineTestCoord struct {
-	shardLeaderReadinessOnlyCoord
+	loadPercentageOnlyCoord
 
 	seenInvalidatedCollectionID int64
 	seenDescribeReq             *milvuspb.DescribeCollectionRequest
@@ -34,29 +34,6 @@ func (c *engineTestCoord) InvalidateShardLeaderCache(_ context.Context, collecti
 	return nil
 }
 
-// shardLeaderReadinessOnlyCoord answers the two per-resource-group questions
-// and nothing else. On its own it stands for a coordinator that has fallen a
-// method behind the extension interface; embedded in engineTestCoord it
-// supplies the half that is not under test there.
-type shardLeaderReadinessOnlyCoord struct {
-	loadPercentageOnlyCoord
-
-	readiness extension.ShardLeaderReadiness
-
-	seenReadinessCollectionID int64
-	seenReadinessRG           string
-}
-
-func (c *shardLeaderReadinessOnlyCoord) GetShardLeaderReadinessByResourceGroup(_ context.Context, collectionID int64, rgName string) (extension.ShardLeaderReadiness, error) {
-	c.seenReadinessCollectionID = collectionID
-	c.seenReadinessRG = rgName
-	return c.readiness, nil
-}
-
-// loadPercentageOnlyCoord answers the older of the two per-resource-group
-// questions and nothing else. On its own it stands for a coordinator that has
-// fallen a method behind the extension interface; embedded in engineTestCoord
-// it supplies the half that is not under test there.
 type loadPercentageOnlyCoord struct {
 	mockMix
 
@@ -163,14 +140,12 @@ func TestCoordinatorEngineSeamIsInertWithoutProvider(t *testing.T) {
 	assert.NoError(t, startCoordinatorEngine(context.Background(), &mockMix{}, nil),
 		"with no provider installed the seam must not construct the adapter")
 
-	// A coordinator that CAN answer both per-resource-group questions must
-	// still never be asked them when no provider is installed.
+	// A coordinator that CAN answer the extras must still never be asked
+	// them when no provider is installed.
 	coord := &engineTestCoord{}
 	assert.NoError(t, startCoordinatorEngine(context.Background(), coord, nil))
 	assert.Zero(t, coord.seenRG,
 		"with no provider installed nothing may ask the coordinator for per-resource-group load")
-	assert.Zero(t, coord.seenReadinessRG,
-		"with no provider installed nothing may ask the coordinator for per-resource-group shard-leader readiness")
 	assert.Zero(t, coord.seenInvalidatedCollectionID,
 		"with no provider installed nothing may make the coordinator invalidate a proxy cache")
 
@@ -196,14 +171,7 @@ func TestServerStartHandsEngineAdapterOverCoordinator(t *testing.T) {
 	installEngine(t, engine)
 
 	coord := &engineTestCoord{
-		shardLeaderReadinessOnlyCoord: shardLeaderReadinessOnlyCoord{
-			loadPercentageOnlyCoord: loadPercentageOnlyCoord{pct: 63},
-			readiness: extension.ShardLeaderReadiness{
-				Reason:        extension.ShardLeadersReasonShardsWithoutLeader,
-				TotalShards:   3,
-				UnreadyShards: []string{"coll-dmc2"},
-			},
-		},
+		loadPercentageOnlyCoord: loadPercentageOnlyCoord{pct: 63},
 	}
 	svr := newTestServer(t, coord)
 	assert.NoError(t, svr.start())
@@ -217,15 +185,6 @@ func TestServerStartHandsEngineAdapterOverCoordinator(t *testing.T) {
 		"the collection id must reach GetLoadPercentageByResourceGroup unchanged")
 	assert.Equal(t, "rg-a", coord.seenRG,
 		"the resource group name must reach GetLoadPercentageByResourceGroup unchanged")
-
-	readiness, err := engine.seenExtras.GetShardLeadersByRG(context.Background(), 43, "rg-b")
-	assert.NoError(t, err)
-	assert.Equal(t, coord.readiness, readiness,
-		"GetShardLeadersByRG must return what the coordinator computed, not a placeholder")
-	assert.Equal(t, int64(43), coord.seenReadinessCollectionID,
-		"the collection id must reach GetShardLeaderReadinessByResourceGroup unchanged")
-	assert.Equal(t, "rg-b", coord.seenReadinessRG,
-		"the resource group name must reach GetShardLeaderReadinessByResourceGroup unchanged, or every resource group would be asked about the same one")
 
 	assert.NoError(t, engine.seenExtras.InvalidateShardLeaderCache(context.Background(), 44))
 	assert.Equal(t, int64(44), coord.seenInvalidatedCollectionID,
@@ -249,7 +208,7 @@ func TestServerStartFailsWhenCoordinatorCannotInvalidateShardLeaderCache(t *test
 	engine := &recordingEngine{}
 	installEngine(t, engine)
 
-	svr := &Server{ctx: context.Background(), mixCoord: &shardLeaderReadinessOnlyCoord{}}
+	svr := &Server{ctx: context.Background(), mixCoord: &loadPercentageOnlyCoord{}}
 	err := svr.start()
 	assert.ErrorContains(t, err, "InvalidateShardLeaderCache")
 	assert.Zero(t, engine.startCount,
@@ -283,25 +242,6 @@ func TestServerStartFailsWhenCoordinatorCannotReportPerResourceGroupLoad(t *test
 		"an engine must not be started over a coordinator that cannot answer per-resource-group load")
 }
 
-// TestServerStartFailsWhenCoordinatorCannotReportPerResourceGroupShardLeaders
-// asserts the same for the second method with no proto RPC behind it, and that
-// the failure names it. A coordinator that can answer per-resource-group load
-// but not per-resource-group shard-leader readiness must be refused at start-up
-// rather than nil-panicking at the engine's first readiness probe. Falling back
-// to a collection-wide shard-leader view is not an option either: that method
-// is no longer on the interface at all.
-func TestServerStartFailsWhenCoordinatorCannotReportPerResourceGroupShardLeaders(t *testing.T) {
-	engine := &recordingEngine{}
-	installEngine(t, engine)
-
-	svr := &Server{ctx: context.Background(), mixCoord: &loadPercentageOnlyCoord{}}
-	err := svr.start()
-	assert.ErrorContains(t, err, "GetShardLeaderReadinessByResourceGroup")
-	assert.Zero(t, engine.startCount,
-		"an engine must not be started over a coordinator that cannot answer per-resource-group shard-leader readiness")
-}
-
-// TestServerStopStopsEngine asserts the shutdown call site exists.
 func TestServerStopStopsEngine(t *testing.T) {
 	engine := &recordingEngine{stopErr: errors.New("engine stop failed")}
 	installEngine(t, engine)

@@ -63,10 +63,10 @@ type Coordinator interface {
 // beside it. Everything reachable over the wire is on Coordinator; what is
 // left here is what a form outside the process could not ask for:
 //
-//   - the per-resource-group load percentage and shard-leader readiness are
-//     computed in querycoord and never serialized. A form can approximate the
-//     second from GetShardLeaders, whose response tags each leader with its
-//     replica's resource group, but not the first.
+//   - the per-resource-group load percentage is computed in querycoord and
+//     never serialized. Shard-leader readiness used to be here too; it is not
+//     any more, because GetShardLeaders tags each leader with its replica's
+//     resource group and a form scopes the answer itself from that.
 //   - shard-leader cache invalidation is a PROXY rpc that the coordinator fans
 //     out. Reaching the proxies means discovering them, and milvus's service
 //     discovery is under internal/.
@@ -80,13 +80,6 @@ type CoordinatorExtras interface {
 	// all, which is distinct from 0 (a replica is there and carries nothing
 	// yet).
 	GetReplicaLoadPercentByRG(ctx context.Context, collectionID int64, rgName string) (int32, error)
-
-	// GetShardLeadersByRG reports whether every shard of collectionID has a
-	// leader among the replicas living in rgName. An empty rgName is the
-	// absence of a filter. When err != nil the struct is unspecified:
-	// classify on the error with merr.IsRetryableErr and read the struct only
-	// on err == nil.
-	GetShardLeadersByRG(ctx context.Context, collectionID int64, rgName string) (ShardLeaderReadiness, error)
 
 	// InvalidateShardLeaderCache drops every proxy's cached shard leaders for
 	// one collection, so the next query resolves them again instead of routing

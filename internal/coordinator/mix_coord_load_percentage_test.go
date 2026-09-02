@@ -76,22 +76,6 @@ func TestGetLoadPercentageByResourceGroupForwardsArgumentsAndResult(t *testing.T
 	})
 }
 
-// Before this replica is ACTIVE the per-resource-group questions must fail,
-// not answer: an uninitialized querycoord reads as -1 / "nothing ready", which
-// a caller cannot tell apart from "this resource group holds no replica".
-func TestPerResourceGroupQuestionsAreHealthGated(t *testing.T) {
-	s := &mixCoordImpl{queryCoordServer: &querycoordv2.Server{}}
-
-	_, err := s.GetLoadPercentageByResourceGroup(context.Background(), 1, "rg")
-	assert.Error(t, err, "a standby or initializing coordinator must refuse, not misreport")
-
-	_, err = s.GetShardLeaderReadinessByResourceGroup(context.Background(), 1, "rg")
-	assert.Error(t, err)
-}
-
-// OnActive is the activation hook the engine seam hangs off: registered
-// before activation it waits, registered after it runs immediately, and on a
-// replica that never activates it never runs.
 func TestOnActiveRunsCallbacksExactlyOnActivation(t *testing.T) {
 	s := &mixCoordImpl{}
 	ran := 0

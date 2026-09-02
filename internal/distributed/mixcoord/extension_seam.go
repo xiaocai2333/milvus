@@ -39,9 +39,9 @@ func coordinatorEngine() extension.CoordinatorEngine {
 	return extension.Caps().CoordinatorEngine
 }
 
-// The three interfaces below are extension.CoordinatorExtras as the
-// coordinator spells it: two of the names differ, and the third lives on the
-// concrete implementation that owns the proxy client manager.
+// The two interfaces below are extension.CoordinatorExtras as the coordinator
+// spells it: the name differs for one, and the other lives on the concrete
+// implementation that owns the proxy client manager.
 //
 // They are declared here and type-asserted rather than added to
 // types.MixCoordComponent so that the native coordinator interface, and every
@@ -50,10 +50,6 @@ func coordinatorEngine() extension.CoordinatorEngine {
 // refused by name.
 type loadPercentageByResourceGroupProvider interface {
 	GetLoadPercentageByResourceGroup(ctx context.Context, collectionID int64, rgName string) (int32, error)
-}
-
-type shardLeaderReadinessByResourceGroupProvider interface {
-	GetShardLeaderReadinessByResourceGroup(ctx context.Context, collectionID int64, rgName string) (extension.ShardLeaderReadiness, error)
 }
 
 type shardLeaderCacheInvalidatorProvider interface {
@@ -69,17 +65,12 @@ type shardLeaderCacheInvalidatorProvider interface {
 // generated coordinator clients, which types.MixCoordClient satisfies as it
 // stands - so what is left here is only what has no RPC at all.
 type mixCoordExtras struct {
-	loadPercentage       loadPercentageByResourceGroupProvider
-	shardLeaderReadiness shardLeaderReadinessByResourceGroupProvider
-	shardLeaderCache     shardLeaderCacheInvalidatorProvider
+	loadPercentage   loadPercentageByResourceGroupProvider
+	shardLeaderCache shardLeaderCacheInvalidatorProvider
 }
 
 func (c mixCoordExtras) GetReplicaLoadPercentByRG(ctx context.Context, collectionID int64, rgName string) (int32, error) {
 	return c.loadPercentage.GetLoadPercentageByResourceGroup(ctx, collectionID, rgName)
-}
-
-func (c mixCoordExtras) GetShardLeadersByRG(ctx context.Context, collectionID int64, rgName string) (extension.ShardLeaderReadiness, error) {
-	return c.shardLeaderReadiness.GetShardLeaderReadinessByResourceGroup(ctx, collectionID, rgName)
 }
 
 func (c mixCoordExtras) InvalidateShardLeaderCache(ctx context.Context, collectionID int64) error {
@@ -87,7 +78,7 @@ func (c mixCoordExtras) InvalidateShardLeaderCache(ctx context.Context, collecti
 }
 
 // newMixCoordExtras builds the extras adapter, refusing a coordinator that
-// cannot answer any one of the three. Failing here stops the process at
+// cannot answer either one. Failing here stops the process at
 // start-up instead of letting the engine discover at its first readiness
 // check, or at its first release, that the answer is missing.
 func newMixCoordExtras(coord types.MixCoordComponent) (extension.CoordinatorExtras, error) {
@@ -95,18 +86,13 @@ func newMixCoordExtras(coord types.MixCoordComponent) (extension.CoordinatorExtr
 	if !ok {
 		return nil, merr.WrapErrServiceInternal("extension: coordinator does not provide GetLoadPercentageByResourceGroup, cannot serve the coordinator engine")
 	}
-	shardLeaders, ok := coord.(shardLeaderReadinessByResourceGroupProvider)
-	if !ok {
-		return nil, merr.WrapErrServiceInternal("extension: coordinator does not provide GetShardLeaderReadinessByResourceGroup, cannot serve the coordinator engine")
-	}
 	shardLeaderCache, ok := coord.(shardLeaderCacheInvalidatorProvider)
 	if !ok {
 		return nil, merr.WrapErrServiceInternal("extension: coordinator does not provide InvalidateShardLeaderCache, cannot serve the coordinator engine")
 	}
 	return mixCoordExtras{
-		loadPercentage:       loadPercentage,
-		shardLeaderReadiness: shardLeaders,
-		shardLeaderCache:     shardLeaderCache,
+		loadPercentage:   loadPercentage,
+		shardLeaderCache: shardLeaderCache,
 	}, nil
 }
 

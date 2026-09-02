@@ -29,7 +29,6 @@ import (
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/v3/common"
-	"github.com/milvus-io/milvus/pkg/v3/extension"
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -1081,20 +1080,6 @@ func (s *mixCoordImpl) GetLoadPercentageByResourceGroup(ctx context.Context, col
 		return 0, err
 	}
 	return s.queryCoordServer.GetLoadPercentageByResourceGroup(ctx, collectionID, rgName)
-}
-
-// GetShardLeaderReadinessByResourceGroup exposes querycoord's
-// per-resource-group shard-leader readiness to in-process callers, on the same
-// terms as GetLoadPercentageByResourceGroup above: no proto RPC carries it, so
-// callers type-assert the concrete coordinator rather than growing
-// types.MixCoord and every generated mock of it.
-func (s *mixCoordImpl) GetShardLeaderReadinessByResourceGroup(ctx context.Context, collectionID int64, rgName string) (extension.ShardLeaderReadiness, error) {
-	// Same health gate as GetLoadPercentageByResourceGroup: an uninitialized
-	// querycoord reads as "nothing ready", which is not an answer.
-	if err := merr.CheckHealthy(s.GetStateCode()); err != nil {
-		return extension.ShardLeaderReadiness{}, err
-	}
-	return s.queryCoordServer.GetShardLeaderReadinessByResourceGroup(ctx, collectionID, rgName)
 }
 
 // InvalidateShardLeaderCache drops one collection's cached shard leaders on
