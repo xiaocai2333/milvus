@@ -55,15 +55,10 @@ func (s catalogCredentialStore) AlterCredential(ctx context.Context, username, e
 	})
 }
 
-// The RBAC writes below go through the MetaTable, not the raw catalog: its
-// methods carry the validation and normalization the RPC path has (empty-value
-// checks, DbName defaulting in OperatePrivilege) and take the permission lock,
-// so a bootstrapped grant is byte-for-byte what the same grant issued over RPC
-// would have written.
-
-func (s catalogCredentialStore) CreateRole(ctx context.Context, tenant string, entity *milvuspb.RoleEntity) error {
-	return s.meta.CreateRole(ctx, tenant, entity)
-}
+// The role binding below goes through the MetaTable, not the raw catalog: its
+// methods carry the validation the RPC path has and take the permission lock,
+// so a bootstrapped binding is byte-for-byte what the same binding issued over
+// RPC would have written.
 
 func (s catalogCredentialStore) OperateUserRole(ctx context.Context, tenant string, userEntity *milvuspb.UserEntity, roleEntity *milvuspb.RoleEntity, op milvuspb.OperateUserRoleType) error {
 	return s.meta.OperateUserRole(ctx, tenant, userEntity, roleEntity, op)
@@ -73,13 +68,10 @@ func (s catalogCredentialStore) SelectUser(ctx context.Context, tenant string, e
 	return s.meta.SelectUser(ctx, tenant, entity, includeRoleInfo)
 }
 
-func (s catalogCredentialStore) OperatePrivilege(ctx context.Context, tenant string, entity *milvuspb.GrantEntity, op milvuspb.OperatePrivilegeType) error {
-	return s.meta.OperatePrivilege(ctx, tenant, entity, op)
-}
-
-// bootstrapExtensionRBAC seeds provider-managed accounts and roles once during
-// rootcoord initialization, if a provider installed the rbac bootstrap
-// capability. With no provider installed it returns nil without constructing
+// bootstrapExtensionRBAC seeds provider-managed accounts once during rootcoord
+// initialization, and binds them to their roles, if a provider installed the
+// rbac bootstrap capability. It runs after initBuiltinRoles, because the roles
+// it binds to are the ones that creates. With no provider installed it returns nil without constructing
 // the adapter or touching the catalog. A non-nil error must fail rootcoord
 // startup: a form whose accounts are missing would otherwise serve requests
 // with no identity.

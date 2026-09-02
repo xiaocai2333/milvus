@@ -622,8 +622,18 @@ func (c *Core) initRbac(initCtx context.Context) error {
 		}
 	}
 
+	if Params.RoleCfg.Enabled.GetAsBool() {
+		if err := c.initBuiltinRoles(initCtx); err != nil {
+			return err
+		}
+	}
+
+	// After the builtin roles, not before: a form declares its roles in
+	// builtinRoles.roles and this binds its accounts to them, so the roles
+	// have to exist by now.
+	//
 	// The credential half of the bootstrap needs the catalog (the same path
-	// InitCredential seeds root through); the RBAC half goes through the
+	// InitCredential seeds root through); the binding half goes through the
 	// MetaTable. A meta implementation that is not the real MetaTable cannot
 	// supply the former - and with the capability installed that is a broken
 	// deployment, not a case to skip silently: a form whose accounts are
@@ -636,9 +646,6 @@ func (c *Core) initRbac(initCtx context.Context) error {
 		return merr.WrapErrServiceInternal("rbac bootstrap capability installed, but the meta table cannot store credentials")
 	}
 
-	if Params.RoleCfg.Enabled.GetAsBool() {
-		return c.initBuiltinRoles(initCtx)
-	}
 	return nil
 }
 

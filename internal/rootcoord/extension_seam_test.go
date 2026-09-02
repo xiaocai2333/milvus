@@ -138,32 +138,26 @@ func TestCatalogCredentialStoreCreateCredentialForwardsToAlterCredential(t *test
 	assert.NoError(t, err)
 }
 
-// The RBAC methods go through the MetaTable, not the raw catalog: its methods
-// carry the validation and normalization the RPC path has (DbName defaulting
-// in OperatePrivilege, empty-value checks) and take the permission lock, so a
-// bootstrapped grant is exactly what the same grant over RPC would write.
+// The role binding goes through the MetaTable, not the raw catalog: its
+// methods carry the validation the RPC path has and take the permission lock,
+// so a bootstrapped binding is exactly what the same binding over RPC would
+// write.
 func TestCatalogCredentialStoreForwardsRemainingMethods(t *testing.T) {
 	meta := mockrootcoord.NewIMetaTable(t)
 	roleEntity := &milvuspb.RoleEntity{Name: "role1"}
 	userEntity := &milvuspb.UserEntity{Name: "user1"}
-	grantEntity := &milvuspb.GrantEntity{Role: roleEntity}
 
-	meta.On("CreateRole", mock.Anything, "tenant1", roleEntity).Return(nil)
 	meta.On("OperateUserRole", mock.Anything, "tenant1", userEntity, roleEntity, milvuspb.OperateUserRoleType_AddUserToRole).Return(nil)
 	meta.On("SelectUser", mock.Anything, "tenant1", userEntity, true).Return([]*milvuspb.UserResult{{User: userEntity}}, nil)
-	meta.On("OperatePrivilege", mock.Anything, "tenant1", grantEntity, milvuspb.OperatePrivilegeType_Grant).Return(nil)
 
 	store := catalogCredentialStore{meta: meta}
 	ctx := context.Background()
 
-	assert.NoError(t, store.CreateRole(ctx, "tenant1", roleEntity))
 	assert.NoError(t, store.OperateUserRole(ctx, "tenant1", userEntity, roleEntity, milvuspb.OperateUserRoleType_AddUserToRole))
 
 	users, err := store.SelectUser(ctx, "tenant1", userEntity, true)
 	assert.NoError(t, err)
 	assert.Equal(t, []*milvuspb.UserResult{{User: userEntity}}, users)
-
-	assert.NoError(t, store.OperatePrivilege(ctx, "tenant1", grantEntity, milvuspb.OperatePrivilegeType_Grant))
 }
 
 // A meta implementation that is not the real MetaTable cannot store
@@ -188,4 +182,61 @@ func TestInitRbacRefusesANonMetaTableThroughMerr(t *testing.T) {
 	err := c.initRbac(context.TODO())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, merr.ErrServiceInternal)
+}
+
+// The bootstrap runs AFTER the builtin roles, and the ordering is a contract,
+// not an accident: a form declares its roles in builtinRoles.roles and binds
+// its accounts to them here, so a bootstrap that ran first would bind to a
+// role that does not exist yet.
+func TestTheBootstrapRunsAfterTheBuiltinRoles(t *testing.T) {
+	paramtable.Init()
+
+	var order []string
+	bootstrapper := &orderRecordingBootstrapper{order: &order}
+	installRBACBootstrapper(t, bootstrapper)
+
+	meta := mockrootcoord.NewIMetaTable(t)
+	c := newTestCore(withHealthyCode(), withMeta(meta))
+	meta.EXPECT().CreateRole(mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ string, entity *milvuspb.RoleEntity) error {
+			order = append(order, "role:"+entity.GetName())
+			return nil
+		}).Maybe()
+
+	Params.Save(Params.RoleCfg.Enabled.Key, "true")
+	Params.Save(Params.RoleCfg.Roles.Key, `{"db_ro": {"privileges": []}}`)
+	Params.Save(Params.CommonCfg.EnablePublicPrivilege.Key, "false")
+	defer func() {
+		Params.Reset(Params.RoleCfg.Enabled.Key)
+		Params.Reset(Params.RoleCfg.Roles.Key)
+		Params.Reset(Params.CommonCfg.EnablePublicPrivilege.Key)
+	}()
+
+	// initRbac refuses a non-MetaTable meta once it reaches the bootstrap, and
+	// that refusal is exactly the point this test needs: it proves the
+	// bootstrap was reached, and the recorded order says what ran before it.
+	err := c.initRbac(context.TODO())
+	require.Error(t, err)
+
+	require.Contains(t, order, "role:db_ro", "the form's builtin role must be created")
+	assert.Less(t, indexOfOrder(order, "role:db_ro"), indexOfOrder(order, "bootstrap"),
+		"the roles a bootstrap binds to must exist before it runs")
+}
+
+type orderRecordingBootstrapper struct {
+	order *[]string
+}
+
+func (b *orderRecordingBootstrapper) Bootstrap(context.Context, extension.CredentialStore) error {
+	*b.order = append(*b.order, "bootstrap")
+	return nil
+}
+
+func indexOfOrder(order []string, want string) int {
+	for i, got := range order {
+		if got == want {
+			return i
+		}
+	}
+	return len(order)
 }

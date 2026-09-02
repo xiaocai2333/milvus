@@ -22,10 +22,15 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 )
 
-// CredentialStore is the slice of milvus's credential and privilege metadata a
-// bootstrapper is allowed to touch. It is deliberately narrower than milvus's
-// own catalog: a distribution seeding accounts needs to create them and grant
-// roles, not to read back stored credentials.
+// CredentialStore is the slice of milvus's account metadata a bootstrapper is
+// allowed to touch. It is deliberately narrower than milvus's own catalog: a
+// distribution seeding accounts needs to create them and bind them to roles,
+// not to read back stored credentials.
+//
+// It does NOT create roles or grant privileges. milvus seeds roles from
+// builtinRoles.roles, which creates each role and grants its privileges the
+// same way this would have - so a form declares its roles there, as
+// configuration, and this interface only has to attach an account to one.
 //
 // The method names are rootcoord's own (IMetaTable), so that a reader can
 // find the operation behind each one without a translation table. milvus
@@ -47,18 +52,24 @@ type CredentialStore interface {
 	// Bootstrap runs exactly then. The seam implements this method the way
 	// rootcoord seeds its own root account at init - MetaTable.InitCredential:
 	// Catalog.GetCredential to test presence, Catalog.AlterCredential to
-	// write - and the role methods below the way initRbac does, through the
-	// MetaTable's direct CreateRole/OperateUserRole/OperatePrivilege.
+	// write - and the two role methods below the way initRbac does, through
+	// the MetaTable's direct OperateUserRole/SelectUser.
 	AlterCredential(ctx context.Context, username, encryptedPassword string) error
 
-	CreateRole(ctx context.Context, tenant string, entity *milvuspb.RoleEntity) error
+	// OperateUserRole binds an account to a role that already exists. The
+	// role is milvus's to create, from builtinRoles.roles.
 	OperateUserRole(ctx context.Context, tenant string, userEntity *milvuspb.UserEntity, roleEntity *milvuspb.RoleEntity, op milvuspb.OperateUserRoleType) error
+	// SelectUser reads an account's role bindings, so a bootstrapper can tell
+	// a binding it already made from one it still has to.
 	SelectUser(ctx context.Context, tenant string, entity *milvuspb.UserEntity, includeRoleInfo bool) ([]*milvuspb.UserResult, error)
-	OperatePrivilege(ctx context.Context, tenant string, entity *milvuspb.GrantEntity, op milvuspb.OperatePrivilegeType) error
 }
 
-// RBACBootstrapper seeds the accounts and roles a deployment form needs before
-// it serves traffic.
+// RBACBootstrapper seeds the accounts a deployment form needs before it serves
+// traffic, and binds them to their roles.
+//
+// The ROLES themselves are not seeded here: a form declares them in
+// builtinRoles.roles and milvus creates them, with their privileges, from that
+// configuration. This runs after it has, so a role named below exists.
 //
 // It runs once during rootcoord initialization, single-threaded and before any
 // request is accepted, so an implementation needs no locking of its own. It must
@@ -66,8 +77,9 @@ type CredentialStore interface {
 //
 // NoopRBACBootstrapper is the Noop base under the package evolution policy.
 type RBACBootstrapper interface {
-	// Bootstrap seeds accounts and roles. A non-nil error fails rootcoord
-	// startup, because a form whose accounts are missing cannot serve.
+	// Bootstrap seeds accounts and binds them to roles. A non-nil error fails
+	// rootcoord startup, because a form whose accounts are missing cannot
+	// serve.
 	Bootstrap(ctx context.Context, store CredentialStore) error
 }
 
