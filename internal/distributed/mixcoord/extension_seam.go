@@ -22,13 +22,9 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/v3/extension"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
-	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
-	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -43,18 +39,15 @@ func coordinatorEngine() extension.CoordinatorEngine {
 	return extension.Caps().CoordinatorEngine
 }
 
-// loadPercentageByResourceGroupProvider,
-// shardLeaderReadinessByResourceGroupProvider and
-// shardLeaderCacheInvalidatorProvider are the three parts of
-// extension.MixCoord that the coordinator does not already expose under those
-// names. types.MixCoordComponent covers the other eight methods verbatim;
-// these three are in-process methods reached through mixCoordImpl.
+// The three interfaces below are extension.CoordinatorExtras as the
+// coordinator spells it: two of the names differ, and the third lives on the
+// concrete implementation that owns the proxy client manager.
 //
-// They are declared as interfaces and type-asserted rather than added to
+// They are declared here and type-asserted rather than added to
 // types.MixCoordComponent so that the native coordinator interface, and every
 // generated mock of it, stays untouched by this seam. They are kept separate
-// rather than merged into one interface so that a coordinator missing any one
-// of them is refused by name.
+// rather than merged into one so that a coordinator missing any one of them is
+// refused by name.
 type loadPercentageByResourceGroupProvider interface {
 	GetLoadPercentageByResourceGroup(ctx context.Context, collectionID int64, rgName string) (int32, error)
 }
@@ -67,88 +60,37 @@ type shardLeaderCacheInvalidatorProvider interface {
 	InvalidateShardLeaderCache(ctx context.Context, collectionID int64) error
 }
 
-// mixCoordEngineClient adapts the coordinator to extension.MixCoord.
+// mixCoordExtras adapts the coordinator to extension.CoordinatorExtras.
 //
-// An adapter is needed because three of the methods the engine asks for are
-// not on types.MixCoordComponent at all: the coordinator spells two of them
-// GetLoadPercentageByResourceGroup and GetShardLeaderReadinessByResourceGroup,
-// and carries the third, InvalidateShardLeaderCache, only on the concrete
-// implementation that owns the proxy client manager.
-//
-// The coordinator sits in an UNEXPORTED field and the eight service methods
-// are forwarded one by one, never by embedding: an embedded
-// types.MixCoordComponent would be reachable through a structural type
-// assertion, and the narrowness of extension.MixCoord only means something if
-// this adapter is the whole of what an engine can reach. A method is added
-// here when it is added to extension.MixCoord, and at no other time.
-type mixCoordEngineClient struct {
-	coord                types.MixCoordComponent
+// It used to carry eleven methods. Eight of them were the coordinator's own
+// RPCs, forwarded one by one purely so that an engine outside this repository
+// could name the type: types.MixCoordClient is under internal/. That is no
+// longer needed - extension.Coordinator is the composition of milvus's
+// generated coordinator clients, which types.MixCoordClient satisfies as it
+// stands - so what is left here is only what has no RPC at all.
+type mixCoordExtras struct {
 	loadPercentage       loadPercentageByResourceGroupProvider
 	shardLeaderReadiness shardLeaderReadinessByResourceGroupProvider
 	shardLeaderCache     shardLeaderCacheInvalidatorProvider
 }
 
-func (c mixCoordEngineClient) DescribeCollection(ctx context.Context, req *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
-	return c.coord.DescribeCollection(ctx, req)
-}
-
-func (c mixCoordEngineClient) DescribeIndex(ctx context.Context, req *indexpb.DescribeIndexRequest) (*indexpb.DescribeIndexResponse, error) {
-	return c.coord.DescribeIndex(ctx, req)
-}
-
-func (c mixCoordEngineClient) DescribeResourceGroup(ctx context.Context, req *querypb.DescribeResourceGroupRequest) (*querypb.DescribeResourceGroupResponse, error) {
-	return c.coord.DescribeResourceGroup(ctx, req)
-}
-
-func (c mixCoordEngineClient) UpdateResourceGroups(ctx context.Context, req *querypb.UpdateResourceGroupsRequest) (*commonpb.Status, error) {
-	return c.coord.UpdateResourceGroups(ctx, req)
-}
-
-func (c mixCoordEngineClient) LoadCollection(ctx context.Context, req *querypb.LoadCollectionRequest) (*commonpb.Status, error) {
-	return c.coord.LoadCollection(ctx, req)
-}
-
-func (c mixCoordEngineClient) ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
-	return c.coord.ReleaseCollection(ctx, req)
-}
-
-func (c mixCoordEngineClient) ShowLoadCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
-	return c.coord.ShowLoadCollections(ctx, req)
-}
-
-func (c mixCoordEngineClient) UpdateLoadConfig(ctx context.Context, req *querypb.UpdateLoadConfigRequest) (*commonpb.Status, error) {
-	return c.coord.UpdateLoadConfig(ctx, req)
-}
-
-// GetReplicaLoadPercentByRG forwards to the coordinator's per-resource-group
-// load percentage, preserving its contract: -1 for "no replica of this
-// collection in this resource group", 0 for "a replica is there and carries
-// nothing yet".
-func (c mixCoordEngineClient) GetReplicaLoadPercentByRG(ctx context.Context, collectionID int64, rgName string) (int32, error) {
+func (c mixCoordExtras) GetReplicaLoadPercentByRG(ctx context.Context, collectionID int64, rgName string) (int32, error) {
 	return c.loadPercentage.GetLoadPercentageByResourceGroup(ctx, collectionID, rgName)
 }
 
-// GetShardLeadersByRG forwards to the coordinator's per-resource-group
-// shard-leader readiness, which - unlike the collection-wide GetShardLeaders
-// forwarded by embedding - reports only on the replicas that live in the named
-// resource group.
-func (c mixCoordEngineClient) GetShardLeadersByRG(ctx context.Context, collectionID int64, rgName string) (extension.ShardLeaderReadiness, error) {
+func (c mixCoordExtras) GetShardLeadersByRG(ctx context.Context, collectionID int64, rgName string) (extension.ShardLeaderReadiness, error) {
 	return c.shardLeaderReadiness.GetShardLeaderReadinessByResourceGroup(ctx, collectionID, rgName)
 }
 
-// InvalidateShardLeaderCache forwards to the coordinator's proxy fan-out. The
-// engine needs it after a release it issued itself, so that the proxies stop
-// routing queries to query nodes that no longer serve the collection.
-func (c mixCoordEngineClient) InvalidateShardLeaderCache(ctx context.Context, collectionID int64) error {
+func (c mixCoordExtras) InvalidateShardLeaderCache(ctx context.Context, collectionID int64) error {
 	return c.shardLeaderCache.InvalidateShardLeaderCache(ctx, collectionID)
 }
 
-// newMixCoordEngineClient builds the adapter, refusing a coordinator that
-// cannot answer any one of the three methods it has to supply itself. Failing
-// here stops the process at start-up instead of letting the engine discover at
-// its first readiness check, or at its first release, that the answer is
-// missing.
-func newMixCoordEngineClient(coord types.MixCoordComponent) (extension.MixCoord, error) {
+// newMixCoordExtras builds the extras adapter, refusing a coordinator that
+// cannot answer any one of the three. Failing here stops the process at
+// start-up instead of letting the engine discover at its first readiness
+// check, or at its first release, that the answer is missing.
+func newMixCoordExtras(coord types.MixCoordComponent) (extension.CoordinatorExtras, error) {
 	loadPercentage, ok := coord.(loadPercentageByResourceGroupProvider)
 	if !ok {
 		return nil, merr.WrapErrServiceInternal("extension: coordinator does not provide GetLoadPercentageByResourceGroup, cannot serve the coordinator engine")
@@ -161,8 +103,7 @@ func newMixCoordEngineClient(coord types.MixCoordComponent) (extension.MixCoord,
 	if !ok {
 		return nil, merr.WrapErrServiceInternal("extension: coordinator does not provide InvalidateShardLeaderCache, cannot serve the coordinator engine")
 	}
-	return mixCoordEngineClient{
-		coord:                coord,
+	return mixCoordExtras{
 		loadPercentage:       loadPercentage,
 		shardLeaderReadiness: shardLeaders,
 		shardLeaderCache:     shardLeaderCache,
@@ -203,17 +144,17 @@ type activeNotifier interface {
 // declared the capability required, and a coordinator serving traffic without
 // its engine would accept work nothing accounts for. The synchronous path
 // (no OnActive - a test double) returns the error instead.
-func startCoordinatorEngine(ctx context.Context, coord types.MixCoordComponent) error {
+func startCoordinatorEngine(ctx context.Context, coord types.MixCoordComponent, client types.MixCoordClient) error {
 	engine := coordinatorEngine()
 	if engine == nil {
 		return nil
 	}
-	client, err := newMixCoordEngineClient(coord)
+	extras, err := newMixCoordExtras(coord)
 	if err != nil {
 		return err
 	}
 	start := func() error {
-		if err := engine.Start(ctx, client); err != nil {
+		if err := engine.Start(ctx, client, extras); err != nil {
 			return err
 		}
 		mlog.Info(ctx, "coordinator engine started")

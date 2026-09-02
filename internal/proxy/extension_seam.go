@@ -158,7 +158,7 @@ func ensureQueryReady(ctx context.Context, node *Proxy, dbName, collectionName s
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return ctx, extension.QueryPlacement{}, err
 	}
-	placement, err := ext.EnsureQueryReady(ctx, dbName, collectionName)
+	placement, err := ext.EnsureQueryReady(ctx, node.mixCoord, dbName, collectionName)
 	if err != nil {
 		// The placement is returned even so: it may still carry a Finish the
 		// caller has to release, and deciding here that a failed readiness

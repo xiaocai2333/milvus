@@ -227,12 +227,20 @@ type ProxyExtension interface {
 	// which replicas may serve the query. See QueryPlacement.
 	//
 	// milvus passes what it knows about the query - the database and the
-	// collection - and nothing else. Anything the form itself needs to decide
-	// on, it put on ctx in RewriteRequestParams or recorded at OnConnect, and
-	// reads back here under its own key. Whether a request that told the form
-	// nothing may run is the form's decision, not milvus's: only an
-	// implementation knows whether that is a control-plane client to wave
-	// through or a data-plane client to refuse.
+	// collection - plus the coordinator, and nothing else. Anything the form
+	// itself needs to decide on, it put on ctx in RewriteRequestParams or
+	// recorded at OnConnect, and reads back here under its own key. Whether a
+	// request that told the form nothing may run is the form's decision, not
+	// milvus's: only an implementation knows whether that is a control-plane
+	// client to wave through or a data-plane client to refuse.
+	//
+	// coord is the proxy's own coordinator client, handed over rather than
+	// rediscovered: milvus's service discovery is under internal/ and a form
+	// outside this repository cannot reach it, so a form that had to find the
+	// coordinator itself would be reimplementing it. Making a resource group
+	// serviceable is a coordinator conversation - load the collection onto it,
+	// then watch until its shard leaders answer - and this is what a form
+	// holds that conversation with. See Coordinator.
 	//
 	// The returned QueryPlacement.Finish is released by milvus exactly once,
 	// through QueryPlacement.Release, on every exit path of the request
@@ -243,7 +251,7 @@ type ProxyExtension interface {
 	//
 	// It is called on the request path and it may block - waking a cluster is
 	// not instant - so it must respect the deadline on ctx.
-	EnsureQueryReady(ctx context.Context, dbName, collectionName string) (QueryPlacement, error)
+	EnsureQueryReady(ctx context.Context, coord Coordinator, dbName, collectionName string) (QueryPlacement, error)
 
 	// Start runs the extension's proxy-side background work. It is called once
 	// while the proxy starts, must return promptly rather than blocking, and
@@ -289,7 +297,7 @@ func (NoopProxyExtension) RewriteRequestParams(ctx context.Context, params []*co
 // load-bearing: an inert default that returned an error would refuse every
 // search in a stock binary, and one that named a resource group would restrict
 // routing milvus is meant to leave alone.
-func (NoopProxyExtension) EnsureQueryReady(context.Context, string, string) (QueryPlacement, error) {
+func (NoopProxyExtension) EnsureQueryReady(context.Context, Coordinator, string, string) (QueryPlacement, error) {
 	return QueryPlacement{}, nil
 }
 

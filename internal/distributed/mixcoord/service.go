@@ -261,7 +261,7 @@ func (s *Server) start() error {
 
 	// The extension seam sits after the coordinator is running, because an
 	// engine's first act is usually to read coordinator state.
-	if err := startCoordinatorEngine(s.ctx, s.mixCoord); err != nil {
+	if err := startCoordinatorEngine(s.ctx, s.mixCoord, s.mixCoordClient); err != nil {
 		mlog.Error(s.ctx, "coordinator engine start failed", mlog.Err(err))
 		return err
 	}

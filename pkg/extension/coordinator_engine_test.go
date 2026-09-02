@@ -23,68 +23,8 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
-
-	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
-	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
-	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 )
 
-// fakeMixCoord is an inert MixCoord used to prove that the coordinator view
-// handed to an engine is the very instance the caller passed in. Only the two
-// per-resource-group methods return anything, because they are the ones whose
-// result shape the interface contract pins down: -1 versus 0 for the load
-// percentage, and Ready versus a reason for the shard-leader readiness.
-type fakeMixCoord struct {
-	pct       int32
-	readiness ShardLeaderReadiness
-}
-
-func (fakeMixCoord) DescribeCollection(context.Context, *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) DescribeIndex(context.Context, *indexpb.DescribeIndexRequest) (*indexpb.DescribeIndexResponse, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) DescribeResourceGroup(context.Context, *querypb.DescribeResourceGroupRequest) (*querypb.DescribeResourceGroupResponse, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) UpdateResourceGroups(context.Context, *querypb.UpdateResourceGroupsRequest) (*commonpb.Status, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) LoadCollection(context.Context, *querypb.LoadCollectionRequest) (*commonpb.Status, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) ReleaseCollection(context.Context, *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) ShowLoadCollections(context.Context, *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
-	return nil, nil
-}
-
-func (fakeMixCoord) UpdateLoadConfig(context.Context, *querypb.UpdateLoadConfigRequest) (*commonpb.Status, error) {
-	return nil, nil
-}
-
-func (f fakeMixCoord) GetReplicaLoadPercentByRG(context.Context, int64, string) (int32, error) {
-	return f.pct, nil
-}
-
-func (f fakeMixCoord) GetShardLeadersByRG(context.Context, int64, string) (ShardLeaderReadiness, error) {
-	return f.readiness, nil
-}
-
-func (fakeMixCoord) InvalidateShardLeaderCache(context.Context, int64) error {
-	return nil
-}
-
-// recordingServiceRegistrar records the service descriptors registered on it.
 type recordingServiceRegistrar struct{ names []string }
 
 func (r *recordingServiceRegistrar) RegisterService(desc *grpc.ServiceDesc, _ any) {
@@ -98,7 +38,8 @@ type fakeCoordinatorEngine struct {
 
 	seenRegistrar grpc.ServiceRegistrar
 	seenCtx       context.Context
-	seenCoord     MixCoord
+	seenCoord     Coordinator
+	seenExtras    CoordinatorExtras
 	stopped       bool
 }
 
@@ -107,7 +48,8 @@ func (f *fakeCoordinatorEngine) RegisterOnCoordinator(reg grpc.ServiceRegistrar)
 	reg.RegisterService(&grpc.ServiceDesc{ServiceName: "extension.test.EngineService", HandlerType: (*any)(nil)}, struct{}{})
 }
 
-func (f *fakeCoordinatorEngine) Start(ctx context.Context, coord MixCoord) error {
+func (f *fakeCoordinatorEngine) Start(ctx context.Context, coord Coordinator, extras CoordinatorExtras) error {
+	f.seenExtras = extras
 	f.seenCtx = ctx
 	f.seenCoord = coord
 	return f.startErr
@@ -168,23 +110,30 @@ func TestInstalledCoordinatorEngineIsReachableThroughCaps(t *testing.T) {
 
 	type ctxKey struct{}
 	ctx := context.WithValue(context.Background(), ctxKey{}, "coordinator")
-	coord := fakeMixCoord{pct: -1, readiness: ShardLeaderReadiness{
+
+	// The coordinator is milvus's generated client composition, so a test
+	// double for it would be hundreds of methods long. That it is no longer
+	// worth faking is the point of the type: nothing here narrows it, so
+	// nothing here has to be kept in step with it. A nil carries the one
+	// property this test is about - that whatever milvus passes arrives
+	// unchanged - and the extras, which ARE narrow, are checked below.
+	extras := fakeExtras{pct: -1, readiness: ShardLeaderReadiness{
 		Reason:        ShardLeadersReasonShardsWithoutLeader,
 		TotalShards:   2,
 		UnreadyShards: []string{"coll-dmc1"},
 	}}
-	assert.NoError(t, got.Start(ctx, coord))
+	assert.NoError(t, got.Start(ctx, nil, extras))
 	assert.Equal(t, "coordinator", engine.seenCtx.Value(ctxKey{}),
 		"the context must reach the implementation unchanged")
-	assert.Equal(t, MixCoord(coord), engine.seenCoord,
-		"the MixCoord passed to Start must reach the implementation unchanged")
+	assert.Equal(t, CoordinatorExtras(extras), engine.seenExtras,
+		"the extras passed to Start must reach the implementation unchanged")
 
-	pct, err := engine.seenCoord.GetReplicaLoadPercentByRG(ctx, 1, "rg-a")
+	pct, err := engine.seenExtras.GetReplicaLoadPercentByRG(ctx, 1, "rg-a")
 	assert.NoError(t, err)
 	assert.Equal(t, int32(-1), pct,
 		"-1 must survive the interface: it means no replica in this resource group, which is not 0")
 
-	readiness, err := engine.seenCoord.GetShardLeadersByRG(ctx, 1, "rg-a")
+	readiness, err := engine.seenExtras.GetShardLeadersByRG(ctx, 1, "rg-a")
 	assert.NoError(t, err)
 	assert.False(t, readiness.Ready,
 		"a not-ready verdict must survive the interface rather than degrading to the zero value of a bool nobody set")
@@ -195,6 +144,23 @@ func TestInstalledCoordinatorEngineIsReachableThroughCaps(t *testing.T) {
 		"the shards that are missing a leader must survive the interface")
 }
 
+// fakeExtras is the narrow half of the coordinator view - the three answers
+// that have no RPC - which is small enough to be worth faking.
+type fakeExtras struct {
+	pct       int32
+	readiness ShardLeaderReadiness
+}
+
+func (f fakeExtras) GetReplicaLoadPercentByRG(context.Context, int64, string) (int32, error) {
+	return f.pct, nil
+}
+
+func (f fakeExtras) GetShardLeadersByRG(context.Context, int64, string) (ShardLeaderReadiness, error) {
+	return f.readiness, nil
+}
+
+func (fakeExtras) InvalidateShardLeaderCache(context.Context, int64) error { return nil }
+
 func TestCoordinatorEngineLifecycleErrorsArePropagated(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
@@ -204,7 +170,7 @@ func TestCoordinatorEngineLifecycleErrorsArePropagated(t *testing.T) {
 	engine := &fakeCoordinatorEngine{startErr: wantStartErr, stopErr: wantStopErr}
 	assert.NoError(t, SetProvider(fakeProvider{name: "testprovider", caps: Capabilities{CoordinatorEngine: engine}}))
 
-	startErr := Caps().CoordinatorEngine.Start(context.Background(), fakeMixCoord{})
+	startErr := Caps().CoordinatorEngine.Start(context.Background(), nil, fakeExtras{})
 	assert.ErrorIs(t, startErr, wantStartErr,
 		"an error from Start must survive install, Caps, and the call unwrapped and unreplaced")
 
@@ -223,7 +189,7 @@ func TestNoopCoordinatorEngineIsInert(t *testing.T) {
 	reg := &recordingServiceRegistrar{}
 	e.RegisterOnCoordinator(reg)
 	assert.Empty(t, reg.names, "the inert engine must register no service")
-	assert.NoError(t, e.Start(context.Background(), fakeMixCoord{}))
+	assert.NoError(t, e.Start(context.Background(), nil, fakeExtras{}))
 	assert.NoError(t, e.Stop())
 }
 

@@ -54,7 +54,7 @@ type readyExtension struct {
 	collectionsFor []string
 }
 
-func (r *readyExtension) EnsureQueryReady(_ context.Context, dbName, collectionName string) (extension.QueryPlacement, error) {
+func (r *readyExtension) EnsureQueryReady(_ context.Context, _ extension.Coordinator, dbName, collectionName string) (extension.QueryPlacement, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
@@ -174,7 +174,7 @@ func TestEnsureQueryReadyRunsTheGateOnTheRequestsOwnContext(t *testing.T) {
 	ext := &readyExtension{resourceGroup: "rg-a"}
 	installReadyExtension(t, ext)
 	defer mockey.Mock((*readyExtension).EnsureQueryReady).To(
-		func(_ *readyExtension, ctx context.Context, _, _ string) (extension.QueryPlacement, error) {
+		func(_ *readyExtension, ctx context.Context, _ extension.Coordinator, _, _ string) (extension.QueryPlacement, error) {
 			seen <- ctx.Value(probeKey{})
 			return extension.QueryPlacement{ResourceGroup: "rg-a"}, nil
 		}).Build().UnPatch()

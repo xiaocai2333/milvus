@@ -134,7 +134,7 @@ func (c *formExtension) RewriteRequestParams(ctx context.Context, params []*comm
 // EnsureQueryReady reads back what the form itself bound, then falls back to
 // what the connection declared - the two routes a real form has, neither of
 // which milvus takes part in.
-func (c *formExtension) EnsureQueryReady(ctx context.Context, _, _ string) (extension.QueryPlacement, error) {
+func (c *formExtension) EnsureQueryReady(ctx context.Context, _ extension.Coordinator, _, _ string) (extension.QueryPlacement, error) {
 	c.mu.Lock()
 	c.readyCalls++
 	conns := c.connsSeen

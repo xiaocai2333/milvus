@@ -73,7 +73,7 @@ func TestQueryPlacementReleaseIsReachableThroughADefer(t *testing.T) {
 // answer. An error here would refuse every search in a stock binary; a resource
 // group here would silently restrict routing milvus is meant to leave alone.
 func TestNoopEnsureQueryReadyAdmitsAndScopesNothing(t *testing.T) {
-	placement, err := NoopProxyExtension{}.EnsureQueryReady(context.Background(), "db", "coll")
+	placement, err := NoopProxyExtension{}.EnsureQueryReady(context.Background(), nil, "db", "coll")
 
 	assert.NoError(t, err, "the native default must admit the query, or a stock binary could not search")
 	assert.Equal(t, "", placement.ResourceGroup,
@@ -89,7 +89,7 @@ func TestNoopEnsureQueryReadyIsInheritedByEmbedders(t *testing.T) {
 	type embedder struct{ NoopProxyExtension }
 
 	var e ProxyExtension = embedder{}
-	placement, err := e.EnsureQueryReady(context.Background(), "db", "coll")
+	placement, err := e.EnsureQueryReady(context.Background(), nil, "db", "coll")
 	assert.NoError(t, err)
 	assert.Equal(t, "", placement.ResourceGroup)
 }

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
+	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/v3/extension"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -84,7 +85,8 @@ type recordingEngine struct {
 	stopErr  error
 
 	seenRegistrar grpc.ServiceRegistrar
-	seenCoord     extension.MixCoord
+	seenCoord     extension.Coordinator
+	seenExtras    extension.CoordinatorExtras
 	startCount    int
 	stopCount     int
 }
@@ -97,7 +99,8 @@ func (e *recordingEngine) RegisterOnCoordinator(reg grpc.ServiceRegistrar) {
 	}, struct{}{})
 }
 
-func (e *recordingEngine) Start(_ context.Context, coord extension.MixCoord) error {
+func (e *recordingEngine) Start(_ context.Context, coord extension.Coordinator, extras extension.CoordinatorExtras) error {
+	e.seenExtras = extras
 	e.startCount++
 	e.seenCoord = coord
 	return e.startErr
@@ -127,7 +130,16 @@ func newTestServer(t *testing.T, coord *engineTestCoord) *Server {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return &Server{ctx: ctx, cancel: cancel, mixCoord: coord, grpcErrChan: make(chan error)}
+	// The coordinator client is the loopback one the real server builds for
+	// itself; an engine reaches the coordinator through it, so a test that
+	// leaves it nil would let a regression that stops passing it go unnoticed.
+	return &Server{
+		ctx:            ctx,
+		cancel:         cancel,
+		mixCoord:       coord,
+		mixCoordClient: mocks.NewMockMixCoordClient(t),
+		grpcErrChan:    make(chan error),
+	}
 }
 
 // TestCoordinatorEngineSeamIsInertWithoutProvider is the zero-behavior-change
@@ -148,13 +160,13 @@ func TestCoordinatorEngineSeamIsInertWithoutProvider(t *testing.T) {
 	// mockMix implements neither per-resource-group method. If the seam built
 	// the adapter regardless of the capability being absent, the type
 	// assertions inside it would fail and this would return an error.
-	assert.NoError(t, startCoordinatorEngine(context.Background(), &mockMix{}),
+	assert.NoError(t, startCoordinatorEngine(context.Background(), &mockMix{}, nil),
 		"with no provider installed the seam must not construct the adapter")
 
 	// A coordinator that CAN answer both per-resource-group questions must
 	// still never be asked them when no provider is installed.
 	coord := &engineTestCoord{}
-	assert.NoError(t, startCoordinatorEngine(context.Background(), coord))
+	assert.NoError(t, startCoordinatorEngine(context.Background(), coord, nil))
 	assert.Zero(t, coord.seenRG,
 		"with no provider installed nothing may ask the coordinator for per-resource-group load")
 	assert.Zero(t, coord.seenReadinessRG,
@@ -197,7 +209,7 @@ func TestServerStartHandsEngineAdapterOverCoordinator(t *testing.T) {
 	assert.NoError(t, svr.start())
 	assert.Equal(t, 1, engine.startCount, "the coordinator must start the engine exactly once")
 
-	pct, err := engine.seenCoord.GetReplicaLoadPercentByRG(context.Background(), 42, "rg-a")
+	pct, err := engine.seenExtras.GetReplicaLoadPercentByRG(context.Background(), 42, "rg-a")
 	assert.NoError(t, err)
 	assert.Equal(t, int32(63), pct,
 		"GetReplicaLoadPercentByRG must return what the coordinator computed, not a placeholder")
@@ -206,7 +218,7 @@ func TestServerStartHandsEngineAdapterOverCoordinator(t *testing.T) {
 	assert.Equal(t, "rg-a", coord.seenRG,
 		"the resource group name must reach GetLoadPercentageByResourceGroup unchanged")
 
-	readiness, err := engine.seenCoord.GetShardLeadersByRG(context.Background(), 43, "rg-b")
+	readiness, err := engine.seenExtras.GetShardLeadersByRG(context.Background(), 43, "rg-b")
 	assert.NoError(t, err)
 	assert.Equal(t, coord.readiness, readiness,
 		"GetShardLeadersByRG must return what the coordinator computed, not a placeholder")
@@ -215,16 +227,17 @@ func TestServerStartHandsEngineAdapterOverCoordinator(t *testing.T) {
 	assert.Equal(t, "rg-b", coord.seenReadinessRG,
 		"the resource group name must reach GetShardLeaderReadinessByResourceGroup unchanged, or every resource group would be asked about the same one")
 
-	assert.NoError(t, engine.seenCoord.InvalidateShardLeaderCache(context.Background(), 44))
+	assert.NoError(t, engine.seenExtras.InvalidateShardLeaderCache(context.Background(), 44))
 	assert.Equal(t, int64(44), coord.seenInvalidatedCollectionID,
 		"the collection id must reach the coordinator's proxy fan-out unchanged, or some other collection's shard leaders are the ones the proxies forget")
 
-	req := &milvuspb.DescribeCollectionRequest{CollectionName: "coll"}
-	resp, err := engine.seenCoord.DescribeCollection(context.Background(), req)
-	assert.NoError(t, err)
-	assert.Same(t, req, coord.seenDescribeReq,
-		"the eight coordinator methods must be forwarded to the real coordinator unchanged, not intercepted")
-	assert.Equal(t, int64(77), resp.GetCollectionID())
+	// The coordinator itself is handed over, not adapted: the engine gets the
+	// proxy-shaped client milvus already holds, so there is no forwarding here
+	// to test. What the test can still say is that it arrived - a nil would
+	// leave an engine unable to reach the coordinator at all, and nothing else
+	// in this file would notice.
+	assert.NotNil(t, engine.seenCoord,
+		"the engine must be handed the coordinator client, or it cannot load anything")
 }
 
 // TestServerStartFailsWhenCoordinatorCannotInvalidateShardLeaderCache asserts
@@ -363,22 +376,24 @@ func TestEngineStartWaitsForActivation(t *testing.T) {
 	assert.Equal(t, 1, engine.startCount, "activation is what starts the engine")
 }
 
-// The adapter's narrowness is structural, not conventional: the coordinator
-// sits in an unexported field, so no type assertion can climb from the
-// extension.MixCoord handle back to the full coordinator surface. With an
-// embedded types.MixCoordComponent this assertion would succeed.
-func TestEngineClientDoesNotLeakTheFullCoordinator(t *testing.T) {
-	client, err := newMixCoordEngineClient(&engineTestCoord{})
+// The extras adapter carries the three answers that have no RPC, and nothing
+// else. Narrowness matters here for the opposite reason it used to: the
+// coordinator's own surface now reaches an engine directly, through
+// extension.Coordinator, so anything still going through this adapter is by
+// definition something that could not be reached that way. A coordinator
+// leaking out of it would hide that fact.
+func TestExtrasCarryOnlyWhatHasNoRPC(t *testing.T) {
+	extras, err := newMixCoordExtras(&engineTestCoord{})
 	require.NoError(t, err)
 
-	_, leaks := client.(types.MixCoordComponent)
+	_, leaks := extras.(types.MixCoordComponent)
 	assert.False(t, leaks,
-		"extension.MixCoord must be the whole of what an engine can reach; see the removed GetShardLeaders")
+		"the extras adapter must not be a way back to the whole coordinator; what is reachable by RPC belongs on extension.Coordinator")
 
 	type shardLeadersProvider interface {
 		GetShardLeaders(ctx context.Context, req *querypb.GetShardLeadersRequest) (*querypb.GetShardLeadersResponse, error)
 	}
-	_, leaks = client.(shardLeadersProvider)
+	_, leaks = extras.(shardLeadersProvider)
 	assert.False(t, leaks,
-		"the collection-wide GetShardLeaders was removed from the interface; it must not be reachable structurally either")
+		"GetShardLeaders is a real RPC, so it reaches an engine through extension.Coordinator, not through here")
 }
