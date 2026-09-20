@@ -343,6 +343,8 @@ type commonConfig struct {
 	ArrowIOThreadPoolMaxCapacity        ParamItem `refreshable:"true"`
 	ArrowReaderHoleSizeLimitBytes       ParamItem `refreshable:"true"`
 	ArrowReaderRangeSizeLimitBytes      ParamItem `refreshable:"true"`
+	ParallelReadSplitSizeBytes          ParamItem `refreshable:"true"`
+	ParallelReadPoolSize                ParamItem `refreshable:"true"`
 	StorageReaderThreadPoolSize         ParamItem `refreshable:"true"`
 	IndexBuildReadWindowBytes           ParamItem `refreshable:"true"`
 	EnableMaterializedView              ParamItem `refreshable:"false"`
@@ -945,6 +947,42 @@ This configuration is only used by querynode and indexnode, it selects CPU instr
 		Export: false,
 	}
 	p.ArrowReaderRangeSizeLimitBytes.Init(base.mgr)
+
+	p.ParallelReadSplitSizeBytes = ParamItem{
+		Key:     "common.storage.parallelReadSplitSizeBytes",
+		Version: "3.0.2",
+		Doc: `Target size of one object-storage request when a storage v2 packed reader fetches a ` +
+			`column chunk. Parquet asks its file for one contiguous range per coalesced column chunk ` +
+			`group and arrow never splits that range further, so a whole column chunk is otherwise ` +
+			`read as a single request on the calling thread. Reads larger than this are split into ` +
+			`parts fetched in parallel on a pool of common.storage.parallelReadPoolSize threads. ` +
+			`Smaller values give more concurrency but more requests, which object stores bill for and ` +
+			`may throttle. 0 keeps the single-request behavior. Accepts a byte count or a size such as 8m.`,
+		DefaultValue: "8m",
+		Export:       false,
+	}
+	p.ParallelReadSplitSizeBytes.Init(base.mgr)
+
+	p.ParallelReadPoolSize = ParamItem{
+		Key:     "common.storage.parallelReadPoolSize",
+		Version: "3.0.2",
+		Doc: `Threads serving the split reads described in common.storage.parallelReadSplitSizeBytes. ` +
+			`This pool is deliberately separate from arrow's IO pool ` +
+			`(common.arrow.ioThreadPoolCoefficient): a split read is issued from a thread that then ` +
+			`waits for its parts, so sharing one pool could starve. It bounds how many extra requests ` +
+			`the process keeps in flight, and applies to every storage v2 packed reader ` +
+			`(compaction, import, stats). Values <= 0 mean the number of CPU cores.`,
+		DefaultValue: "0",
+		Formatter: func(v string) string {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return strconv.Itoa(hardware.GetCPUNum())
+			}
+			return v
+		},
+		Export: false,
+	}
+	p.ParallelReadPoolSize.Init(base.mgr)
 
 	p.StorageReaderThreadPoolSize = ParamItem{
 		Key:          "common.storage.readerThreadPoolSize",

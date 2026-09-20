@@ -397,6 +397,22 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, int64(1048576), Params.ArrowReaderHoleSizeLimitBytes.GetAsInt64())
 		assert.Equal(t, int64(67108864), Params.ArrowReaderRangeSizeLimitBytes.GetAsInt64())
 
+		assert.Equal(t, int64(8*1024*1024), Params.ParallelReadSplitSizeBytes.GetAsSize(),
+			"storage v2 column chunk reads are split at 8MB by default")
+		assert.Equal(t, hardware.GetCPUNum(), Params.ParallelReadPoolSize.GetAsInt(),
+			"the split pool defaults to one thread per CPU core")
+		params.Save(Params.ParallelReadSplitSizeBytes.Key, "4m")
+		params.Save(Params.ParallelReadPoolSize.Key, "6")
+		assert.Equal(t, int64(4*1024*1024), Params.ParallelReadSplitSizeBytes.GetAsSize())
+		assert.Equal(t, 6, Params.ParallelReadPoolSize.GetAsInt())
+		params.Save(Params.ParallelReadSplitSizeBytes.Key, "0")
+		assert.Equal(t, int64(0), Params.ParallelReadSplitSizeBytes.GetAsSize(), "0 turns splitting off")
+		params.Save(Params.ParallelReadPoolSize.Key, "-1")
+		assert.Equal(t, hardware.GetCPUNum(), Params.ParallelReadPoolSize.GetAsInt(),
+			"a non-positive pool size falls back to CPU cores")
+		params.Reset(Params.ParallelReadSplitSizeBytes.Key)
+		params.Reset(Params.ParallelReadPoolSize.Key)
+
 		assert.Equal(t, int32(0), Params.StorageReaderThreadPoolSize.GetAsInt32())
 		assert.Equal(t, int64(0), Params.IndexBuildReadWindowBytes.GetAsInt64())
 		params.Save(Params.StorageReaderThreadPoolSize.Key, "16")

@@ -588,6 +588,17 @@ func EffectiveLoonReaderThreadPoolSize() int32 {
 	return int32(C.GetLoonReaderThreadPoolSize())
 }
 
+// ApplyParallelReadConfig publishes how storage v2 packed readers split a
+// large column-chunk read into concurrent ranged requests. It is a plain
+// setter: an unusable configuration (non-positive split size or pool size)
+// switches splitting off rather than failing, so a bad value degrades to the
+// pre-existing single-request behavior instead of breaking reads.
+func ApplyParallelReadConfig(params *paramtable.ComponentParam) {
+	splitSize := params.CommonCfg.ParallelReadSplitSizeBytes.GetAsSize()
+	poolSize := params.CommonCfg.ParallelReadPoolSize.GetAsInt()
+	C.SetStorageParallelReadConfig(C.int64_t(splitSize), C.int(poolSize))
+}
+
 func InitArrowReaderConfig(params *paramtable.ComponentParam) error {
 	arrowReaderConfig := C.CArrowReaderConfig{
 		hole_size_limit_bytes:  C.int64_t(params.CommonCfg.ArrowReaderHoleSizeLimitBytes.GetAsInt64()),

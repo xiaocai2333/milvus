@@ -37,6 +37,7 @@
 #include "monitor/scope_metric.h"
 #include "storage/KeyRetriever.h"
 #include "storage/PluginLoader.h"
+#include "storage/ParallelReadFileSystem.h"
 #include "storage/StorageV2FSCache.h"
 #include "storage/plugin/PluginInterface.h"
 #include "storage/StatusToErrorCode.h"
@@ -112,6 +113,9 @@ NewPackedReaderWithStorageConfig(char** paths,
                 milvus::ErrorCode::FileReadFailed,
                 "[StorageV2] Failed to get filesystem");
         }
+        // Fetch large column-chunk ranges as concurrent parts; a no-op while
+        // parallel reading is switched off.
+        trueFs = milvus::storage::WrapParallelRead(std::move(trueFs));
         auto schema_result = arrow::ImportSchema(schema);
         if (!schema_result.ok()) {
             // A malformed C-ABI schema from the Go side; ValueOrDie would
@@ -163,7 +167,7 @@ NewPackedReaderWithProperties(char** paths,
             auto error = milvus_storage::ToSegcoreError(fs_result.status());
             return milvus::FailureCStatus(&error);
         }
-        auto trueFs = fs_result.ValueOrDie();
+        auto trueFs = milvus::storage::WrapParallelRead(fs_result.ValueOrDie());
         auto schema_result = arrow::ImportSchema(schema);
         if (!schema_result.ok()) {
             // A malformed C-ABI schema from the Go side; ValueOrDie would
@@ -206,6 +210,9 @@ NewPackedReader(char** paths,
                 milvus::ErrorCode::FileReadFailed,
                 "[StorageV2] Failed to get filesystem");
         }
+        // Fetch large column-chunk ranges as concurrent parts; a no-op while
+        // parallel reading is switched off.
+        trueFs = milvus::storage::WrapParallelRead(std::move(trueFs));
         auto schema_result = arrow::ImportSchema(schema);
         if (!schema_result.ok()) {
             // A malformed C-ABI schema from the Go side; ValueOrDie would

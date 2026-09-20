@@ -118,6 +118,16 @@ SetExprResCacheConfig(const char* mode,            // "memory" or "disk"
 void
 SetArrowIOThreadPoolCapacity(int threads);
 
+// Configure how a single large object-storage read is split into concurrent
+// ranged reads for storage v2 packed readers. Parquet asks for one contiguous
+// range per coalesced column chunk group and arrow never splits it further, so
+// without this a whole column chunk is one request issued on the calling
+// thread. `split_size_bytes` is the target part size and `parallelism` sizes
+// the pool serving the parts; either being <= 0 turns splitting off for
+// readers opened afterwards.
+void
+SetStorageParallelReadConfig(int64_t split_size_bytes, int parallelism);
+
 void
 UpdateArrowIOThreadPoolMetrics();
 

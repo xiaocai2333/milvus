@@ -98,6 +98,10 @@ func InitSegcore(nodeID int64) error {
 	// (sort compaction, import, stats). Mirror of the QueryNode wiring in #49208.
 	C.SetArrowIOThreadPoolCapacity(C.int(initcore.ResolveArrowIOThreadPoolCapacity()))
 
+	// Publish how a large column-chunk read is split into concurrent ranged
+	// requests for storage v2 packed readers (compaction, import, stats).
+	initcore.ApplyParallelReadConfig(paramtable.Get())
+
 	// Apply Arrow parquet reader range-coalescing config (hole/range size limits).
 	if err := initcore.InitArrowReaderConfig(paramtable.Get()); err != nil {
 		return err
@@ -123,6 +127,7 @@ func InitSegcore(nodeID int64) error {
 	// without restart, matching QueryNode behavior.
 	initcore.RegisterArrowIOThreadPoolWatchers(paramtable.Get(), "datanode")
 	initcore.RegisterArrowReaderConfigWatchers(paramtable.Get(), "datanode")
+	initcore.RegisterParallelReadConfigWatchers(paramtable.Get(), "datanode")
 	initcore.RegisterLoonReaderConfigWatchers(paramtable.Get(), "datanode")
 
 	// init paramtable change callback for core related config

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/pkg/v3/config"
+	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
@@ -493,4 +494,57 @@ func TestInitStorageV2FileSystem(t *testing.T) {
 
 	err = InitStorageV2FileSystem(paramtable.Get())
 	assert.NoError(t, err)
+}
+
+// TestApplyParallelReadConfig pins that the split-read configuration reaches
+// the C side for the shipped default and for an explicitly disabled setting,
+// and that neither path returns an error to the caller: a bad value must
+// degrade to the single-request behavior instead of failing reader creation.
+func TestApplyParallelReadConfig(t *testing.T) {
+	paramtable.Init()
+	pt := paramtable.Get()
+	defer pt.Reset(pt.CommonCfg.ParallelReadSplitSizeBytes.Key)
+	defer pt.Reset(pt.CommonCfg.ParallelReadPoolSize.Key)
+
+	assert.Equal(t, int64(8*1024*1024), pt.CommonCfg.ParallelReadSplitSizeBytes.GetAsSize(),
+		"storage v2 reads split at 8MB by default")
+	assert.Equal(t, hardware.GetCPUNum(), pt.CommonCfg.ParallelReadPoolSize.GetAsInt(),
+		"the split pool defaults to one thread per CPU core")
+	assert.NotPanics(t, func() { ApplyParallelReadConfig(pt) })
+
+	assert.NoError(t, pt.Save(pt.CommonCfg.ParallelReadSplitSizeBytes.Key, "0"))
+	assert.NotPanics(t, func() { ApplyParallelReadConfig(pt) })
+
+	assert.NoError(t, pt.Save(pt.CommonCfg.ParallelReadSplitSizeBytes.Key, "4m"))
+	assert.NoError(t, pt.Save(pt.CommonCfg.ParallelReadPoolSize.Key, "-3"))
+	assert.Equal(t, hardware.GetCPUNum(), pt.CommonCfg.ParallelReadPoolSize.GetAsInt(),
+		"a negative pool size falls back to CPU cores")
+	assert.NotPanics(t, func() { ApplyParallelReadConfig(pt) })
+}
+
+// TestRegisterParallelReadConfigWatchers verifies both keys are watched, so a
+// runtime change of either reaches the C side without a restart.
+func TestRegisterParallelReadConfigWatchers(t *testing.T) {
+	paramtable.Init()
+	pt := paramtable.Get()
+	defer pt.Reset(pt.CommonCfg.ParallelReadSplitSizeBytes.Key)
+	defer pt.Reset(pt.CommonCfg.ParallelReadPoolSize.Key)
+
+	assert.NotPanics(t, func() { RegisterParallelReadConfigWatchers(pt, "test") })
+
+	var splitFires, poolFires atomic.Int32
+	splitSentinel := config.NewHandler("sentinel-split", func(*config.Event) { splitFires.Add(1) })
+	poolSentinel := config.NewHandler("sentinel-pool", func(*config.Event) { poolFires.Add(1) })
+	pt.Watch(pt.CommonCfg.ParallelReadSplitSizeBytes.Key, splitSentinel)
+	pt.Watch(pt.CommonCfg.ParallelReadPoolSize.Key, poolSentinel)
+	defer pt.Unwatch(pt.CommonCfg.ParallelReadSplitSizeBytes.Key, splitSentinel)
+	defer pt.Unwatch(pt.CommonCfg.ParallelReadPoolSize.Key, poolSentinel)
+
+	assert.NoError(t, pt.Save(pt.CommonCfg.ParallelReadSplitSizeBytes.Key, "2m"))
+	assert.NoError(t, pt.Save(pt.CommonCfg.ParallelReadPoolSize.Key, "2"))
+
+	assert.Positive(t, splitFires.Load(),
+		"helper must have registered a handler on ParallelReadSplitSizeBytes")
+	assert.Positive(t, poolFires.Load(),
+		"helper must have registered a handler on ParallelReadPoolSize")
 }

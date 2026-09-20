@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include "common/init_c.h"
+#include "storage/ParallelReadFileSystem.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -220,6 +221,11 @@ SetArrowIOThreadPoolCapacity(int threads) {
     }
     LOG_INFO("arrow io thread pool capacity set to {}", threads);
     UpdateArrowIOThreadPoolMetrics();
+}
+
+void
+SetStorageParallelReadConfig(int64_t split_size_bytes, int parallelism) {
+    milvus::storage::ConfigureParallelRead(split_size_bytes, parallelism);
 }
 
 void

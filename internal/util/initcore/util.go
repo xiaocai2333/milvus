@@ -194,6 +194,26 @@ func RegisterArrowReaderConfigWatchers(pt *paramtable.ComponentParam, source str
 		config.NewHandler(pt.CommonCfg.ArrowReaderRangeSizeLimitBytes.Key, handler))
 }
 
+// RegisterParallelReadConfigWatchers wires hot-reload of the split-read size
+// and pool size. Readers already open keep the pool they were opened with, so
+// an update only changes readers opened afterwards, plus the pool's size.
+func RegisterParallelReadConfigWatchers(pt *paramtable.ComponentParam, source string) {
+	handler := func(evt *config.Event) {
+		if !evt.HasUpdated {
+			return
+		}
+		ApplyParallelReadConfig(pt)
+		mlog.Info(context.TODO(), "parallel read config reconfigured",
+			mlog.String("source", source),
+			mlog.Int64("splitSizeBytes", pt.CommonCfg.ParallelReadSplitSizeBytes.GetAsSize()),
+			mlog.Int("poolSize", pt.CommonCfg.ParallelReadPoolSize.GetAsInt()))
+	}
+	pt.Watch(pt.CommonCfg.ParallelReadSplitSizeBytes.Key,
+		config.NewHandler(pt.CommonCfg.ParallelReadSplitSizeBytes.Key, handler))
+	pt.Watch(pt.CommonCfg.ParallelReadPoolSize.Key,
+		config.NewHandler(pt.CommonCfg.ParallelReadPoolSize.Key, handler))
+}
+
 // RegisterLoonReaderConfigWatchers wires hot-reload of the milvus-storage
 // reader thread pool size and the index-build read window. `source` is
 // included in the log entry for the same reason as in
