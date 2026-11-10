@@ -1465,18 +1465,8 @@ func CalculateTaskSlot(task ImportTask, importMeta ImportMeta) int {
 		taskBufferSize = paramtable.Get().DataNodeCfg.ImportDeleteBufferSize.GetAsInt()
 	}
 	memoryLimitPerSlot := paramtable.Get().DataCoordCfg.ImportMemoryLimitPerSlot.GetAsInt()
-	if files := task.GetFileStats(); !isL0Import && len(files) > 0 && files[0].GetImportFile().GetSnapshotSource() != nil {
-		// Typed tasks are homogeneous. Before selecting a worker we do not know
-		// its pool size or memory allowance, so use the file count as an upper
-		// bound on concurrent readers. The DN allocator remains authoritative
-		// and may admit fewer readers or smaller row buffers.
-		deleteBudget := paramtable.Get().DataNodeCfg.ImportDeleteBufferSize.GetAsInt()
-		taskBufferSize = len(files) * (taskBufferSize + deleteBudget)
-		if importutilv2.SnapshotSourceUsesSharedL0(files[0].GetImportFile().GetSnapshotSource()) {
-			// One delete batch is reserved per task. The per-reader delete
-			// allowances above become the shared task's bitmap pool on the DN.
-			taskBufferSize += deleteBudget
-		}
+	if snapshotBytes, ok := snapshotImportBufferBytes(task, job, int64(taskBufferSize)); ok {
+		taskBufferSize = int(snapshotBytes)
 		// Round up only for the new snapshot accounting. Keep the existing
 		// ordinary/legacy L0 slot calculation unchanged.
 		memoryBasedSlots := (taskBufferSize-1)/memoryLimitPerSlot + 1
@@ -1624,3 +1614,31 @@ func GetImportSegmentIDsByVchannel(ctx context.Context, importMeta ImportMeta, m
 // attached via errors.Mark, NOT a merr error: merr's errors.Is matches by error code,
 // which would make every ImportSysFailed error (mostly transient) match it.
 var ErrRollbackImportNoVchannels = errors.New("import job has no vchannels")
+
+// snapshotImportBufferBytes returns what the worker reserves for a
+// snapshot-source task whose readers each want perReaderBuffer bytes, and
+// false for any other task. Each reader takes its row buffer plus one delete
+// budget (importv2 reserveSnapshotRead / AllocateSnapshotTask), and a task
+// whose sources share one L0 set reserves one more delete batch for the task.
+// Typed tasks are homogeneous. Before selecting a worker we do not know its
+// pool size or memory allowance, so the file count is the upper bound on
+// concurrent readers. The DN allocator remains authoritative and may admit
+// fewer readers or smaller row buffers. Both the task slot (CalculateTaskSlot)
+// and the task memory (GetTaskResource) are priced on this.
+func snapshotImportBufferBytes(task ImportTask, job ImportJob, perReaderBuffer int64) (int64, bool) {
+	if importutilv2.IsL0Import(job.GetOptions()) {
+		return 0, false
+	}
+	files := task.GetFileStats()
+	if len(files) == 0 || files[0].GetImportFile().GetSnapshotSource() == nil {
+		return 0, false
+	}
+	deleteBudget := paramtable.Get().DataNodeCfg.ImportDeleteBufferSize.GetAsInt64()
+	size := int64(len(files)) * (perReaderBuffer + deleteBudget)
+	if importutilv2.SnapshotSourceUsesSharedL0(files[0].GetImportFile().GetSnapshotSource()) {
+		// The per-reader delete allowances above become the shared task's
+		// bitmap pool on the DN.
+		size += deleteBudget
+	}
+	return size, true
+}

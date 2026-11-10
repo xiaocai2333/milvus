@@ -612,3 +612,12 @@ func TestMemoryAllocatorCancelRacesRelease(t *testing.T) {
 	}
 	assert.Equal(t, int64(0), ma.usedMemory, "canceled waiter must not be charged")
 }
+
+func TestMemoryAllocatorUsed(t *testing.T) {
+	ma := NewMemoryAllocator(1 << 30)
+	assert.Zero(t, ma.Used())
+	assert.NoError(t, ma.BlockingAllocate(context.Background(), 1, 1<<20))
+	assert.Equal(t, int64(1<<20), ma.Used())
+	ma.Release(1, 1<<20)
+	assert.Zero(t, ma.Used())
+}
