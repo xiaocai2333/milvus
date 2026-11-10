@@ -25,6 +25,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/datacoord/meta"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
+	"github.com/milvus-io/milvus/internal/datacoord/taskresource"
 	"github.com/milvus-io/milvus/internal/json"
 	importcommon "github.com/milvus-io/milvus/internal/util/importutilv2/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
@@ -121,6 +122,12 @@ func (p *preImportV3Task) GetTaskSlot() int64 {
 	return 1
 }
 
+// GetTaskResource: the count-only preimport holds no data buffer (see
+// GetTaskSlot), so it is priced as a lightweight task.
+func (p *preImportV3Task) GetTaskResource() (taskcommon.Resource, bool) {
+	return taskresource.Lightweight(), true
+}
+
 func (p *preImportV3Task) SetTaskTime(timeType taskcommon.TimeType, time time.Time) {
 	p.times.SetTaskTime(timeType, time)
 }
@@ -176,7 +183,8 @@ func (p *preImportV3Task) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 		return
 	}
 
-	err = cluster.CreatePreImportV3(nodeID, req, p.GetTaskSlot())
+	resource, _ := p.GetTaskResource()
+	err = cluster.CreatePreImportV3(nodeID, req, p.GetTaskSlot(), resource)
 	if err != nil {
 		mlog.Warn(context.TODO(), "preimport v3 failed", WrapTaskLog(p, mlog.Err(err))...)
 		// Raw transport errors are not terminal and retry; a deterministic
