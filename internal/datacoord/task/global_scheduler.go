@@ -35,8 +35,7 @@ import (
 
 const NullNodeID = -1
 
-// blockedRoundLogInterval bounds how often a round that ends at a task that
-// does not fit is logged: it repeats every round for as long as the task waits.
+// blockedRoundLogInterval bounds logs for tasks that cannot fit a worker.
 const blockedRoundLogInterval = 30 * time.Second
 
 type GlobalScheduler interface {
@@ -303,7 +302,8 @@ func (s *globalTaskScheduler) schedule() {
 	picker := newNodePicker(nodeSlots)
 	futures := make([]*conc.Future[struct{}], 0)
 	var delayed []Task
-	for {
+	// Bound the scan to the initial queue size; defer unplaced tasks until its end.
+	for examined := 0; examined < pendingNum; examined++ {
 		task := s.pendingTasks.Pop()
 		if task == nil {
 			break
@@ -327,6 +327,17 @@ func (s *globalTaskScheduler) schedule() {
 			s.mu.RUnlock(taskID)
 			continue
 		}
+		if local, ok := task.(CoordinatorTask); ok && task.GetTaskState() == taskcommon.Init && local.TryCompleteOnCoordinator(s.ctx) {
+			switch task.GetTaskState() {
+			case taskcommon.None, taskcommon.Finished, taskcommon.Failed:
+				s.backoffs.Remove(taskID)
+			default:
+				s.recordTaskFailure(task)
+				delayed = append(delayed, task)
+			}
+			s.mu.RUnlock(taskID)
+			continue
+		}
 		taskSlot := task.GetTaskSlot()
 		// Price once per round and reuse: the placement decision and the log
 		// below must agree, and a family that walks meta on a cache miss would
@@ -335,32 +346,27 @@ func (s *globalTaskScheduler) schedule() {
 		// A family that cannot resolve its inputs yet answers with an upper
 		// bound, not the floor, and is placed when capacity fits. Waiting for an
 		// exact price instead would strand any task whose inputs are gone for
-		// good: such a task can never resolve, and CreateTaskOnWorker -- the only
-		// code that retires it -- sits behind this point.
+		// good. CoordinatorTask handles local completion before this point; other
+		// families still retire obsolete work in CreateTaskOnWorker.
 		resource, _ := task.GetTaskResource()
 		// A task the worker bounds to a share of its memory is charged that
 		// bound on each node, not its estimate (NodeMemoryBounded).
 		memoryShare := nodeMemoryShare(task)
 		nodeID := picker.PickBounded(taskSlot, resource, memoryShare)
 		if nodeID == NullNodeID {
-			// The task does not fit the cluster right now. End the round, as the
-			// slot heap always has: tasks behind it are not placed ahead of it, so
-			// the capacity that running tasks release is held for the oldest task
-			// that waits instead of being taken by a stream of smaller ones.
-			//
-			// Everything behind it waits too, so say which task holds the queue
-			// and what each worker had left for it.
+			// Keep memory admission strict, but let later tasks use capacity that
+			// this task cannot use. An oversized head must not block every family.
 			mlog.RatedInfo(s.ctx, rate.Every(blockedRoundLogInterval),
-				"task does not fit any worker now, scheduling round ends at it",
+				"task does not fit any worker now, deferring it to the next round",
 				WrapTaskLog(task,
 					mlog.Int64("taskSlot", taskSlot),
 					mlog.Stringer("resource", resource),
 					mlog.Float64("nodeMemoryShare", memoryShare),
 					mlog.Int("pendingBehind", s.pendingTasks.TaskCount()),
 					mlog.Any("resourceNodes", picker.remaining()))...)
-			s.pendingTasks.Push(task)
+			delayed = append(delayed, task)
 			s.mu.RUnlock(taskID)
-			break
+			continue
 		}
 		s.mu.RUnlock(taskID)
 		future := s.execPool.Submit(func() (struct{}, error) {

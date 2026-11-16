@@ -190,11 +190,11 @@ stops the answer from being cached. Two cases are priced differently:
   the floor would let a worker accept a task of unknown size and then book its
   real size once the request is built.
 - **inputs gone for good** (a segment dropped by compaction, drop-collection or
-  drop-partition; a job no longer in meta): the floor. Such a task never
-  resolves, and `CreateTaskOnWorker` is the only code that retires it, so it
-  must be placed to reach that code. Waiting for an exact price instead would
-  re-queue it forever, and since a task that does not fit ends the round, it
-  would stop every task behind it as well.
+  drop-partition; a dropped index): return the floor without caching it. Index
+  tasks check target liveness before consulting their price cache. Their
+  coordinator-only preparation persists retirement before placement, including
+  when there are no workers or no available worker memory. Metadata failures
+  retain the pending task and use the scheduler's retry backoff.
 - **an L0 compaction with a Sealed target**: if the target is still Sealed at
   dispatch, `SelectFlushedSegment` fails the task. The price counts what is
   there now and is not cached. That matters for a task that waits for
@@ -400,19 +400,21 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   no oversized dispatch exception: memory admission may not be bypassed.
   Such a task needs its estimate or worker capacity to change before it fits.
 
-- A `NullNodeID` ends the round, exactly as the slot heap always has: the task
-  goes back on the queue and nothing behind it is placed this round. The queue
-  is ordered by task ID, so the oldest waiting task keeps its place at the head,
-  and the capacity running tasks release is held for it instead of being taken
-  by a stream of smaller tasks behind it. The cost, the same as before this
-  change, is head-of-line blocking: while the head does not fit, smaller tasks
-  that would fit wait too.
-
-  A task in failure backoff is set aside without limit and the round goes on,
-  as before this change. Backoff is checked before pricing and costs no meta
-  walk, and during a retry storm the oldest tasks are the ones failing over and
-  over: if setting them aside could end the round, a healthy task behind them
-  would never be reached.
+- Index tasks expose optional coordinator-only preparation. The scheduler runs
+  it before pricing and placement, sharing the same target, no-train, nullable,
+  and vector-array threshold checks as dispatch. FLAT/BIN_FLAT and below-threshold
+  builds finish on the coordinator without consuming worker memory. Dispatch
+  repeats these checks to handle a target disappearing after placement.
+- A `NullNodeID` defers that task until the next round; later fitting tasks may
+  run. A round examines at most its initial pending count and re-enqueues deferred
+  tasks afterwards, avoiding a busy loop on the oldest task. Estimates above all
+  workers' capacity remain pending until capacity or the estimate changes; they
+  never bypass memory admission and never block unrelated work. A continuous
+  stream of smaller tasks may delay a larger task; this policy does not reserve
+  idle capacity for the oldest task.
+- Failure-backoff tasks are deferred in the same way, with terminal-state checks
+  under the task lock before re-enqueueing, so concurrent finalization cannot
+  resurrect a completed task.
 
 ## Compatibility
 

@@ -17,6 +17,7 @@
 package task
 
 import (
+	"context"
 	"time"
 
 	"github.com/milvus-io/milvus/internal/datacoord/session"
@@ -33,12 +34,12 @@ type Task interface {
 	// places on and the request ships. Never zero; subject to memory admission. A
 	// family whose inputs are still resolving answers with an upper bound on
 	// itself, and one whose inputs are gone for good answers with the configured
-	// floor, which is enough to reach the code that retires it.
+	// floor. CoordinatorTask can retire local work before placement.
 	//
 	// The bool reports whether the answer is exact. It governs caching only:
 	// an inexact answer is recomputed next round so the exact one can replace
 	// it. It must not gate placement -- an input that is gone never becomes
-	// exact, and a task the scheduler refuses to place is never retired.
+	// exact. The optional coordinator hook handles index retirement separately.
 	GetTaskResource() (taskcommon.Resource, bool)
 	SetTaskTime(timeType taskcommon.TimeType, time time.Time)
 	GetTaskTime(timeType taskcommon.TimeType) time.Time
@@ -47,6 +48,14 @@ type Task interface {
 	CreateTaskOnWorker(nodeID int64, cluster session.Cluster)
 	QueryTaskOnWorker(cluster session.Cluster)
 	DropTaskOnWorker(cluster session.Cluster)
+}
+
+// CoordinatorTask can complete or retire work without a DataNode. Returning
+// true means worker placement must not run, even when persistence failed and
+// the task remains Init. The scheduler applies the normal retry backoff then.
+// Returning false must leave the task eligible for normal worker admission.
+type CoordinatorTask interface {
+	TryCompleteOnCoordinator(context.Context) bool
 }
 
 func WrapTaskLog(task Task, fields ...mlog.Field) []mlog.Field {

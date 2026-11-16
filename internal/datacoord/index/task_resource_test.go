@@ -17,18 +17,25 @@
 package index
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/datacoord/meta"
+	"github.com/milvus-io/milvus/internal/datacoord/session"
+	globalTask "github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/internal/datacoord/taskresource"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -154,11 +161,11 @@ func TestTaskResource_IndexFieldNotInSchema(t *testing.T) {
 	it := newIndexBuildTask(&model.SegmentIndex{CollectionID: 1, PartitionID: 2, SegmentID: 3, IndexID: 4, BuildID: 5, NumRows: 1000}, 1, mt, im, nil, nil, nil)
 	assert.Equal(t, taskresource.Index(taskresource.FixtureSegmentSize, true), taskresource.Price(it.GetTaskResource()))
 
-	// Cached: dropping the segment does not change the answer, and it is the
-	// whole-segment price rather than the floor.
+	// Liveness is checked before the cache: a dropped target must not retain
+	// the old whole-segment price.
 	mt.Segments.DropSegment(3)
-	assert.Equal(t, taskresource.Index(taskresource.FixtureSegmentSize, true), taskresource.Price(it.GetTaskResource()))
-	assert.NotEqual(t, taskresource.Default().CPU, taskresource.Price(it.GetTaskResource()).CPU)
+	assert.Equal(t, taskresource.Default(), taskresource.Price(it.GetTaskResource()))
+	assert.False(t, taskresource.Resolved(it.GetTaskResource()))
 }
 
 // TestTaskResource_IndexUnpriceableField covers a known schema whose field still
@@ -174,4 +181,88 @@ func TestTaskResource_IndexUnpriceableField(t *testing.T) {
 	it := newIndexBuildTask(&model.SegmentIndex{CollectionID: 1, SegmentID: 3, IndexID: 4, BuildID: 5, NumRows: 1000}, 1, mt, im, nil, nil, nil)
 	assert.Equal(t, taskresource.Default(), taskresource.Price(it.GetTaskResource()))
 	assert.Equal(t, taskresource.Default(), taskresource.Price(it.GetTaskResource()))
+}
+
+func TestTaskResource_DroppedIndexBypassesCachedPrice(t *testing.T) {
+	paramtable.Init()
+	mt, im := fixtureIndexMeta(t, taskresource.NewFixtureMeta(true))
+	it := bigFixtureIndexTask(mt, im)
+	assert.Greater(t, taskresource.Price(it.GetTaskResource()).Memory, taskresource.Default().Memory)
+	im.Indexes[1][4].IsDeleted = true
+	assert.Equal(t, taskresource.Default(), taskresource.Price(it.GetTaskResource()))
+	assert.False(t, taskresource.Resolved(it.GetTaskResource()))
+	// A reconstructed task after a coordinator restart must agree too.
+	assert.Equal(t, taskresource.Default(), taskresource.Price(bigFixtureIndexTask(mt, im).GetTaskResource()))
+}
+
+// Use real index metadata/pricing and the running global scheduler, rather than
+// mocking a dropped task as already priced at the floor.
+func TestIndexScheduler_CoordinatorOnlyTasksDoNotConsumeWorkerMemory(t *testing.T) {
+	paramtable.Init()
+	for _, name := range []string{"FLAT", "BIN_FLAT", "small", "nullable", "dropped-segment", "dropped-index", "dropped-index-reload"} {
+		t.Run(name, func(t *testing.T) {
+			mt, im := fixtureIndexMeta(t, taskresource.NewFixtureMeta(true))
+			segIndex, ok := im.GetIndexJob(5)
+			require.True(t, ok)
+			segIndex.NumRows = taskresource.BigFixtureRows
+			im.SegmentBuildInfo.Add(segIndex)
+			handler := meta.NewNMockHandler(t)
+			collectionInfo := mt.GetCollection(1)
+			handler.EXPECT().GetCollection(mock.Anything, int64(1)).Return(collectionInfo, nil).Maybe()
+			it := newIndexBuildTask(segIndex, 128, mt, im, handler, nil, nil)
+			const capacity = int64(64 << 20)
+			require.Greater(t, taskresource.Price(it.GetTaskResource()).Memory, capacity)
+			wantState := commonpb.IndexState_Finished
+			switch name {
+			case "FLAT", "BIN_FLAT":
+				im.Indexes[1][4].IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: name}}
+			case "small":
+				segIndex.NumRows = 1
+				im.SegmentBuildInfo.Add(segIndex)
+			case "nullable":
+				collectionInfo.Schema.Fields[1].Nullable = true
+				taskresource.UpdateFixtureSegment(mt, func(seg *datapb.SegmentInfo) {
+					seg.Stats.NullCounts = map[int64]int64{101: taskresource.BigFixtureRows}
+				})
+			case "dropped-segment":
+				mt.Segments.DropSegment(3)
+				wantState = commonpb.IndexState_Failed
+			case "dropped-index", "dropped-index-reload":
+				im.Indexes[1][4].IsDeleted = true
+				wantState = commonpb.IndexState_Failed
+				if name == "dropped-index-reload" {
+					it = newIndexBuildTask(segIndex, 128, mt, im, handler, nil, nil)
+				}
+			}
+			cluster := session.NewMockCluster(t)
+			cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{
+				1: {NodeID: 1, TotalMemory: capacity, AvailableMemory: capacity},
+			}).Maybe()
+			scheduler := globalTask.NewGlobalTaskScheduler(context.Background(), cluster)
+			var dispatched atomic.Bool
+			follower := globalTask.NewMockTask(t)
+			follower.EXPECT().GetTaskID().Return(int64(6)).Maybe()
+			follower.EXPECT().GetTaskType().Return(taskcommon.Compaction).Maybe()
+			follower.EXPECT().GetTaskSlot().Return(int64(128)).Maybe()
+			follower.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: capacity}, true).Maybe()
+			follower.EXPECT().GetTaskState().RunAndReturn(func() taskcommon.State {
+				if dispatched.Load() {
+					return taskcommon.Finished
+				}
+				return taskcommon.Init
+			}).Maybe()
+			follower.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
+			follower.EXPECT().CreateTaskOnWorker(int64(1), cluster).Run(func(int64, session.Cluster) { dispatched.Store(true) }).Once()
+			scheduler.Enqueue(it)
+			scheduler.Enqueue(follower)
+			scheduler.Start()
+			// Join scheduler callbacks before the test and mock expectations finish.
+			defer scheduler.Stop()
+			require.Eventually(t, func() bool {
+				persisted, ok := im.GetIndexJob(5)
+				return ok && persisted.IndexState == wantState && dispatched.Load()
+			}, 5*time.Second, 10*time.Millisecond)
+			cluster.AssertNotCalled(t, "CreateIndex", mock.Anything, mock.Anything, mock.Anything)
+		})
+	}
 }

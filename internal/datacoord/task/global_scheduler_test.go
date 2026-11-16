@@ -827,17 +827,14 @@ func TestGlobalScheduler_TerminalTaskClearsBackoff(t *testing.T) {
 	assert.Equal(t, 0, len(scheduler.pendingTasks.TaskIDs()))
 }
 
-// TestGlobalScheduler_scheduleUnfitTask: a task that does not fit the cluster
-// right now ends the round, whether the cluster is short of memory for it alone
-// or has nothing free at all. Tasks behind it are not placed ahead of it, so the
-// capacity that running tasks release is held for it.
+// TestGlobalScheduler_scheduleUnfitTask: unplaceable tasks wait without
+// blocking later fitting work, and no task bypasses memory admission.
 func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 	const giB = int64(1) << 30
 
 	// newDispatchableTask returns a task that reaches InProgress once the worker
 	// accepts it, a flag reporting whether it was dispatched, and a counter of
-	// how often the scheduler popped it and looked at its cost - zero means the
-	// round ended before reaching it.
+	// how often the scheduler popped it and looked at its cost.
 	newDispatchableTask := func(t *testing.T, taskID int64, req taskcommon.Resource) (*MockTask, *atomic.Bool, *atomic.Int32) {
 		task := NewMockTask(t)
 		var (
@@ -865,7 +862,7 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 		return task, &dispatched, &examined
 	}
 
-	t.Run("task that does not fit keeps its place at the head", func(t *testing.T) {
+	t.Run("task that does not fit gives way to fitting work", func(t *testing.T) {
 		cluster := session.NewMockCluster(t)
 		cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{
 			1: {NodeID: 1, AvailableSlots: 10, TotalCPU: 8, AvailableCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 4 * giB},
@@ -883,12 +880,33 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 		scheduler.schedule()
 
 		assert.False(t, headDispatched.Load(), "the task that does not fit must wait")
-		assert.False(t, smallDispatched.Load(), "a smaller task must not take the memory the head waits for")
-		assert.Zero(t, smallExamined.Load(), "the round must end at the head")
-		assert.ElementsMatch(t, []int64{1, 2}, scheduler.pendingTasks.TaskIDs())
+		assert.True(t, smallDispatched.Load(), "a fitting task must make progress behind an unplaceable head")
+		assert.EqualValues(t, 1, smallExamined.Load())
+		assert.Equal(t, []int64{1}, scheduler.pendingTasks.TaskIDs())
 	})
 
-	t.Run("exhausted cluster still ends the round", func(t *testing.T) {
+	t.Run("oversized head waits while later tasks progress across rounds", func(t *testing.T) {
+		cluster := session.NewMockCluster(t)
+		worker := &session.WorkerSlots{NodeID: 1, TotalCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 16 * giB}
+		cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{1: worker}).Times(3)
+		scheduler := NewGlobalTaskScheduler(context.TODO(), cluster).(*globalTaskScheduler)
+		head, headDispatched, _ := newDispatchableTask(t, 1, taskcommon.Resource{CPU: 1, Memory: 80 * giB})
+		scheduler.Enqueue(head)
+		for id := int64(2); id <= 3; id++ {
+			small, dispatched, _ := newDispatchableTask(t, id, taskcommon.Resource{CPU: 1, Memory: giB})
+			scheduler.Enqueue(small)
+			scheduler.schedule()
+			assert.True(t, dispatched.Load())
+			assert.False(t, headDispatched.Load())
+			assert.Equal(t, []int64{1}, scheduler.pendingTasks.TaskIDs())
+		}
+		worker.TotalMemory, worker.AvailableMemory = 128*giB, 128*giB
+		scheduler.schedule()
+		assert.True(t, headDispatched.Load(), "waiting task can run after capacity increases")
+		assert.Empty(t, scheduler.pendingTasks.TaskIDs())
+	})
+
+	t.Run("exhausted cluster keeps all tasks without retrying them in the same round", func(t *testing.T) {
 		cluster := session.NewMockCluster(t)
 		// Slots to spare on both workers, and no memory at all.
 		cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{
@@ -908,9 +926,8 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 		assert.False(t, headDispatched.Load())
 		assert.False(t, smallDispatched.Load())
 		assert.ElementsMatch(t, []int64{1, 2}, scheduler.pendingTasks.TaskIDs())
-		// The round ended at the head rather than draining the queue: the second
-		// task was never even popped.
-		assert.Zero(t, smallExamined.Load())
+		// Each task is considered once and retained without overcommitting memory.
+		assert.EqualValues(t, 1, smallExamined.Load())
 	})
 }
 
@@ -1017,9 +1034,9 @@ func TestGlobalScheduler_scheduleInexactPrice(t *testing.T) {
 // scheduler must not wait for an exact price.
 //
 // A task whose inputs are gone -- a segment dropped by compaction, by
-// drop-collection or by drop-partition -- can never price itself exactly. Only
-// CreateTaskOnWorker retires such a task, by driving it to a terminal state, and
-// it runs after placement. A scheduler that set the task aside instead would
+// drop-collection or by drop-partition -- can never price itself exactly.
+// This legacy Task has no coordinator-only hook: CreateTaskOnWorker retires it
+// after placement. A scheduler waiting for an exact price instead would
 // re-queue it on every round for as long as datacoord runs.
 func TestGlobalScheduler_scheduleRetiresTaskThatNeverPrices(t *testing.T) {
 	const giB = int64(1) << 30
@@ -1061,8 +1078,10 @@ func TestGlobalScheduler_scheduleRetiresTaskThatNeverPrices(t *testing.T) {
 func TestGlobalScheduler_schedulePricedTasksUntilMemoryIsFull(t *testing.T) {
 	cluster := session.NewMockCluster(t)
 	cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{
-		1: {NodeID: 1, AvailableSlots: 0, TotalCPU: 8, AvailableCPU: 0,
-			TotalMemory: 4 * pickGiB, AvailableMemory: 4 * pickGiB},
+		1: {
+			NodeID: 1, AvailableSlots: 0, TotalCPU: 8, AvailableCPU: 0,
+			TotalMemory: 4 * pickGiB, AvailableMemory: 4 * pickGiB,
+		},
 	}).Once()
 	scheduler := NewGlobalTaskScheduler(context.TODO(), cluster).(*globalTaskScheduler)
 	for id := int64(1); id <= 5; id++ {
@@ -1089,4 +1108,43 @@ func TestGlobalScheduler_schedulePricedTasksUntilMemoryIsFull(t *testing.T) {
 	scheduler.schedule()
 	assert.Equal(t, 4, scheduler.runningTasks.Len())
 	assert.Equal(t, []int64{5}, scheduler.pendingTasks.TaskIDs())
+}
+
+// The optional local hook must work without workers and without reading prices.
+type coordinatorTestTask struct {
+	*MockTask
+	complete func() bool
+}
+
+func (t *coordinatorTestTask) TryCompleteOnCoordinator(context.Context) bool { return t.complete() }
+
+func TestGlobalScheduler_CoordinatorCompletionWithoutWorkers(t *testing.T) {
+	cluster := session.NewMockCluster(t)
+	cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{}).Times(2)
+	scheduler := NewGlobalTaskScheduler(context.TODO(), cluster).(*globalTaskScheduler)
+	base := NewMockTask(t)
+	state := taskcommon.Init
+	base.EXPECT().GetTaskID().Return(int64(1)).Maybe()
+	base.EXPECT().GetTaskType().Return(taskcommon.Index).Maybe()
+	base.EXPECT().GetTaskState().RunAndReturn(func() taskcommon.State { return state }).Maybe()
+	base.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
+	attempts := 0
+	local := &coordinatorTestTask{MockTask: base, complete: func() bool {
+		attempts++
+		if attempts == 2 {
+			state = taskcommon.Finished
+		}
+		return true
+	}}
+	scheduler.Enqueue(local)
+	scheduler.schedule()
+	assert.Equal(t, []int64{1}, scheduler.pendingTasks.TaskIDs(), "metadata failure keeps the task pending")
+	assert.Equal(t, 1, attempts, "no retry loop within a round")
+	scheduler.backoffs.Remove(1)
+	scheduler.schedule()
+	assert.Empty(t, scheduler.pendingTasks.TaskIDs())
+	assert.False(t, scheduler.runningTasks.Contain(1))
+	assert.Equal(t, 2, attempts)
+	base.AssertNotCalled(t, "GetTaskResource")
+	base.AssertNotCalled(t, "CreateTaskOnWorker", mock.Anything, mock.Anything)
 }

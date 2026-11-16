@@ -63,7 +63,10 @@ type indexBuildTask struct {
 	resource taskresource.Cache
 }
 
-var _ globalTask.Task = (*indexBuildTask)(nil)
+var (
+	_ globalTask.Task            = (*indexBuildTask)(nil)
+	_ globalTask.CoordinatorTask = (*indexBuildTask)(nil)
+)
 
 var errVectorArrayFieldBinlogNotFound = errors.New("vector array field binlog not found")
 
@@ -128,12 +131,18 @@ func (it *indexBuildTask) GetTaskID() int64 {
 // The whole-segment bound is deliberately an over-estimate rather than the
 // floor. The task is placed on whatever this returns, so the fallback must err
 // towards refusing a worker, never towards a worker accepting more than it can
-// hold. Only an input that is gone for good answers with the floor: such a task
-// is retired by CreateTaskOnWorker, so its price only has to let it get there.
+// hold. Inputs gone for good answer with an uncached floor. Target liveness
+// is checked before the cache; TryCompleteOnCoordinator retires obsolete work
+// before admission, and dispatch repeats that check for concurrent drops.
 func (it *indexBuildTask) GetTaskResource() (taskcommon.Resource, bool) {
+	// Target liveness is not immutable: check before consulting the cached price.
+	if it.meta.GetHealthySegment(context.TODO(), it.SegmentID) == nil ||
+		!it.indexMeta.IsIndexExist(it.CollectionID, it.IndexID) {
+		return taskresource.Default(), false
+	}
 	return it.resource.Get(func() (taskcommon.Resource, bool) {
 		segment := it.meta.GetHealthySegment(context.TODO(), it.SegmentID)
-		if segment == nil {
+		if segment == nil || !it.indexMeta.IsIndexExist(it.CollectionID, it.IndexID) {
 			return taskresource.Default(), false
 		}
 		// GetIndexType answers the invalidIndex sentinel, not "", when the params
@@ -223,8 +232,24 @@ func (it *indexBuildTask) dropAndResetTaskOnWorker(cluster session.Cluster, reas
 	it.resetTask(reason)
 }
 
-func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {
-	ctx := context.TODO()
+// indexBuildPreparation contains only live inputs for a real worker build.
+type indexBuildPreparation struct {
+	segment     *meta.SegmentInfo
+	segIndex    *model.SegmentIndex
+	indexParams []*commonpb.KeyValuePair
+	indexType   string
+}
+
+// TryCompleteOnCoordinator handles no-train/empty builds and obsolete targets
+// before worker admission. A failed metadata write is also handled here: the
+// task stays Init and the scheduler retries it with its normal backoff.
+func (it *indexBuildTask) TryCompleteOnCoordinator(ctx context.Context) bool {
+	return it.prepareForWorker(ctx) == nil
+}
+
+// prepareForWorker is shared with dispatch so target liveness and nullable /
+// vector-array thresholds are rechecked after placement, without two rules.
+func (it *indexBuildTask) prepareForWorker(ctx context.Context) *indexBuildPreparation {
 	log := mlog.With(mlog.Int64("taskID", it.BuildID), mlog.Int64("segmentID", it.SegmentID))
 
 	// Check if task exists in meta
@@ -232,7 +257,7 @@ func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 	if !exist || segIndex == nil {
 		log.Info(ctx, "index task has not exist in meta table, removing task")
 		it.SetState(indexpb.JobState_JobStateNone, "index task has not exist in meta table")
-		return
+		return nil
 	}
 
 	// Check segment health and index existence
@@ -240,7 +265,7 @@ func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 	if reason, dropped := it.droppedTargetReason(segment, segIndex); dropped {
 		log.Info(ctx, "task is no need to build index, marking it failed", mlog.String("reason", reason))
 		it.abortForDroppedTarget(ctx, reason)
-		return
+		return nil
 	}
 
 	// Handle special cases for certain index types or small segments
@@ -294,7 +319,7 @@ func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 									mlog.String("failReason", failReason),
 									mlog.Err(updateErr))
 							}
-							return
+							return nil
 						}
 						estimatedVectorArrayVectors = estimate.vectorCount
 						if estimate.emptyOnStaleSchema {
@@ -351,8 +376,21 @@ func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 		it.SetTaskTime(taskcommon.TimeStart, now)
 		it.SetTaskTime(taskcommon.TimeEnd, now)
 		it.UpdateStateWithMeta(indexpb.JobState_JobStateFinished, "fake finished index success")
+		return nil
+	}
+
+	return &indexBuildPreparation{segment: segment, segIndex: segIndex, indexParams: indexParams, indexType: indexType}
+}
+
+func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {
+	ctx := context.TODO()
+	prepared := it.prepareForWorker(ctx)
+	if prepared == nil {
 		return
 	}
+	segment, segIndex := prepared.segment, prepared.segIndex
+	indexParams, indexType := prepared.indexParams, prepared.indexType
+	log := mlog.With(mlog.FieldTaskID(it.BuildID), mlog.FieldSegmentID(it.SegmentID))
 
 	// Create job request
 	req, err := it.prepareJobRequest(ctx, segment, segIndex, indexParams, indexType)
@@ -375,6 +413,12 @@ func (it *indexBuildTask) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 
 	// Send request to worker
 	resource, _ := it.GetTaskResource()
+	// A concurrent drop may have changed the cached price to the floor after
+	// preparation. Retire it instead of sending a real build at that price.
+	if reason, dropped := it.droppedTargetReason(it.meta.GetSegment(ctx, segIndex.SegmentID), segIndex); dropped {
+		it.abortForDroppedTarget(ctx, reason)
+		return
+	}
 	if err = cluster.CreateIndex(nodeID, req, resource); err != nil {
 		log.Warn(ctx, "failed to send job to worker", mlog.Err(err))
 		return

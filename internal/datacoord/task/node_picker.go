@@ -46,8 +46,8 @@ const (
 // A priced task uses memory admission on a resource-reporting worker. Scalar
 // slots only admit unpriced tasks and tasks placed on legacy workers.
 //
-// Nothing gets worse for a task: one that finds no home in the first tier
-// falls through to the tier that existed before.
+// The fallback tier contains only legacy workers. A task that exceeds all
+// reporting workers waits; the scheduler may dispatch later fitting tasks.
 type nodePicker struct {
 	nodes []*resourceNode
 	heap  typeutil.Heap[*nodeSlotEntry]
@@ -201,7 +201,7 @@ type nodeRemaining struct {
 }
 
 // remaining reports the round's view of every resource-reporting worker, so a
-// task that ends the round can be logged next to what it was refused by.
+// deferred task can be logged next to what it was refused by.
 // Workers on the scalar tier are not listed; their slots are in the report
 // the round started from.
 func (p *nodePicker) remaining() []nodeRemaining {

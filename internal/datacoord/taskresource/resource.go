@@ -75,8 +75,9 @@ func scaled(size int64, factor float64) int64 {
 
 // Default is the answer when a task's inputs are gone for good: a
 // segment dropped between enqueue and dispatch, a job no longer in meta. Such
-// a task is retired by CreateTaskOnWorker, and the scheduler must reach that
-// code to retire it, so the floor is the right answer -- it fits every worker.
+// a task has no real worker demand. Index tasks retire on the coordinator
+// before placement; other families can retire through CreateTaskOnWorker. The
+// floor remains subject to memory admission and need not fit a full worker.
 //
 // It is NOT the answer for inputs that are merely still resolving (a schema
 // not cached yet after a restart). Those are priced at an upper bound on the
@@ -497,9 +498,9 @@ func EstimateFieldSize(segment *meta.SegmentInfo, schema *schemapb.CollectionSch
 // instead of freezing a placeholder. The scheduler places the task on that
 // answer regardless: a still-resolving task answers an upper bound on itself,
 // which errs towards refusing a worker, and one whose inputs are gone for good
-// answers the floor so it can reach CreateTaskOnWorker, the only code that
-// retires it. Waiting for an exact price instead would strand the second kind
-// forever.
+// answers the floor. Index tasks check target liveness before this cache and
+// retire through coordinator-only preparation; caching a size must not cache
+// the assumption that its target still exists.
 type Cache struct {
 	value atomic.Pointer[taskcommon.Resource]
 }
