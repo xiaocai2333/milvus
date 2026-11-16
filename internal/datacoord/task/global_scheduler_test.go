@@ -827,14 +827,17 @@ func TestGlobalScheduler_TerminalTaskClearsBackoff(t *testing.T) {
 	assert.Equal(t, 0, len(scheduler.pendingTasks.TaskIDs()))
 }
 
-// TestGlobalScheduler_scheduleUnfitTask: unplaceable tasks wait without
-// blocking later fitting work, and no task bypasses memory admission.
+// TestGlobalScheduler_scheduleUnfitTask: a task that does not fit the cluster
+// right now ends the round, whether the cluster is short of memory for it alone
+// or has nothing free at all. Tasks behind it are not placed ahead of it, so the
+// capacity that running tasks release is held for it.
 func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 	const giB = int64(1) << 30
 
 	// newDispatchableTask returns a task that reaches InProgress once the worker
 	// accepts it, a flag reporting whether it was dispatched, and a counter of
-	// how often the scheduler popped it and looked at its cost.
+	// how often the scheduler popped it and looked at its cost - zero means the
+	// round ended before reaching it.
 	newDispatchableTask := func(t *testing.T, taskID int64, req taskcommon.Resource) (*MockTask, *atomic.Bool, *atomic.Int32) {
 		task := NewMockTask(t)
 		var (
@@ -862,7 +865,7 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 		return task, &dispatched, &examined
 	}
 
-	t.Run("task that does not fit gives way to fitting work", func(t *testing.T) {
+	t.Run("task that does not fit keeps its place at the head", func(t *testing.T) {
 		cluster := session.NewMockCluster(t)
 		cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{
 			1: {NodeID: 1, AvailableSlots: 10, TotalCPU: 8, AvailableCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 4 * giB},
@@ -880,33 +883,53 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 		scheduler.schedule()
 
 		assert.False(t, headDispatched.Load(), "the task that does not fit must wait")
-		assert.True(t, smallDispatched.Load(), "a fitting task must make progress behind an unplaceable head")
-		assert.EqualValues(t, 1, smallExamined.Load())
-		assert.Equal(t, []int64{1}, scheduler.pendingTasks.TaskIDs())
+		assert.False(t, smallDispatched.Load(), "a smaller task must not take the memory the head waits for")
+		assert.Zero(t, smallExamined.Load(), "the round must end at the head")
+		assert.ElementsMatch(t, []int64{1, 2}, scheduler.pendingTasks.TaskIDs())
 	})
 
-	t.Run("oversized head waits while later tasks progress across rounds", func(t *testing.T) {
-		cluster := session.NewMockCluster(t)
-		worker := &session.WorkerSlots{NodeID: 1, TotalCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 16 * giB}
-		cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{1: worker}).Times(3)
-		scheduler := NewGlobalTaskScheduler(context.TODO(), cluster).(*globalTaskScheduler)
-		head, headDispatched, _ := newDispatchableTask(t, 1, taskcommon.Resource{CPU: 1, Memory: 80 * giB})
-		scheduler.Enqueue(head)
-		for id := int64(2); id <= 3; id++ {
-			small, dispatched, _ := newDispatchableTask(t, id, taskcommon.Resource{CPU: 1, Memory: giB})
-			scheduler.Enqueue(small)
+	for _, demandGiB := range []int64{12, 80} {
+		t.Run(fmt.Sprintf("head requiring %d GiB keeps priority across rounds", demandGiB), func(t *testing.T) {
+			cluster := session.NewMockCluster(t)
+			worker := &session.WorkerSlots{NodeID: 1, TotalCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 4 * giB}
+			cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{1: worker}).Times(4)
+			scheduler := NewGlobalTaskScheduler(context.TODO(), cluster).(*globalTaskScheduler)
+			head, headDispatched, _ := newDispatchableTask(t, 1, taskcommon.Resource{CPU: 1, Memory: demandGiB * giB})
+			scheduler.Enqueue(head)
+			var followers []*atomic.Bool
+			for id := int64(2); id <= 3; id++ {
+				small, dispatched, examined := newDispatchableTask(t, id, taskcommon.Resource{CPU: 1, Memory: giB})
+				followers = append(followers, dispatched)
+				scheduler.Enqueue(small)
+				scheduler.schedule()
+				assert.False(t, headDispatched.Load())
+				for _, follower := range followers {
+					assert.False(t, follower.Load(), "new small tasks must not consume memory ahead of the waiting head")
+				}
+				assert.Zero(t, examined.Load())
+				assert.Equal(t, int(id), scheduler.pendingTasks.TaskCount())
+				worker.AvailableMemory = 8 * giB
+			}
+			// Release enough memory (or increase capacity for an oversized task).
+			// Exactly the head's demand is available, so no follower may run yet.
+			worker.TotalMemory = max(worker.TotalMemory, demandGiB*giB)
+			worker.AvailableMemory = demandGiB * giB
 			scheduler.schedule()
-			assert.True(t, dispatched.Load())
-			assert.False(t, headDispatched.Load())
-			assert.Equal(t, []int64{1}, scheduler.pendingTasks.TaskIDs())
-		}
-		worker.TotalMemory, worker.AvailableMemory = 128*giB, 128*giB
-		scheduler.schedule()
-		assert.True(t, headDispatched.Load(), "waiting task can run after capacity increases")
-		assert.Empty(t, scheduler.pendingTasks.TaskIDs())
-	})
+			assert.True(t, headDispatched.Load(), "the waiting head gets the released capacity first")
+			for _, follower := range followers {
+				assert.False(t, follower.Load())
+			}
+			assert.ElementsMatch(t, []int64{2, 3}, scheduler.pendingTasks.TaskIDs())
+			worker.AvailableMemory = 2 * giB
+			scheduler.schedule()
+			for _, follower := range followers {
+				assert.True(t, follower.Load())
+			}
+			assert.Empty(t, scheduler.pendingTasks.TaskIDs())
+		})
+	}
 
-	t.Run("exhausted cluster keeps all tasks without retrying them in the same round", func(t *testing.T) {
+	t.Run("exhausted cluster still ends the round", func(t *testing.T) {
 		cluster := session.NewMockCluster(t)
 		// Slots to spare on both workers, and no memory at all.
 		cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{
@@ -926,8 +949,9 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 		assert.False(t, headDispatched.Load())
 		assert.False(t, smallDispatched.Load())
 		assert.ElementsMatch(t, []int64{1, 2}, scheduler.pendingTasks.TaskIDs())
-		// Each task is considered once and retained without overcommitting memory.
-		assert.EqualValues(t, 1, smallExamined.Load())
+		// The round ended at the head rather than draining the queue: the second
+		// task was never even popped.
+		assert.Zero(t, smallExamined.Load())
 	})
 }
 

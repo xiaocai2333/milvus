@@ -302,7 +302,7 @@ func (s *globalTaskScheduler) schedule() {
 	picker := newNodePicker(nodeSlots)
 	futures := make([]*conc.Future[struct{}], 0)
 	var delayed []Task
-	// Bound the scan to the initial queue size; defer unplaced tasks until its end.
+	// Bound the scan to the initial queue size; failure-backoff tasks give way.
 	for examined := 0; examined < pendingNum; examined++ {
 		task := s.pendingTasks.Pop()
 		if task == nil {
@@ -354,19 +354,19 @@ func (s *globalTaskScheduler) schedule() {
 		memoryShare := nodeMemoryShare(task)
 		nodeID := picker.PickBounded(taskSlot, resource, memoryShare)
 		if nodeID == NullNodeID {
-			// Keep memory admission strict, but let later tasks use capacity that
-			// this task cannot use. An oversized head must not block every family.
+			// Preserve task-ID order when capacity is insufficient. Later small
+			// tasks must not consume memory that this waiting task needs.
 			mlog.RatedInfo(s.ctx, rate.Every(blockedRoundLogInterval),
-				"task does not fit any worker now, deferring it to the next round",
+				"task does not fit any worker now, scheduling round ends at it",
 				WrapTaskLog(task,
 					mlog.Int64("taskSlot", taskSlot),
 					mlog.Stringer("resource", resource),
 					mlog.Float64("nodeMemoryShare", memoryShare),
 					mlog.Int("pendingBehind", s.pendingTasks.TaskCount()),
 					mlog.Any("resourceNodes", picker.remaining()))...)
-			delayed = append(delayed, task)
+			s.pendingTasks.Push(task)
 			s.mu.RUnlock(taskID)
-			continue
+			break
 		}
 		s.mu.RUnlock(taskID)
 		future := s.execPool.Submit(func() (struct{}, error) {

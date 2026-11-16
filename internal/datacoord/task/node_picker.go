@@ -47,7 +47,8 @@ const (
 // slots only admit unpriced tasks and tasks placed on legacy workers.
 //
 // The fallback tier contains only legacy workers. A task that exceeds all
-// reporting workers waits; the scheduler may dispatch later fitting tasks.
+// reporting workers waits; if no legacy worker fits either, the scheduler
+// ends the round so later tasks cannot consume the capacity it needs.
 type nodePicker struct {
 	nodes []*resourceNode
 	heap  typeutil.Heap[*nodeSlotEntry]

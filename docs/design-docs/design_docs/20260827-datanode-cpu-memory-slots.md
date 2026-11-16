@@ -405,16 +405,17 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   and vector-array threshold checks as dispatch. FLAT/BIN_FLAT and below-threshold
   builds finish on the coordinator without consuming worker memory. Dispatch
   repeats these checks to handle a target disappearing after placement.
-- A `NullNodeID` defers that task until the next round; later fitting tasks may
-  run. A round examines at most its initial pending count and re-enqueues deferred
-  tasks afterwards, avoiding a busy loop on the oldest task. Estimates above all
-  workers' capacity remain pending until capacity or the estimate changes; they
-  never bypass memory admission and never block unrelated work. A continuous
-  stream of smaller tasks may delay a larger task; this policy does not reserve
-  idle capacity for the oldest task.
-- Failure-backoff tasks are deferred in the same way, with terminal-state checks
-  under the task lock before re-enqueueing, so concurrent finalization cannot
-  resurrect a completed task.
+- A `NullNodeID` ends the scheduling round. The task is re-enqueued in task-ID
+  order, and later tasks are not placed ahead of it. Memory released by running
+  work can accumulate for the waiting task instead of being consumed by newer
+  small tasks. This applies both to temporary memory shortages and estimates
+  above every worker's total capacity; the latter still require an estimate or
+  capacity correction. Clustering/analyze machine-share estimate alignment
+  remains unresolved; queue bypass is not a substitute for that correction.
+- A round examines at most its initial pending count. Failure-backoff tasks
+  retain their existing exception: they give way until the retry deadline.
+  Deferred retries are rechecked under the task lock before re-enqueueing, so
+  concurrent finalization cannot resurrect completed work.
 
 ## Compatibility
 
