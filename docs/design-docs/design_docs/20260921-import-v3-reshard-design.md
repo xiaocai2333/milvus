@@ -408,7 +408,8 @@ job, and committed vchannels are never rolled back.
   reservations, so queued work cannot prevent its own execution. With unknown
   memory capacity, the original scalar slot admission remains. Direct legacy
   requests use a slot-derived memory share. The existing idle-worker oversized
-  progress rule remains local; coordinator placement is strictly memory-bounded.
+  progress rule also applies at the coordinator: an estimate exceeding every
+  worker's total memory waits for an idle worker, then runs exclusively.
 - The registry holds every run in one insertion-ordered map keyed by
   `(task_id, run_id)` and fences by `run_id`: same run ⇒ idempotent; older run ⇒
   stale no-op; newer run ⇒ cancel/replace (the superseded run stays in the

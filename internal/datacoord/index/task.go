@@ -136,15 +136,12 @@ func (it *indexBuildTask) GetTaskID() int64 {
 // before admission, and dispatch repeats that check for concurrent drops.
 func (it *indexBuildTask) GetTaskResource() (taskcommon.Resource, bool) {
 	// Target liveness is not immutable: check before consulting the cached price.
-	if it.meta.GetHealthySegment(context.TODO(), it.SegmentID) == nil ||
+	segment := it.meta.GetHealthySegment(context.TODO(), it.SegmentID)
+	if segment == nil ||
 		!it.indexMeta.IsIndexExist(it.CollectionID, it.IndexID) {
 		return taskresource.Default(), false
 	}
 	return it.resource.Get(func() (taskcommon.Resource, bool) {
-		segment := it.meta.GetHealthySegment(context.TODO(), it.SegmentID)
-		if segment == nil || !it.indexMeta.IsIndexExist(it.CollectionID, it.IndexID) {
-			return taskresource.Default(), false
-		}
 		// GetIndexType answers the invalidIndex sentinel, not "", when the params
 		// carry no index_type -- which is exactly what an index whose params have
 		// not been read back yet looks like.
@@ -154,7 +151,7 @@ func (it *indexBuildTask) GetTaskResource() (taskcommon.Resource, bool) {
 		if coll == nil || coll.Schema == nil {
 			return taskresource.Index(taskresource.EstimateSegmentSize(segment, nil), false), false
 		}
-		if len(indexParams) == 0 || indexType == "" || indexType == meta.InvalidIndexType {
+		if indexType == "" || indexType == meta.InvalidIndexType {
 			return taskresource.Index(taskresource.EstimateSegmentSize(segment, coll.Schema), false), false
 		}
 		isVectorIndex := vecindexmgr.GetVecIndexMgrInstance().IsVecIndex(indexType)

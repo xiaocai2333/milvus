@@ -25,32 +25,25 @@ type MemoryAdmission struct {
 }
 
 // NewMemoryAdmission creates an execution budget, separate from queued bookings.
+// Both callbacks are required; capacity may report zero when hardware is unknown.
 func NewMemoryAdmission(capacity, externalUsage func() int64) *MemoryAdmission {
 	return &MemoryAdmission{capacity: capacity, externalUsage: externalUsage}
 }
 
 // Capacity returns the current non-negative node memory budget in bytes.
 func (b *MemoryAdmission) Capacity() int64 {
-	if b.capacity == nil {
-		return 0
-	}
-	return max(b.capacity(), 0)
+	return b.capacity()
 }
 
-// TryAcquire atomically reserves a supplied memory price and returns an
-// idempotent release. It retains the existing worker progress rule: an
-// otherwise idle node can execute one oversized estimate alone. Coordinator
-// placement admits such estimates only on idle workers too. Unknown capacity retains legacy
-// admission, but still tracks reservations if capacity becomes known later.
+// TryAcquire atomically reserves a supplied memory price and returns a release
+// called once by the admitted execution. An otherwise idle node can execute one
+// oversized estimate alone, matching coordinator placement. Unknown capacity
+// retains legacy admission while tracking reservations for capacity recovery.
 func (b *MemoryAdmission) TryAcquire(memory int64) (func(), bool) {
-	memory = max(memory, 0)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	capacity := b.Capacity()
-	var external int64
-	if b.externalUsage != nil {
-		external = max(b.externalUsage(), 0)
-	}
+	external := b.externalUsage()
 	if capacity > 0 && (b.used > 0 || external > 0) {
 		// Subtract capped terms instead of adding usages, which could wrap
 		// for an oversized price and incorrectly offer memory again.
@@ -63,12 +56,9 @@ func (b *MemoryAdmission) TryAcquire(memory int64) (func(), bool) {
 		return nil, false
 	}
 	b.used += memory
-	var once sync.Once
 	return func() {
-		once.Do(func() {
-			b.mu.Lock()
-			b.used -= memory
-			b.mu.Unlock()
-		})
+		b.mu.Lock()
+		b.used -= memory
+		b.mu.Unlock()
 	}, true
 }

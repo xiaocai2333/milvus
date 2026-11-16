@@ -34,9 +34,8 @@ func (r Resource) Add(o Resource) Resource {
 	return Resource{CPU: r.CPU + o.CPU, Memory: r.Memory + o.Memory}
 }
 
-// Sub subtracts o and clamps each dimension at zero, so a release that exceeds
-// what was booked (a request that changed mid-flight) cannot drive the ledger
-// negative.
+// Sub computes available capacity, floored at zero because an oversized
+// task can book more than the node has. Execution ledgers release exact bookings.
 func (r Resource) Sub(o Resource) Resource {
 	return Resource{CPU: max(r.CPU-o.CPU, 0), Memory: max(r.Memory-o.Memory, 0)}
 }

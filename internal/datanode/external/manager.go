@@ -143,8 +143,8 @@ func (m *ExternalCollectionManager) Close() {
 // Resource returns the cpu/memory booked by submitted, unfinished tasks.
 func (m *ExternalCollectionManager) Resource() taskcommon.Resource {
 	return taskcommon.Resource{
-		CPU:    max(m.usingCPU.Load(), 0),
-		Memory: max(m.usingMemory.Load(), 0),
+		CPU:    m.usingCPU.Load(),
+		Memory: m.usingMemory.Load(),
 	}
 }
 

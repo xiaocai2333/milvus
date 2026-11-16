@@ -231,6 +231,9 @@ func (p Properties) GetTaskResource() (Resource, error) {
 	if err != nil {
 		return Resource{}, err
 	}
+	if cpu < 0 || memory < 0 {
+		return Resource{}, merr.WrapErrServiceInternalMsg("negative task resource: cpu=%d memory=%d", cpu, memory)
+	}
 	return Resource{CPU: cpu, Memory: memory}, nil
 }
 

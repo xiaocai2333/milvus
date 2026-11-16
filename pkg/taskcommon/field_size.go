@@ -66,7 +66,7 @@ const varCharOffsetBytes = 4
 // (checkTextFieldData returns without a length check), and geometry is only
 // checked for WKB convertibility, so neither limit can be relied on here.
 func SchemaFieldSize(field *schemapb.FieldSchema, rows int64) (size int64, exact bool, ok bool) {
-	if field == nil || rows <= 0 {
+	if rows <= 0 {
 		return 0, false, false
 	}
 	validity := int64(0)
@@ -86,7 +86,7 @@ func SchemaFieldSize(field *schemapb.FieldSchema, rows int64) (size int64, exact
 	case schemapb.DataType_JSON:
 		// The proxy rejects a JSON value longer than common.JSONMaxLength
 		// (validate_util.go checkJSONFieldData), so that is a real per-row bound.
-		maxLength := jsonMaxLength()
+		maxLength := paramtable.Get().CommonCfg.JSONMaxLength.GetAsInt64()
 		if maxLength <= 0 {
 			return 0, false, false
 		}
@@ -103,13 +103,6 @@ func SchemaFieldSize(field *schemapb.FieldSchema, rows int64) (size int64, exact
 		return rows*capacity*element + validity, false, true
 	}
 	return 0, false, false
-}
-
-// jsonMaxLength is the per-value limit the proxy enforces on a JSON field. It
-// reads paramtable, so it answers 0 before paramtable is initialized, and the
-// caller then reports the field as unbounded rather than as free.
-func jsonMaxLength() int64 {
-	return paramtable.Get().CommonCfg.JSONMaxLength.GetAsInt64()
 }
 
 // arrayElementWidth is the bytes of one array element: its fixed width, or the

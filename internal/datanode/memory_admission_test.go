@@ -67,8 +67,6 @@ func TestNodeMemoryAdmissionWiringSharesBudgetWithOtherExecutors(t *testing.T) {
 	role := mockey.Mock(paramtable.GetRole).Return(typeutil.DataNodeRole).Build()
 	defer role.UnPatch()
 	node := newResourceTestNode(t)
-	// The production Init path invokes this after creating all executors.
-	node.initTaskMemoryAdmission()
 	require.NoError(t, node.taskScheduler.Start())
 	external := make(chan struct{})
 	// Always release the external task before the node cleanup waits on it.
@@ -134,7 +132,6 @@ func TestNodeMemoryAdmissionIndexAndV3ShareAtomicExecutionBudget(t *testing.T) {
 	role := mockey.Mock(paramtable.GetRole).Return(typeutil.DataNodeRole).Build()
 	defer role.UnPatch()
 	node := newResourceTestNode(t)
-	node.initTaskMemoryAdmission()
 	gate := make(chan struct{})
 	var once sync.Once
 	release := func() { once.Do(func() { close(gate) }) }

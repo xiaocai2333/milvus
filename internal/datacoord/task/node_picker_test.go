@@ -136,7 +136,7 @@ func TestNodePicker_OversizedWaitsForIdleWorker(t *testing.T) {
 	assert.Equal(t, int64(NullNodeID), p.Pick(128, req))
 	assert.Equal(t, before, p.remaining())
 	// Idle, with unchanged capacity and no scalar slots: exactly one
-	// oversized task gets this worker, including against unpriced followers.
+	// oversized task gets this worker, including against small followers.
 	workers[2].AvailableMemory = workers[2].TotalMemory
 	p = newNodePicker(workers)
 	assert.Equal(t, int64(2), p.Pick(128, req))
@@ -155,14 +155,14 @@ func TestNodePicker_OversizedWaitsForIdleWorker(t *testing.T) {
 	}
 	assert.Equal(t, int64(NullNodeID), p.Pick(1, req))
 	assert.Equal(t, int64(NullNodeID), p.Pick(1, taskcommon.Resource{Memory: 1}))
-	// Isolate the selected worker: zero-slot unpriced work cannot bypass exclusivity.
+	// Isolate the selected worker: a small task cannot bypass exclusivity.
 	for _, n := range p.nodes {
 		if n.nodeID == 2 {
 			p.nodes = []*resourceNode{n}
 			break
 		}
 	}
-	assert.Equal(t, int64(NullNodeID), p.Pick(0, taskcommon.Resource{}))
+	assert.Equal(t, int64(NullNodeID), p.Pick(1, taskcommon.Resource{CPU: 1, Memory: 1}))
 	// A CPU booking with no memory booking is not idle either.
 	workers[2].AvailableCPU--
 	assert.Equal(t, int64(NullNodeID), newNodePicker(workers).Pick(1, req))
@@ -206,11 +206,7 @@ func TestNodePicker_MixedClusterFallsThrough(t *testing.T) {
 	assert.Equal(t, int64(1), p.Pick(10, taskcommon.Resource{CPU: 1, Memory: pickGiB}))
 }
 
-func TestNodePicker_ZeroRequirement(t *testing.T) {
-	onlyResource := newNodePicker(map[int64]*session.WorkerSlots{1: resourceWorker(1, 10, 8, 16*pickGiB)})
-	// A task that did not price itself is still placed rather than starved.
-	assert.Equal(t, int64(1), onlyResource.Pick(1, taskcommon.Resource{}))
-
+func TestNodePicker_EmptyPool(t *testing.T) {
 	empty := newNodePicker(nil)
 	assert.Equal(t, int64(NullNodeID), empty.Pick(1, taskcommon.Resource{CPU: 1, Memory: pickGiB}))
 }
@@ -345,32 +341,4 @@ func (b boundedTask) NodeMemoryShare() float64 { return b.share }
 func TestNodeMemoryShare(t *testing.T) {
 	assert.Equal(t, 0.1, nodeMemoryShare(boundedTask{share: 0.1}))
 	assert.Zero(t, nodeMemoryShare(struct{ Task }{}))
-}
-
-// A mixed-version pool can receive unpriced legacy tasks between priced ones.
-func TestNodePicker_UnpricedTasksRetainSlotAdmission(t *testing.T) {
-	p := newNodePicker(map[int64]*session.WorkerSlots{
-		1: resourceWorker(1, 128, 8, 32*pickGiB),
-		2: resourceWorker(2, 128, 8, 32*pickGiB),
-	})
-	counts := map[int64]int{}
-	for i := 0; i < 4; i++ {
-		counts[p.Pick(64, taskcommon.Resource{})]++
-	}
-	assert.Equal(t, map[int64]int{1: 2, 2: 2}, counts)
-	assert.Equal(t, int64(NullNodeID), p.Pick(64, taskcommon.Resource{}))
-	// Legacy work books memory on the worker. Its unknown booking cannot be
-	// offered again in this round; wait for the next actual resource report.
-	assert.Equal(t, int64(NullNodeID), p.Pick(128, taskcommon.Resource{CPU: 8, Memory: 2 * pickGiB}))
-	for _, n := range p.remaining() {
-		assert.Zero(t, n.AvailableMemory)
-	}
-
-	// Once fresh memory is reported, exhausted compatibility slots do not
-	// prevent priced placement.
-	p = newNodePicker(map[int64]*session.WorkerSlots{
-		1: resourceWorker(1, 0, 8, 32*pickGiB),
-	})
-	p.nodes[0].availableMemory = 16 * pickGiB
-	assert.Equal(t, int64(1), p.Pick(128, taskcommon.Resource{CPU: 8, Memory: 2 * pickGiB}))
 }

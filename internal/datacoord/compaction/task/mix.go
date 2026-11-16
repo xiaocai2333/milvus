@@ -10,7 +10,6 @@ import (
 	"go.uber.org/atomic"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/compaction"
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/index"
@@ -71,9 +70,6 @@ func (t *MixCompactionTask) GetTaskResource() (taskcommon.Resource, bool) {
 			return taskresource.MixCompaction(inputSize, readerBytes, deleteMapBytes), true
 		}
 		inputs := taskProto.GetInputSegments()
-		if len(inputs) == 0 {
-			return taskresource.Default(), false
-		}
 		segment := t.Meta.GetHealthySegment(context.TODO(), inputs[0])
 		if segment == nil {
 			return taskresource.Default(), false
@@ -509,10 +505,8 @@ func compactionInputSize(compactionMeta meta.CompactionMeta, taskProto *datapb.C
 // so the same rule is applied here. ok=false when an input is not in meta.
 func mixCompactionInputs(compactionMeta meta.CompactionMeta, taskProto *datapb.CompactionTask) (inputSize, readerBytes, deleteMapBytes int64, ok bool) {
 	schema := taskProto.GetSchema()
-	pkType := schemapb.DataType_Int64
-	if pk, err := typeutil.GetPrimaryFieldSchema(schema); err == nil {
-		pkType = pk.GetDataType()
-	}
+	// Compaction tasks capture the validated collection schema at creation.
+	pk := lo.Must(typeutil.GetPrimaryFieldSchema(schema))
 	inputs := taskProto.GetInputSegments()
 	mergeSort := paramtable.Get().DataNodeCfg.UseMergeSort.GetAsBool() &&
 		len(inputs) <= paramtable.Get().DataNodeCfg.MaxSegmentMergeSort.GetAsInt()
@@ -529,7 +523,7 @@ func mixCompactionInputs(compactionMeta meta.CompactionMeta, taskProto *datapb.C
 			sorted = segment.GetIsSortedByNamespace()
 		}
 		mergeSort = mergeSort && sorted
-		bytes := taskresource.DeleteMapBytes(segment, pkType)
+		bytes := taskresource.DeleteMapBytes(segment, pk.GetDataType())
 		sum += bytes
 		largest = max(largest, bytes)
 	}

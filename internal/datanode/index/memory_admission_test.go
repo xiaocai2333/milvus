@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/datanode/taskcost"
+
 	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/require"
 
@@ -79,9 +81,12 @@ func memoryTask(id string, memory int64) *memoryAdmissionTask {
 func memoryScheduler(t *testing.T, capacity int64, external func() int64) *TaskScheduler {
 	t.Helper()
 	paramtable.Init()
-	s := NewTaskScheduler(context.Background())
+	if external == nil {
+		external = func() int64 { return 0 }
+	}
+	s := newTestTaskScheduler(context.Background())
 	s.totalSlots = func() int64 { return 64 }
-	s.SetMemoryAdmission(func() int64 { return capacity }, external)
+	s.memoryAdmission = taskcost.NewMemoryAdmission(func() int64 { return capacity }, external)
 	require.NoError(t, s.Start())
 	t.Cleanup(s.Close)
 	return s
@@ -211,23 +216,6 @@ func TestMemoryAdmissionVectorPermitAllowsScalarBypass(t *testing.T) {
 	s.Close()
 }
 
-func TestMemoryAdmissionRejectedVectorPoolReturnsBooking(t *testing.T) {
-	paramtable.Init()
-	pool := conc.NewPool[any](1)
-	pool.Release()
-	patch := mockey.Mock(GetVecIndexBuildPool).Return(pool).Build()
-	defer patch.UnPatch()
-	s := memoryScheduler(t, 8*admissionGiB, nil)
-	task := memoryTask("rejected", 2*admissionGiB)
-	task.vector = true
-	require.NoError(t, s.TaskQueue.Enqueue(task))
-	require.Eventually(t, func() bool {
-		return task.reset.Load() && s.usingMemory.Load() == 0 && s.TaskQueue.GetUsingResource().Memory == 0
-	}, 5*time.Second, time.Millisecond)
-	s.Close()
-	require.Equal(t, indexpb.JobState_JobStateRetry, indexpb.JobState(task.state.Load()))
-}
-
 func TestMemoryAdmissionSameNameExecutionsKeepIndependentBookings(t *testing.T) {
 	s := memoryScheduler(t, 16*admissionGiB, nil)
 	gate1, release1 := memoryGate(t)
@@ -247,16 +235,15 @@ func TestMemoryAdmissionSameNameExecutionsKeepIndependentBookings(t *testing.T) 
 	require.Equal(t, 1, active)
 	release2()
 	require.Eventually(t, func() bool { return s.usingMemory.Load() == 0 && s.TaskQueue.GetUsingResource().Memory == 0 }, 5*time.Second, time.Millisecond)
-	s.TaskQueue.ReleaseResource(first) // duplicate release is harmless
 	require.Zero(t, s.TaskQueue.GetUsingResource().Memory)
 }
 
 func TestMemoryAdmissionWaitingQueueAndLegacyBookings(t *testing.T) {
 	paramtable.Init()
-	s := NewTaskScheduler(context.Background())
+	s := newTestTaskScheduler(context.Background())
 	defer s.Close()
 	s.totalSlots = func() int64 { return 64 }
-	s.SetMemoryAdmission(func() int64 { return 8 * admissionGiB }, nil)
+	s.memoryAdmission = taskcost.NewMemoryAdmission(func() int64 { return 8 * admissionGiB }, func() int64 { return 0 })
 	accepted := 0
 	for i := 0; i < 16; i++ {
 		if err := s.TaskQueue.Enqueue(memoryTask(fmt.Sprint(i), 2*admissionGiB)); err == nil {

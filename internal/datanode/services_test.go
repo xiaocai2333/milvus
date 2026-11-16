@@ -711,7 +711,7 @@ func TestCreateTaskBooksResourceFromProperties(t *testing.T) {
 	// fresh one so their queued tasks and bookings stay independent.
 	original := node.taskScheduler
 	defer func() { node.taskScheduler = original }()
-	freshScheduler := func() { node.taskScheduler = index.NewTaskScheduler(ctx) }
+	freshScheduler := func() { node.taskScheduler = index.NewTaskScheduler(ctx, node.memoryAdmission) }
 
 	createIndexTask := func(buildID int64, extra map[string]string) *commonpb.Status {
 		properties := map[string]string{
@@ -747,30 +747,32 @@ func TestCreateTaskBooksResourceFromProperties(t *testing.T) {
 			node.taskScheduler.TaskQueue.GetUsingResource())
 	})
 
-	t.Run("absent properties book zero", func(t *testing.T) {
+	t.Run("absent resource properties book legacy memory", func(t *testing.T) {
 		freshScheduler()
-		// A coordinator that predates the keys: the task is accepted and books
-		// nothing, rather than being rejected.
+		// The legacy request is accepted and its scalar demand is booked by
+		// the same initialized memory admission used in production.
 		before := node.taskScheduler.TaskQueue.GetUsingResource()
 		status := createIndexTask(9002, nil)
 		assert.NoError(t, merr.CheckRPCCall(status, nil))
-		assert.Equal(t, before, node.taskScheduler.TaskQueue.GetUsingResource())
+		assert.Greater(t, node.taskScheduler.TaskQueue.GetUsingResource().Memory, before.Memory)
 	})
 
-	t.Run("unparsable properties are rejected", func(t *testing.T) {
-		freshScheduler()
-		before := node.taskScheduler.TaskQueue.GetUsingResource()
-		status := createIndexTask(9003, map[string]string{
-			taskcommon.CPUKey:    "not-a-number",
-			taskcommon.MemoryKey: "1024",
+	for _, cpu := range []string{"not-a-number", "-1"} {
+		t.Run("invalid resource cpu="+cpu, func(t *testing.T) {
+			freshScheduler()
+			before := node.taskScheduler.TaskQueue.GetUsingResource()
+			status := createIndexTask(9003, map[string]string{
+				taskcommon.CPUKey:    cpu,
+				taskcommon.MemoryKey: "1024",
+			})
+			err := merr.CheckRPCCall(status, nil)
+			assert.Error(t, err)
+			// A coordinator/worker protocol error, never blamed on user input.
+			assert.ErrorIs(t, err, merr.ErrServiceInternal)
+			// Nothing was booked for a task that never started.
+			assert.Equal(t, before, node.taskScheduler.TaskQueue.GetUsingResource())
 		})
-		err := merr.CheckRPCCall(status, nil)
-		assert.Error(t, err)
-		// A coordinator/worker protocol error, never blamed on user input.
-		assert.ErrorIs(t, err, merr.ErrServiceInternal)
-		// Nothing was booked for a task that never started.
-		assert.Equal(t, before, node.taskScheduler.TaskQueue.GetUsingResource())
-	})
+	}
 }
 
 func (s *DataNodeServicesSuite) TestQueryTask() {
@@ -2330,7 +2332,7 @@ func newResourceTestNode(t *testing.T) *DataNode {
 	ctx := context.Background()
 	node := NewDataNode(ctx)
 	node.importScheduler = importv2.NewScheduler(importv2.NewTaskManager())
-	node.importV3Scheduler = importv3.NewScheduler(ctx, func() int64 { return 1 }, importv3.NewMetrics(1))
+	node.importV3Scheduler = importv3.NewScheduler(ctx, func() int64 { return 1 }, importv3.NewMetrics(1), node.memoryAdmission)
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	t.Cleanup(func() {
 		node.cancel()

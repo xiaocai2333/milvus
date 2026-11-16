@@ -43,8 +43,8 @@ const (
 //     filter, cpu only ranks;
 //   - workers that do not are placed by the pre-existing slot max-heap.
 //
-// A priced task uses memory admission on a resource-reporting worker. Scalar
-// slots only admit unpriced tasks and tasks placed on legacy workers.
+// Every local task has a resource price. Scalar admission is needed only
+// for workers that do not report memory capacity.
 //
 // The fallback tier contains only legacy workers. A task that exceeds all
 // reporting workers waits for an idle worker, then runs alone. Until one is
@@ -131,7 +131,7 @@ type demand struct {
 // by memoryShare of n's machine memory when the task has one.
 func (d demand) on(n *resourceNode) taskcommon.Resource {
 	r := d.resource
-	if d.memoryShare > 0 && n.machineMemory > 0 {
+	if d.memoryShare > 0 {
 		r.Memory = min(r.Memory, int64(float64(n.machineMemory)*d.memoryShare))
 	}
 	return r
@@ -162,8 +162,7 @@ func (p *nodePicker) pick(d demand) int64 {
 // pickByResource returns ok=false when no resource-reporting worker can hold
 // the task now, so the caller falls through to the scalar tier.
 //
-// Priced tasks use memory as the only hard filter and CPU to rank. Unpriced
-// tasks retain slot admission and ranking, including on upgraded workers.
+// Tasks use memory as the only hard filter and CPU to rank.
 func (p *nodePicker) pickByResource(d demand) (int64, bool) {
 	var (
 		best      *resourceNode
@@ -174,20 +173,10 @@ func (p *nodePicker) pickByResource(d demand) (int64, bool) {
 			continue
 		}
 		req := d.on(n)
-		var score float64
-		if req.IsZero() {
-			// An old coordinator or task family has no memory price. Keep its
-			// original slot admission and spreading, rather than treating it as free.
-			if d.slot > 0 && n.availableSlots <= 0 {
-				continue
-			}
-			score = float64(n.availableSlots)
-		} else {
-			if n.availableMemory < req.Memory {
-				continue
-			}
-			score = n.score(req)
+		if n.availableMemory < req.Memory {
+			continue
 		}
+		score := n.score(req)
 		if score > bestScore {
 			best, bestScore = n, score
 		}
@@ -256,15 +245,7 @@ func (p *nodePicker) remaining() []nodeRemaining {
 // drain like the heap's: a task asking for more than is left takes what is left.
 func (n *resourceNode) charge(taskSlot int64, req taskcommon.Resource) {
 	n.availableCPU -= req.CPU
-	if req.IsZero() && taskSlot > 0 {
-		// The worker converts an unpriced task's slots to a memory booking.
-		// QuerySlot does not report total slots, so we cannot mirror that
-		// conversion here. Reserve the remaining memory until the next report
-		// instead of offering the same bytes again to priced tasks this round.
-		n.availableMemory = 0
-	} else {
-		n.availableMemory -= req.Memory
-	}
+	n.availableMemory -= req.Memory
 	if taskSlot > 0 {
 		n.availableSlots -= min(taskSlot, n.availableSlots)
 	}

@@ -617,11 +617,3 @@ func TestExternalCollectionManager_ClosedPoolReleasesResource(t *testing.T) {
 	assert.False(t, ran.Load())
 	assert.Equal(t, taskcommon.Resource{}, manager.Resource())
 }
-
-func TestExternalCollectionManager_ResourceIsNeverNegative(t *testing.T) {
-	manager := NewExternalCollectionManager(context.Background(), 1)
-	defer manager.Close()
-	manager.usingCPU.Add(-1)
-	manager.usingMemory.Add(-1)
-	assert.Equal(t, taskcommon.Resource{}, manager.Resource())
-}

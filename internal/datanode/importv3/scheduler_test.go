@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/datanode/taskcost"
+
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -51,7 +53,7 @@ func newFakeTask(taskID, runID, slot int64, execute func(ctx context.Context) (a
 }
 
 func newTestScheduler(capacity int64) *Scheduler {
-	return NewScheduler(context.Background(), func() int64 { return capacity }, NewMetrics(1))
+	return NewScheduler(context.Background(), func() int64 { return capacity }, NewMetrics(1), taskcost.NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 }))
 }
 
 // submitAdmit queues a task and runs one admission pass, mirroring what the
@@ -354,7 +356,7 @@ func TestSchedulerClassifiesWithTaskPolicy(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			parent, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			s := NewScheduler(parent, func() int64 { return 100 }, NewMetrics(1))
+			s := NewScheduler(parent, func() int64 { return 100 }, NewMetrics(1), taskcost.NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 }))
 			taskID, runID := int64(30+i), int64(70+i)
 			started := make(chan struct{})
 			submitAdmit(t, s, newFakeTask(taskID, runID, 1, func(ctx context.Context) (any, error) {

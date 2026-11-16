@@ -172,7 +172,8 @@ func (e *executor) completeTask(planID int64, result *datapb.CompactionPlanResul
 			e.usingSlots = 0
 		}
 		// Release exactly what enqueue booked, never a re-derived value.
-		e.usingResource = e.usingResource.Sub(task.resource)
+		e.usingResource.CPU -= task.resource.CPU
+		e.usingResource.Memory -= task.resource.Memory
 		e.mu.Unlock()
 
 		task.compactor.Complete()

@@ -147,31 +147,25 @@ type Scheduler struct {
 	closeOnce sync.Once
 }
 
-func NewScheduler(parent context.Context, capacity func() int64, metrics *Metrics) *Scheduler {
+func NewScheduler(parent context.Context, capacity func() int64, metrics *Metrics, budget *taskcost.MemoryAdmission) *Scheduler {
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent) //nolint:gosec // G118: cancel is stored on the scheduler and called by Close.
 	// Sized exactly like the import V2 execution pool: the admission policy
-	// bounds how many tasks ever run, so this pool only tracks their futures
-	// and never blocks admit in practice.
+	// bounds admitted memory; the blocking pool limits execution concurrency.
 	poolSize := hardware.GetCPUNum() * paramtable.Get().DataNodeCfg.ImportConcurrencyPerCPUCore.GetAsInt()
 	return &Scheduler{
-		capacity:  capacity,
-		metrics:   metrics,
-		ctx:       ctx,
-		cancel:    cancel,
-		exec:      conc.NewPool[any](poolSize),
-		tasks:     typeutil.NewOrderedMap[taskEntryKey, *taskEntry](),
-		wakeChan:  make(chan struct{}, 1),
-		closeChan: make(chan struct{}),
+		memoryAdmission: budget,
+		capacity:        capacity,
+		metrics:         metrics,
+		ctx:             ctx,
+		cancel:          cancel,
+		exec:            conc.NewPool[any](poolSize),
+		tasks:           typeutil.NewOrderedMap[taskEntryKey, *taskEntry](),
+		wakeChan:        make(chan struct{}, 1),
+		closeChan:       make(chan struct{}),
 	}
-}
-
-// SetMemoryAdmission shares execution reservations with index/stats/analyze.
-// Call before Start or Submit. Without it the original slot admission remains.
-func (s *Scheduler) SetMemoryAdmission(budget *taskcost.MemoryAdmission) {
-	s.memoryAdmission = budget
 }
 
 // Submit validates a task and queues it for admission. It does not execute the
@@ -216,7 +210,7 @@ func (s *Scheduler) Submit(worker Task) error {
 			}
 		}
 		resource := worker.Resource()
-		if resource.Memory <= 0 && s.memoryAdmission != nil {
+		if resource.Memory <= 0 {
 			// Direct legacy RPCs carry no price. Preserve their scalar share
 			// as memory instead of allowing them to bypass the shared budget.
 			resource.Memory = taskcost.ResourceFromSlot(worker.Slot(), s.capacity(),
@@ -356,14 +350,12 @@ func (s *Scheduler) QueuedSlots() int64 {
 // Slots()+QueuedSlots() covers for the scalar slot. A dropped or superseded
 // run keeps counting until its closure exits, like its slot.
 func (s *Scheduler) Resource() taskcommon.Resource {
-	if s == nil {
-		return taskcommon.Resource{}
-	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var used taskcommon.Resource
 	for _, key := range s.tasks.Keys() {
-		if rec, ok := s.tasks.Get(key); ok && !rec.finished {
+		rec, _ := s.tasks.Get(key)
+		if !rec.finished {
 			used = used.Add(rec.resource)
 		}
 	}
@@ -447,22 +439,11 @@ func (s *Scheduler) admit() {
 		// Submit runs outside the scheduler lock: the exec pool may block when
 		// every worker is busy, and that backpressure must not hold the
 		// registry lock needed by Submit, Query and Drop.
-		future := s.exec.Submit(s.runClosure(rec))
-		if future.Done() && future.Err() != nil {
-			// A rejected submission never runs the closure's deferred cleanup.
-			rec.mu.Lock()
-			rec.state = datapb.ImportTaskStateV2_Retry
-			rec.reason = future.Err().Error()
-			rec.mu.Unlock()
-			s.finishRun(rec)
-			mlog.Warn(rec.ctx, "import V3 execution pool rejected task", mlog.Err(future.Err()),
-				mlog.FieldTaskID(rec.worker.TaskID()), mlog.Int64("runID", rec.worker.RunID()))
-			continue
-		}
+		s.exec.Submit(s.runClosure(rec))
 		s.metrics.ObserveQueueLatency(rec.worker.Kind(), time.Since(rec.enqueued))
 		mlog.Info(rec.ctx, "slot scheduler started task",
 			mlog.Int64("taskMemory", rec.resource.Memory),
-			mlog.Bool("memoryAdmission", s.memoryAdmission != nil && s.memoryAdmission.Capacity() > 0),
+			mlog.Bool("memoryAdmission", s.memoryAdmission.Capacity() > 0),
 			mlog.FieldTaskID(rec.worker.TaskID()), mlog.Int64("runID", rec.worker.RunID()),
 			mlog.String("kind", rec.worker.Kind()), mlog.Int64("slot", rec.worker.Slot()),
 			mlog.Duration("queueWait", time.Since(rec.enqueued)))
@@ -490,10 +471,10 @@ func (s *Scheduler) selectUnsafe(capacity int64) (batch []*taskEntry, queued int
 		if !rec.started {
 			slot := rec.worker.Slot()
 			fits := true
-			if s.memoryAdmission == nil || s.memoryAdmission.Capacity() <= 0 {
+			if s.memoryAdmission.Capacity() <= 0 {
 				fits = used == 0 || slot <= capacity-used
 			}
-			if fits && s.memoryAdmission != nil {
+			if fits {
 				rec.releaseMemory, fits = s.memoryAdmission.TryAcquire(rec.resource.Memory)
 			}
 			if !fits {
@@ -601,11 +582,8 @@ func (s *Scheduler) finishRun(rec *taskEntry) {
 		s.deleteUnsafe(rec)
 	}
 	release := rec.releaseMemory
-	rec.releaseMemory = nil
 	s.mu.Unlock()
-	if release != nil {
-		release()
-	}
+	release()
 	s.wg.Done()
 	// A finished run frees its slot: wake the scheduler so a pending task can
 	// take it without waiting for the resync ticker.

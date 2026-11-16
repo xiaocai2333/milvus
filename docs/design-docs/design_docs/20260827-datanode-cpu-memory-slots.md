@@ -330,7 +330,8 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   existing pool behavior. Old index RPCs without a price use their scalar share
   as memory, or the configured memory floor when that share is unavailable.
 - `taskcost.MemoryAdmission` is shared by index/stats/analyze and import V3.
-  Its capacity is `nodeTaskCapacity().Memory`. Its external usage includes
+  It is a required constructor argument for both schedulers, created once by
+  DataNode. Its capacity is `nodeTaskCapacity().Memory`. Its external usage includes
   compaction, import V2 and external refresh only; participating schedulers
   reserve their running work atomically through this budget. Their pending
   bookings must not enter its external usage, which would let queues block
@@ -339,7 +340,7 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
 - Import V3 captures an immutable price at Submit. Pending work remains in
   `Resource()` for QuerySlot, but acquires execution memory only on admission.
   Drop/replacement keeps admitted memory reserved until the closure exits.
-  Rejected pool submissions return their reservation and become Retry. V3
+  The blocking execution pool is released only after admitted runs exit. V3
   preimport cancels and joins every file future on failure; reshard cleanup
   likewise joins detached fragment writes before memory is returned. Direct
   legacy V3 requests without a price book their scalar share of node memory.
@@ -397,23 +398,19 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   `0.6 x memFrac + 0.25 x cpuFrac + 0.15 x (1 - |memFrac - cpuFrac|)`,
   where each fraction is what remains after the task relative to the total.
   Charge CPU and memory immediately so later picks in the round see the
-  reservation. Scalar slots are still charged for compatibility tasks in the
-  same round, but exhausting them does not stop priced work.
-- A task without a resource price retains scalar slot admission and ranking,
-  including on upgraded workers. Every current DataCoord task family floors
-  its memory at `minTaskMemory`, so this is a compatibility fallback.
-  After an unpriced placement, reserve the worker's remaining offered memory
-  for this round: its actual slot-derived booking is unknown until the next
-  report, and must not be offered again to priced tasks. Further unpriced
-  tasks retain slot placement. A fresh report restores actual available
-  memory for priced placement, regardless of scalar slot exhaustion.
+  reservation. Scalar usage remains in scheduling diagnostics, but exhausting
+  slots does not stop resource-priced work.
+- Every current DataCoord task family returns a resource price. Compatibility
+  with old coordinators belongs at the worker RPC boundary, where missing
+  prices are converted from scalar slots; local task placement needs no
+  unpriced-task fallback.
 - Workers without a resource report use the existing slot max-heap. If no
   reporting worker fits, try that compatibility tier before returning
   `NullNodeID`.
 - A task exceeding every reporting worker's total memory waits for an idle
   worker (`available_memory == total_memory` and no CPU booking). Prefer the
   largest idle worker, retaining the complete estimate and excluding that
-  worker from all subsequent placements in the round, even unpriced ones.
+  worker from all subsequent placements in the round.
   A task that fits any worker's total waits for ordinary capacity instead of
   oversubscribing a smaller idle worker. CPU is checked here only as evidence
   of existing work, not as a limit on the oversized task's CPU request.
@@ -450,7 +447,8 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   tasks for as long as the pool exists, not only during an upgrade. Absence is the compatibility case, not a
   protocol violation, so it must not be reported as one — unlike `task_slot`,
   a missing `task_cpu` never fails the task. A key that is present but
-  unparsable is a real error and does fail the `CreateTask` call.
+  unparsable or negative is a protocol error and fails the `CreateTask` call
+  before any booking. Execution budgets use these validated values directly.
 - Direct legacy index RPCs (`CreateJob`, `CreateJobV2`) and import V3 RPCs
   without resource properties use their scalar share as memory for execution
   admission. Other direct historical RPCs (`PreImport`, `ImportV2`,
@@ -485,10 +483,10 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
 - Estimation: table-driven test per task family, including the
   `fieldSize == 0` fallbacks and a V3 fixture with empty `Binlogs` and
   non-empty `Stats` (the shape PR #52561's review missed).
-- Ledger: Accept/Release/Snapshot, negative clamp, standalone discount
+- Ledger: Accept/Release/Snapshot, oversized available-capacity floor, standalone discount
   (mockey on `hardware.GetCPUNum` / `hardware.GetMemoryCount`).
 - Picker: memory filter, CPU/slot exhaustion with spare memory, score ordering,
-  in-round charging, oversized requests waiting for idle workers and then running exclusively, unpriced slot compatibility,
+  in-round charging, oversized requests waiting for idle workers and then running exclusively, legacy-worker slot compatibility,
   all-old-workers falling back to the heap, and mixed clusters.
 - Executors: ledger and `usingSlots` move together on enqueue and completion.
 - Coverage target >= 90% on touched code; run with

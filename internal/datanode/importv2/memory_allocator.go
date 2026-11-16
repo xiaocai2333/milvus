@@ -198,9 +198,6 @@ func reserveSnapshotRead(ctx context.Context, taskID, preferredRowBuffer int64) 
 // whose memory cannot be read, or a factor of zero or less, leaves the booking
 // as it is.
 func boundByImportMemoryLimit(r taskcommon.Resource, factor float64) taskcommon.Resource {
-	if factor <= 0 {
-		return r
-	}
 	percentage := paramtable.Get().DataNodeCfg.ImportMemoryLimitPercentage.GetAsFloat()
 	limit := int64(float64(hardware.GetMemoryCount()) * percentage / 100 * factor)
 	if limit > 0 && r.Memory > limit {

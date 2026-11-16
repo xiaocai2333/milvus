@@ -156,7 +156,7 @@ func MixCompaction(inputSize, readerBytes, deleteMapBytes int64) taskcommon.Reso
 	}
 	return taskcommon.Resource{
 		CPU:    DefaultCPU(),
-		Memory: ClampMemory(memory + max(readerBytes, 0) + max(deleteMapBytes, 0)),
+		Memory: ClampMemory(memory + readerBytes + deleteMapBytes),
 	}
 }
 
@@ -167,9 +167,6 @@ func MixCompaction(inputSize, readerBytes, deleteMapBytes int64) taskcommon.Reso
 // to twice the whole input instead of assuming a configured read window also
 // bounds decoded records. This is deliberately conservative for those paths.
 func CompactionReaderMemory(segment *meta.SegmentInfo, schema *schemapb.CollectionSchema) int64 {
-	if segment == nil {
-		return 0
-	}
 	fallback := 2 * EstimateSegmentSize(segment, schema)
 	if segment.GetStorageVersion() != storage.StorageV1 || segment.GetManifestPath() != "" || len(segment.GetBinlogs()) == 0 {
 		return fallback
@@ -202,9 +199,6 @@ const deleteMapEntryBytes = 64
 // segment's deltalogs: its delete row count times deleteMapEntryBytes, plus
 // the deltalog bytes for a VarChar primary key, whose strings the map keeps.
 func DeleteMapBytes(segment *meta.SegmentInfo, pkType schemapb.DataType) int64 {
-	if segment == nil || segment.SegmentInfo == nil {
-		return 0
-	}
 	stats := segment.EnsureStats()
 	size := stats.GetDeleteNumRows() * deleteMapEntryBytes
 	if pkType == schemapb.DataType_VarChar {
@@ -263,7 +257,7 @@ func Analyze(rawDataSize int64) taskcommon.Resource {
 func Import(rowBytes, fixedBytes int64) taskcommon.Resource {
 	return taskcommon.Resource{
 		CPU:    DefaultCPU(),
-		Memory: ClampMemory(scaled(rowBytes, paramtable.Get().DataCoordCfg.TaskResourceImportMemoryFactor.GetAsFloat()) + max(fixedBytes, 0)),
+		Memory: ClampMemory(scaled(rowBytes, paramtable.Get().DataCoordCfg.TaskResourceImportMemoryFactor.GetAsFloat()) + fixedBytes),
 	}
 }
 
@@ -372,9 +366,6 @@ func StatsInputSize(segment *meta.SegmentInfo, schema *schemapb.CollectionSchema
 // StatsTargetFields lists the field IDs a stats sub job reads, or nil when
 // the sub job reads the whole segment.
 func StatsTargetFields(schema *schemapb.CollectionSchema, subJob indexpb.StatsSubJob) []int64 {
-	if schema == nil {
-		return nil
-	}
 	var fields []int64
 	switch subJob {
 	case indexpb.StatsSubJob_TextIndexJob:
@@ -408,9 +399,6 @@ func StatsTargetFields(schema *schemapb.CollectionSchema, subJob indexpb.StatsSu
 // EstimateMaxSizePerRecord still uses heuristics for text, JSON, arrays,
 // geometry and sparse vectors; actual field sizes remain a follow-up.
 func EstimateSegmentSize(segment *meta.SegmentInfo, schema *schemapb.CollectionSchema) int64 {
-	if segment == nil || segment.SegmentInfo == nil {
-		return 0
-	}
 	if size := segment.GetSegmentSize(); size > 0 {
 		return size
 	}
@@ -477,9 +465,6 @@ func decodesWholeColumnGroup(segment *meta.SegmentInfo) bool {
 // segments differ only in what meta holds for them, and that is exactly what
 // the three steps key on.
 func EstimateFieldSize(segment *meta.SegmentInfo, schema *schemapb.CollectionSchema, fieldID int64) int64 {
-	if segment == nil || segment.SegmentInfo == nil {
-		return 0
-	}
 	field := typeutil.GetFieldByID(schema, fieldID)
 	if recorded := segment.RecordedFieldSize(fieldID); recorded > 0 {
 		// In storage v2/v3 the recorded size is the whole column group. For a
@@ -506,13 +491,11 @@ func EstimateFieldSize(segment *meta.SegmentInfo, schema *schemapb.CollectionSch
 		return recorded
 	}
 	segmentSize := EstimateSegmentSize(segment, schema)
-	if field != nil {
-		if bound := taskcommon.EstimateFieldSize(field, segment.GetNumOfRows(), 0); bound > 0 {
-			if segmentSize > 0 {
-				return min(bound, segmentSize)
-			}
-			return bound
+	if bound := taskcommon.EstimateFieldSize(field, segment.GetNumOfRows(), 0); bound > 0 {
+		if segmentSize > 0 {
+			return min(bound, segmentSize)
 		}
+		return bound
 	}
 	mlog.Warn(context.TODO(), "field has no binlog size in meta and no schema bound, pricing on the whole segment",
 		mlog.FieldSegmentID(segment.GetID()), mlog.FieldFieldID(fieldID))

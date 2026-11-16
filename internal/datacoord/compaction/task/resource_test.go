@@ -62,7 +62,7 @@ func TestCompactionTaskResource_Mix(t *testing.T) {
 			ID: id, NumOfRows: 100, Stats: &datapb.Statistics{InsertBinlogSize: 100 * mib},
 		}}
 	})
-	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10, 11}},
+	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10, 11}, Schema: taskresource.FixtureSchema()},
 		nil, mt, nil, index.NewTestVersionManager())
 	// Streamed input: the sum of both segments, well under one output segment.
 	assert.Equal(t, taskresource.MixCompaction(200*mib, 0, 0), taskPrice(task.GetTaskResource()))
@@ -78,7 +78,7 @@ func TestCompactionTaskResource_MixBoundedByOutput(t *testing.T) {
 			ID: id, NumOfRows: 100, Stats: &datapb.Statistics{InsertBinlogSize: 900 * mib},
 		}}
 	})
-	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10, 11, 12}},
+	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10, 11, 12}, Schema: taskresource.FixtureSchema()},
 		nil, mt, nil, index.NewTestVersionManager())
 	// 2700MiB of input streams through one 1024MiB output segment at a time.
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: 1024 * mib}, taskPrice(task.GetTaskResource()))
@@ -123,22 +123,22 @@ func TestCompactionTaskResource_MixDeleteMaps(t *testing.T) {
 	defer paramtable.Get().Reset(paramtable.Get().DataNodeCfg.UseMergeSort.Key)
 
 	// Merge sort over sorted inputs: 4 x perSegment of maps on top of one output segment.
-	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*2700*mib + 4*perSegment}, mix(segments(true, false), nil, inputs))
+	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*2700*mib + 4*perSegment}, mix(segments(true, false), taskresource.FixtureSchema(), inputs))
 	// Unsorted inputs take mergeSplit: only the largest map, segment 10's.
-	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(false, false), nil, inputs))
+	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(false, false), taskresource.FixtureSchema(), inputs))
 	// A namespace collection merges on IsSortedByNamespace, not IsSorted.
-	namespace := &schemapb.CollectionSchema{EnableNamespace: true}
+	namespace := &schemapb.CollectionSchema{EnableNamespace: true, Fields: taskresource.FixtureSchema().GetFields()}
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(true, false), namespace, inputs))
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*2700*mib + 4*perSegment}, mix(segments(false, true), namespace, inputs))
 
 	// More inputs than MaxSegmentMergeSort: mergeSplit.
 	paramtable.Get().Save(paramtable.Get().DataNodeCfg.MaxSegmentMergeSort.Key, "2")
-	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(true, false), nil, inputs))
+	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(true, false), taskresource.FixtureSchema(), inputs))
 	paramtable.Get().Reset(paramtable.Get().DataNodeCfg.MaxSegmentMergeSort.Key)
 
 	// Merge sort disabled: mergeSplit.
 	paramtable.Get().Save(paramtable.Get().DataNodeCfg.UseMergeSort.Key, "false")
-	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(true, false), nil, inputs))
+	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(true, false), taskresource.FixtureSchema(), inputs))
 	paramtable.Get().Save(paramtable.Get().DataNodeCfg.UseMergeSort.Key, "true")
 
 	// A VarChar primary key: its maps also keep the strings.
@@ -161,7 +161,7 @@ func TestCompactionTaskResource_MixSegmentMissing(t *testing.T) {
 	paramtable.Init()
 	mt := NewMockCompactionMeta(t)
 	mt.EXPECT().GetHealthySegment(mock.Anything, int64(10)).Return(nil).Twice()
-	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10}},
+	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10}, Schema: taskresource.FixtureSchema()},
 		nil, mt, nil, index.NewTestVersionManager())
 	// Not resolvable: floor, and NOT cached so the next round retries.
 	assert.Equal(t, taskresource.Default(), taskPrice(task.GetTaskResource()))
@@ -209,14 +209,6 @@ func TestCompactionTaskResource_SortUnsizedSegment(t *testing.T) {
 	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_SortCompaction, InputSegments: []int64{10}},
 		nil, mt, nil, index.NewTestVersionManager())
 	assert.Equal(t, taskresource.Default(), taskPrice(task.GetTaskResource()))
-	assert.Equal(t, taskresource.Default(), taskPrice(task.GetTaskResource()))
-}
-
-// TestCompactionTaskResource_SortNoInput covers the malformed-task shape.
-func TestCompactionTaskResource_SortNoInput(t *testing.T) {
-	paramtable.Init()
-	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_SortCompaction},
-		nil, NewMockCompactionMeta(t), nil, index.NewTestVersionManager())
 	assert.Equal(t, taskresource.Default(), taskPrice(task.GetTaskResource()))
 }
 
@@ -303,7 +295,7 @@ func TestCompactionTaskResource_ClusteringAndBump(t *testing.T) {
 
 	bumpMeta := NewMockCompactionMeta(t)
 	bumpMeta.EXPECT().GetHealthySegment(mock.Anything, int64(10)).RunAndReturn(segmentOf(300 * mib)).Once()
-	bump := NewBumpSchemaVersionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_BumpSchemaVersionCompaction, InputSegments: []int64{10}},
+	bump := NewBumpSchemaVersionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_BumpSchemaVersionCompaction, InputSegments: []int64{10}, Schema: taskresource.FixtureSchema()},
 		nil, bumpMeta, nil, index.NewTestVersionManager())
 	// One segment streamed through the mix writer: priced by that segment.
 	assert.Equal(t, taskresource.MixCompaction(300*mib, 0, 0), taskPrice(bump.GetTaskResource()))
@@ -311,7 +303,7 @@ func TestCompactionTaskResource_ClusteringAndBump(t *testing.T) {
 
 	bumpMissing := NewMockCompactionMeta(t)
 	bumpMissing.EXPECT().GetHealthySegment(mock.Anything, int64(10)).Return(nil).Twice()
-	bumpOrphan := NewBumpSchemaVersionTask(&datapb.CompactionTask{PlanID: 2, Type: datapb.CompactionType_BumpSchemaVersionCompaction, InputSegments: []int64{10}},
+	bumpOrphan := NewBumpSchemaVersionTask(&datapb.CompactionTask{PlanID: 2, Type: datapb.CompactionType_BumpSchemaVersionCompaction, InputSegments: []int64{10}, Schema: taskresource.FixtureSchema()},
 		nil, bumpMissing, nil, index.NewTestVersionManager())
 	assert.Equal(t, taskresource.Default(), taskPrice(bumpOrphan.GetTaskResource()))
 	assert.Equal(t, taskresource.Default(), taskPrice(bumpOrphan.GetTaskResource()))
@@ -358,7 +350,7 @@ func TestCompactionTaskResource_RequestCarriesEstimate(t *testing.T) {
 			func(_ context.Context, segID int64) *meta.SegmentInfo { return newSegment(segID) })
 		task := NewMixCompactionTask(&datapb.CompactionTask{
 			PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10},
-			Schema: &schemapb.CollectionSchema{Version: 1},
+			Schema: &schemapb.CollectionSchema{Version: 1, Fields: taskresource.FixtureSchema().GetFields()},
 		}, newAlloc(t), mt, newTaskMeta(t), index.NewTestVersionManager())
 		assert.Equal(t, taskPrice(task.GetTaskResource()), dispatched(t, task))
 	})
@@ -369,7 +361,7 @@ func TestCompactionTaskResource_RequestCarriesEstimate(t *testing.T) {
 			func(_ context.Context, segID int64) *meta.SegmentInfo { return newSegment(segID) })
 		task := NewMixCompactionTask(&datapb.CompactionTask{
 			PlanID: 1, Type: datapb.CompactionType_SortCompaction, InputSegments: []int64{10},
-			Schema: &schemapb.CollectionSchema{Version: 1},
+			Schema: &schemapb.CollectionSchema{Version: 1, Fields: taskresource.FixtureSchema().GetFields()},
 		}, newAlloc(t), mt, newTaskMeta(t), index.NewTestVersionManager())
 		assert.Equal(t, taskresource.Stats(2048), taskPrice(task.GetTaskResource()))
 		assert.Equal(t, taskPrice(task.GetTaskResource()), dispatched(t, task))
@@ -387,7 +379,7 @@ func TestCompactionTaskResource_RequestCarriesEstimate(t *testing.T) {
 			}}}).Maybe()
 		task := NewL0CompactionTask(&datapb.CompactionTask{
 			PlanID: 1, Type: datapb.CompactionType_Level0DeleteCompaction, InputSegments: []int64{10},
-			Channel: "ch-1", Schema: &schemapb.CollectionSchema{Version: 1},
+			Channel: "ch-1", Schema: &schemapb.CollectionSchema{Version: 1, Fields: taskresource.FixtureSchema().GetFields()},
 		}, newAlloc(t), mt, newTaskMeta(t))
 		assert.Equal(t, taskPrice(task.GetTaskResource()), dispatched(t, task))
 	})
@@ -398,7 +390,7 @@ func TestCompactionTaskResource_RequestCarriesEstimate(t *testing.T) {
 			func(_ context.Context, segID int64) *meta.SegmentInfo { return newSegment(segID) })
 		task := NewBumpSchemaVersionTask(&datapb.CompactionTask{
 			PlanID: 1, Type: datapb.CompactionType_BumpSchemaVersionCompaction, InputSegments: []int64{10},
-			Schema: &schemapb.CollectionSchema{Version: 1},
+			Schema: &schemapb.CollectionSchema{Version: 1, Fields: taskresource.FixtureSchema().GetFields()},
 		}, newAlloc(t), mt, newTaskMeta(t), index.NewTestVersionManager())
 		assert.Equal(t, taskPrice(task.GetTaskResource()), dispatched(t, task))
 	})

@@ -22,7 +22,7 @@ import (
 )
 
 func TestMemoryAdmissionPreImportFailureDrainsSiblingReaders(t *testing.T) {
-	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, nil)
+	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, func() int64 { return 0 })
 	s := memoryScheduler(t, 64, budget)
 	gate, release := memoryGate(t)
 	readerStarted := make(chan struct{})

@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/datanode/taskcost"
+
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
@@ -67,7 +69,7 @@ func (importV3StorageFactory) NewChunkManager(context.Context, *indexpb.StorageC
 func newImportV3ServicesNode(t *testing.T, started bool) (*DataNode, *importv3.Scheduler) {
 	t.Helper()
 	paramtable.Init()
-	scheduler := importv3.NewScheduler(context.Background(), func() int64 { return 100 }, importv3.NewMetrics(1))
+	scheduler := importv3.NewScheduler(context.Background(), func() int64 { return 100 }, importv3.NewMetrics(1), taskcost.NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 }))
 	if started {
 		done := make(chan struct{})
 		go func() {

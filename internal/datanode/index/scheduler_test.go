@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/datanode/taskcost"
+
 	"github.com/bytedance/mockey"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
@@ -330,7 +332,7 @@ func newTask(cancelStage fakeTaskState, reterror map[fakeTaskState]error, expect
 func TestIndexTaskQueue_Resource(t *testing.T) {
 	paramtable.Init()
 
-	sched := NewTaskScheduler(context.Background())
+	sched := newTestTaskScheduler(context.Background())
 	t.Cleanup(sched.Close)
 	queue := NewIndexBuildTaskQueue(sched)
 	task := newTask(fakeTaskSavedIndexes, nil, indexpb.JobState_JobStateFinished)
@@ -374,11 +376,6 @@ func TestIndexTaskQueue_Resource(t *testing.T) {
 	assert.Equal(t, taskcommon.Resource{}, queue.GetUsingResource())
 	queue.unissuedTasks.Init()
 
-	// A counter driven below zero is reported as zero, never as negative: a
-	// negative "used" would make QuerySlot report more free than the node has.
-	queue.usingCPU.Sub(3)
-	queue.usingMemory.Sub(1 << 30)
-	assert.Equal(t, taskcommon.Resource{}, queue.GetUsingResource())
 }
 
 // A dropped task whose native build ignores cancellation keeps running while
@@ -391,7 +388,7 @@ func TestIndexTaskQueue_SameNameOverlapReleasesEachBooking(t *testing.T) {
 
 	for _, newerFirst := range []bool{false, true} {
 		t.Run(fmt.Sprintf("newerFinishesFirst=%v", newerFirst), func(t *testing.T) {
-			sched := NewTaskScheduler(context.Background())
+			sched := newTestTaskScheduler(context.Background())
 			t.Cleanup(sched.Close)
 			queue := sched.TaskQueue.(*IndexTaskQueue)
 
@@ -432,7 +429,7 @@ func TestIndexTaskQueue_SameNameOverlapReleasesEachBooking(t *testing.T) {
 func TestIndexTaskScheduler(t *testing.T) {
 	paramtable.Init()
 
-	scheduler := NewTaskScheduler(context.TODO())
+	scheduler := newTestTaskScheduler(context.TODO())
 	scheduler.Start()
 
 	tasks := make([]Task, 0)
@@ -459,7 +456,7 @@ func TestIndexTaskScheduler(t *testing.T) {
 	assert.Equal(t, tasks[len(tasks)-1].GetState(), tasks[len(tasks)-1].(*fakeTask).expectedState)
 	assert.Equal(t, tasks[len(tasks)-1].Ctx().(*stagectx).curstate, fakeTaskState(fakeTaskSavedIndexes))
 
-	scheduler = NewTaskScheduler(context.TODO())
+	scheduler = newTestTaskScheduler(context.TODO())
 	tasks = make([]Task, 0, 1024)
 	for i := 0; i < 1024; i++ {
 		tasks = append(tasks, newTask(fakeTaskSavedIndexes, nil, indexpb.JobState_JobStateFinished))
@@ -514,7 +511,7 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		postMock := mockey.Mock((*indexBuildTask).PostExecute).Return(nil).Build()
 		defer postMock.UnPatch()
 
-		scheduler := NewTaskScheduler(context.Background())
+		scheduler := newTestTaskScheduler(context.Background())
 		scheduler.processTask(task)
 
 		info := manager.GetIndexTaskInfo("test-cluster", 1001)
@@ -534,7 +531,7 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		preMock := mockey.Mock((*indexBuildTask).PreExecute).Return(expectedErr).Build()
 		defer preMock.UnPatch()
 
-		scheduler := NewTaskScheduler(context.Background())
+		scheduler := newTestTaskScheduler(context.Background())
 		scheduler.processTask(task)
 
 		info := manager.GetIndexTaskInfo("test-cluster", 1002)
@@ -560,7 +557,7 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		postMock := mockey.Mock((*indexBuildTask).PostExecute).Return(nil).Build()
 		defer postMock.UnPatch()
 
-		scheduler := NewTaskScheduler(context.Background())
+		scheduler := newTestTaskScheduler(context.Background())
 		scheduler.processTask(task)
 
 		info := manager.GetIndexTaskInfo("test-cluster", 1003)
@@ -593,4 +590,8 @@ func TestIndexTaskGetResource(t *testing.T) {
 		&workerpb.CreateStatsRequest{}, manager, nil, nil, taskcommon.Resource{}).GetResource().IsZero())
 	assert.True(t, NewAnalyzeTask(ctx, cancel,
 		&workerpb.AnalyzeRequest{}, manager, nil, taskcommon.Resource{}).GetResource().IsZero())
+}
+
+func newTestTaskScheduler(ctx context.Context) *TaskScheduler {
+	return NewTaskScheduler(ctx, taskcost.NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 }))
 }

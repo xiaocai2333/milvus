@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/datanode/taskcost"
-	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 )
 
@@ -24,7 +23,7 @@ const memoryGiB = int64(1) << 30
 func memoryScheduler(t *testing.T, slots int64, budget *taskcost.MemoryAdmission) *Scheduler {
 	t.Helper()
 	s := newTestScheduler(slots)
-	s.SetMemoryAdmission(budget)
+	s.memoryAdmission = budget
 	t.Cleanup(s.Close)
 	return s
 }
@@ -70,7 +69,7 @@ func assertMemoryWaiting(t *testing.T, started <-chan int64) {
 }
 
 func TestMemoryAdmissionContinuesBeyondScalarSlots(t *testing.T) {
-	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, nil)
+	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, func() int64 { return 0 })
 	s := memoryScheduler(t, 64, budget)
 	gate, release := memoryGate(t)
 	started := make(chan int64, 8)
@@ -92,7 +91,7 @@ func TestMemoryAdmissionContinuesBeyondScalarSlots(t *testing.T) {
 }
 
 func TestMemoryAdmissionQueuedWorkDoesNotBlockItself(t *testing.T) {
-	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, nil)
+	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, func() int64 { return 0 })
 	s := memoryScheduler(t, 64, budget)
 	gate, release := memoryGate(t)
 	started := make(chan int64, 2)
@@ -109,7 +108,7 @@ func TestMemoryAdmissionQueuedWorkDoesNotBlockItself(t *testing.T) {
 }
 
 func TestMemoryAdmissionDroppedRunKeepsReservationUntilReturn(t *testing.T) {
-	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, nil)
+	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, func() int64 { return 0 })
 	s := memoryScheduler(t, 64, budget)
 	gate, release := memoryGate(t)
 	started := make(chan int64, 2)
@@ -129,7 +128,7 @@ func TestMemoryAdmissionDroppedRunKeepsReservationUntilReturn(t *testing.T) {
 }
 
 func TestMemoryAdmissionLegacyShareAndImmutablePrice(t *testing.T) {
-	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, nil)
+	budget := taskcost.NewMemoryAdmission(func() int64 { return 8 * memoryGiB }, func() int64 { return 0 })
 	s := memoryScheduler(t, 64, budget)
 	started := make(chan int64, 2)
 	legacy := memoryTask(1, 1, 0, nil, started)
@@ -145,9 +144,9 @@ func TestMemoryAdmissionLegacyShareAndImmutablePrice(t *testing.T) {
 	require.Eventually(t, func() bool { return s.Resource().Memory == 0 }, time.Second, time.Millisecond)
 }
 
-func TestMemoryAdmissionCapacityRecoveryAndPoolRejection(t *testing.T) {
+func TestMemoryAdmissionCapacityRecovery(t *testing.T) {
 	var capacity atomic.Int64
-	budget := taskcost.NewMemoryAdmission(capacity.Load, nil)
+	budget := taskcost.NewMemoryAdmission(capacity.Load, func() int64 { return 0 })
 	s := memoryScheduler(t, 64, budget)
 	gate, release := memoryGate(t)
 	started := make(chan int64, 3)
@@ -162,13 +161,7 @@ func TestMemoryAdmissionCapacityRecoveryAndPoolRejection(t *testing.T) {
 	require.EqualValues(t, 2, waitMemoryTask(t, started))
 	release()
 	require.Eventually(t, func() bool { return s.Slots() == 0 }, time.Second, time.Millisecond)
-	s.exec.Release()
-	require.NoError(t, s.Submit(memoryTask(3, 1, 2*memoryGiB, nil, started)))
-	s.admit()
-	result, ok := s.Query(3, 1)
-	require.True(t, ok)
-	require.Equal(t, datapb.ImportTaskStateV2_Retry, result.State)
-	require.Zero(t, s.Resource().Memory)
+
 	releaseBudget, ok := budget.TryAcquire(8 * memoryGiB)
 	require.True(t, ok)
 	releaseBudget()

@@ -73,7 +73,6 @@ func TestTaskResource_Formulas(t *testing.T) {
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment}, MixCompaction(0, 0, 0))
 	// Delete maps are not streamed: they come on top of the streaming cap.
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment + 2*testGiB}, MixCompaction(5*testGiB, 0, 2*testGiB))
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 300 * testMiB}, MixCompaction(300*testMiB, 0, -1))
 
 	// Clustering: its input, bounded by nothing else.
 	assert.Equal(t, taskcommon.Resource{CPU: 8, Memory: 10 * testGiB}, ClusteringCompaction(10*testGiB))
@@ -85,7 +84,6 @@ func TestTaskResource_Formulas(t *testing.T) {
 	// such as delete budgets are added once, not scaled.
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 2 * 300 * testMiB}, Import(300*testMiB, 0))
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 2*300*testMiB + 128*testMiB}, Import(300*testMiB, 128*testMiB))
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 2 * 300 * testMiB}, Import(300*testMiB, -1))
 	// Pre-import: the same buffers, nothing in flight.
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 300 * testMiB}, PreImport(300*testMiB))
 
@@ -225,7 +223,6 @@ func TestEstimateSegmentSize(t *testing.T) {
 	// Nothing to go on at all.
 	assert.Equal(t, int64(0), EstimateSegmentSize(&meta.SegmentInfo{SegmentInfo: &datapb.SegmentInfo{ID: 4}}, schema))
 	assert.Equal(t, int64(0), EstimateSegmentSize(external, nil))
-	assert.Equal(t, int64(0), EstimateSegmentSize(nil, schema))
 	assert.Equal(t, int64(0), EstimateSegmentSize(&meta.SegmentInfo{}, schema))
 
 	// A schema the estimator rejects (varchar without max_length) is not guessed at.
@@ -314,7 +311,6 @@ func TestEstimateFieldSize(t *testing.T) {
 	assert.Equal(t, 5*testMiB, EstimateFieldSize(v2, &schemapb.CollectionSchema{}, 100))
 	assert.Equal(t, total, EstimateFieldSize(v3, schema, 999))
 	assert.Equal(t, total, EstimateFieldSize(v3, nil, 101))
-	assert.Equal(t, int64(0), EstimateFieldSize(nil, schema, 101))
 	assert.Equal(t, int64(0), EstimateFieldSize(&meta.SegmentInfo{}, schema, 101))
 
 	// A type the write path does not bound falls back to the whole segment.
@@ -406,7 +402,6 @@ func TestDeleteMapBytes(t *testing.T) {
 	assert.Equal(t, int64(1000*deleteMapEntryBytes), DeleteMapBytes(segment, schemapb.DataType_Int64))
 	// VarChar key: the map also keeps the strings, taken from the deltalog bytes.
 	assert.Equal(t, int64(1000*deleteMapEntryBytes)+50*testMiB, DeleteMapBytes(segment, schemapb.DataType_VarChar))
-	assert.Zero(t, DeleteMapBytes(nil, schemapb.DataType_Int64))
 	assert.Zero(t, DeleteMapBytes(&meta.SegmentInfo{}, schemapb.DataType_Int64))
 }
 
@@ -446,7 +441,6 @@ func TestCompactionReaderMemory(t *testing.T) {
 			}},
 		},
 	}}
-	assert.Zero(t, CompactionReaderMemory(nil, nil))
 	// One chunk per field, rather than the sum of every chunk in the segment.
 	assert.EqualValues(t, 120*testMiB, CompactionReaderMemory(segment, nil))
 	segment.Binlogs[0].Binlogs[0].MemorySize = 0

@@ -799,10 +799,6 @@ func (st *statsTask) GetTaskResource() (taskcommon.Resource, bool) {
 		return taskresource.Default(), false
 	}
 	return st.resource.Get(func() (taskcommon.Resource, bool) {
-		segment := st.meta.GetHealthySegment(context.TODO(), st.GetSegmentID())
-		if segment == nil {
-			return taskresource.Default(), false
-		}
 		var schema *schemapb.CollectionSchema
 		if coll := st.meta.GetCollection(segment.GetCollectionID()); coll != nil {
 			schema = coll.Schema

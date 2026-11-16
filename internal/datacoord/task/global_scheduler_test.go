@@ -42,7 +42,7 @@ func TestGlobalScheduler_Enqueue(t *testing.T) {
 	scheduler := NewGlobalTaskScheduler(context.TODO(), cluster)
 
 	task := NewMockTask(t)
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	task.EXPECT().GetTaskID().Return(1)
 	task.EXPECT().GetTaskState().Return(taskcommon.Init)
 	task.EXPECT().GetTaskType().Return(taskcommon.Compaction)
@@ -72,7 +72,7 @@ func TestGlobalScheduler_GetPendingTaskCountIsScopedByTaskType(t *testing.T) {
 
 	enqueue := func(taskID int64, taskType taskcommon.Type) {
 		task := NewMockTask(t)
-		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 		task.EXPECT().GetTaskID().Return(taskID)
 		task.EXPECT().GetTaskState().Return(taskcommon.Init)
 		task.EXPECT().GetTaskType().Return(taskType)
@@ -103,7 +103,7 @@ func TestGlobalScheduler_GetPendingTaskCountIncludesBackoff(t *testing.T) {
 	tasks := make(map[int64]Task)
 	for taskID := int64(1); taskID <= 2; taskID++ {
 		task := NewMockTask(t)
-		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 		task.EXPECT().GetTaskID().Return(taskID)
 		task.EXPECT().GetTaskState().Return(taskcommon.Init)
 		task.EXPECT().GetTaskType().Return(taskcommon.Stats)
@@ -123,7 +123,7 @@ func TestGlobalScheduler_AbortAndRemoveTask(t *testing.T) {
 	scheduler := NewGlobalTaskScheduler(context.TODO(), cluster)
 
 	task := NewMockTask(t)
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	task.EXPECT().GetTaskID().Return(1)
 	task.EXPECT().GetTaskState().Return(taskcommon.Init)
 	task.EXPECT().GetTaskType().Return(taskcommon.Compaction)
@@ -157,7 +157,7 @@ func newFinalizeTestTask(t *testing.T, initial taskcommon.State) (*MockTask, *at
 	})
 	task.EXPECT().GetTaskType().Return(taskcommon.Import)
 	task.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	return task, state
 }
 
@@ -344,7 +344,7 @@ func TestGlobalScheduler_FinalizeStopsDelayedRequeue(t *testing.T) {
 	// The second task pauses this round after task 1 has moved into delayed,
 	// before the scheduler gets to its delayed-task requeue loop.
 	secondTask := NewMockTask(t)
-	secondTask.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	secondTask.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	secondTask.EXPECT().GetTaskID().Return(int64(2))
 	secondTask.EXPECT().GetTaskState().Return(taskcommon.Init)
 	secondTask.EXPECT().GetTaskType().Return(taskcommon.Import)
@@ -379,7 +379,7 @@ func TestGlobalScheduler_FinalizeStopsSlotCalculationAfterPop(t *testing.T) {
 	taskPopped := make(chan struct{})
 	releasePopped := make(chan struct{})
 	task := NewMockTask(t)
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	task.EXPECT().GetTaskID().RunAndReturn(func() int64 {
 		// Pop's first identity read removes the task from its queue map.
 		// The next read happens after Pop returns, before taking its key lock.
@@ -559,7 +559,7 @@ func TestGlobalScheduler_TestSchedule(t *testing.T) {
 		task.EXPECT().GetTaskType().Return(taskcommon.Compaction).Maybe()
 		task.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
 		task.EXPECT().GetTaskSlot().Return(1).Maybe()
-		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 		return task
 	}
 
@@ -645,7 +645,7 @@ func TestGlobalScheduler_TestSchedule(t *testing.T) {
 		task.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
 		task.EXPECT().GetTaskState().Return(taskcommon.Init).Maybe()
 		task.EXPECT().GetTaskSlot().Return(int64(0)).Once()
-		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 
 		var dispatched atomic.Bool
 		task.EXPECT().CreateTaskOnWorker(mock.MatchedBy(func(nodeID int64) bool {
@@ -712,7 +712,7 @@ func TestGlobalScheduler_RecordTaskFailureBackoff(t *testing.T) {
 
 	scheduler := NewGlobalTaskScheduler(context.TODO(), nil).(*globalTaskScheduler)
 	task := NewMockTask(t)
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	task.EXPECT().GetTaskID().Return(7).Maybe()
 	task.EXPECT().GetTaskType().Return(taskcommon.Index).Maybe()
 	task.EXPECT().GetTaskState().Return(taskcommon.Init).Maybe()
@@ -762,7 +762,7 @@ func TestGlobalScheduler_FailedTaskBacksOffBeforeRedispatch(t *testing.T) {
 	task.EXPECT().GetTaskType().Return(taskcommon.Index).Maybe()
 	task.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
 	task.EXPECT().GetTaskSlot().Return(1).Maybe()
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 	// CreateTaskOnWorker never flips the state away from Init: every dispatch fails
 	task.EXPECT().GetTaskState().Return(taskcommon.Init).Maybe()
 	var createCalls atomic.Int32
@@ -799,7 +799,7 @@ func TestGlobalScheduler_TerminalTaskClearsBackoff(t *testing.T) {
 	task.EXPECT().GetTaskType().Return(taskcommon.Index).Maybe()
 	task.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()
 	task.EXPECT().GetTaskSlot().Return(1).Maybe()
-	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+	task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 
 	// CreateTaskOnWorker drives the task straight to a terminal state (e.g. its
 	// segment was compacted away), so it never reaches InProgress/runningTasks.
@@ -968,7 +968,7 @@ func TestGlobalScheduler_scheduleBackoffDoesNotStopRound(t *testing.T) {
 	const inBackoff = 200
 	for i := 1; i <= inBackoff; i++ {
 		task := NewMockTask(t)
-		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{}, true).Maybe()
+		task.EXPECT().GetTaskResource().Return(taskcommon.Resource{CPU: 1, Memory: 1}, true).Maybe()
 		task.EXPECT().GetTaskID().Return(int64(i)).Maybe()
 		task.EXPECT().GetTaskType().Return(taskcommon.Index).Maybe()
 		task.EXPECT().SetTaskTime(mock.Anything, mock.Anything).Return().Maybe()

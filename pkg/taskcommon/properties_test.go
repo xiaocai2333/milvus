@@ -181,8 +181,8 @@ func TestProperties_TaskResource(t *testing.T) {
 	})
 
 	// A coordinator that predates the keys sends neither, and the worker must
-	// book zero rather than reject the task.
-	t.Run("absent keys book zero", func(t *testing.T) {
+	// return an empty estimate for the worker to convert from legacy slots.
+	t.Run("absent keys use legacy estimate", func(t *testing.T) {
 		for _, props := range []Properties{
 			NewProperties(map[string]string{TaskIDKey: "1"}),
 			NewProperties(map[string]string{TaskIDKey: "1", CPUKey: "2"}),
@@ -203,4 +203,14 @@ func TestProperties_TaskResource(t *testing.T) {
 		_, err = props.GetTaskResource()
 		assert.Error(t, err)
 	})
+}
+
+func TestProperties_NegativeTaskResource(t *testing.T) {
+	for _, resource := range []Resource{{CPU: -1, Memory: 1024}, {CPU: 1, Memory: -1}} {
+		props := NewProperties(nil)
+		props.AppendTaskResource(resource)
+		_, err := props.GetTaskResource()
+		assert.ErrorIs(t, err, merr.ErrServiceInternal)
+		assert.Equal(t, merr.SystemError, merr.GetErrorType(err))
+	}
 }

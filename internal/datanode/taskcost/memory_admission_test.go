@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMemoryAdmissionConcurrentReservationsAndIdempotentRelease(t *testing.T) {
-	budget := NewMemoryAdmission(func() int64 { return 8 }, nil)
+func TestMemoryAdmissionConcurrentReservationsAndRelease(t *testing.T) {
+	budget := NewMemoryAdmission(func() int64 { return 8 }, func() int64 { return 0 })
 	var successes atomic.Int32
 	var entered, finished sync.WaitGroup
 	releaseAll := make(chan struct{})
@@ -31,7 +31,6 @@ func TestMemoryAdmissionConcurrentReservationsAndIdempotentRelease(t *testing.T)
 			entered.Done()
 			<-releaseAll
 			if ok {
-				release()
 				release()
 			}
 		}()
@@ -76,7 +75,7 @@ func TestMemoryAdmissionOversizedReservationCannotWrapUsage(t *testing.T) {
 	require.True(t, ok)
 	release()
 
-	unknown := NewMemoryAdmission(nil, nil)
+	unknown := NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 })
 	release, ok = unknown.TryAcquire(math.MaxInt64)
 	require.True(t, ok)
 	_, ok = unknown.TryAcquire(1)

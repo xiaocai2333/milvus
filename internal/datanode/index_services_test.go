@@ -30,6 +30,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/datanode/importv2"
 	"github.com/milvus-io/milvus/internal/datanode/index"
 	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -98,6 +99,7 @@ func TestCreateAnalyzeTaskPropagatesPluginContext(t *testing.T) {
 	defer cancel()
 
 	node := NewDataNode(ctx)
+	node.importScheduler = importv2.NewScheduler(importv2.NewTaskManager())
 	defer node.cancel()
 
 	requestContext := []*commonpb.KeyValuePair{{Key: "cipher-context", Value: "opaque"}}
@@ -149,6 +151,7 @@ func TestCreateAnalyzeTaskPluginContextErrorDoesNotRegisterTask(t *testing.T) {
 	defer cancel()
 
 	node := NewDataNode(ctx)
+	node.importScheduler = importv2.NewScheduler(importv2.NewTaskManager())
 	defer node.cancel()
 	parseMock := mockey.Mock(hookutil.GetCPluginContext).Return(nil, assert.AnError).Build()
 	defer parseMock.UnPatch()
@@ -171,6 +174,7 @@ func TestCreateStatsTaskPropagatesPluginContext(t *testing.T) {
 	defer cancel()
 
 	node := NewDataNode(ctx)
+	node.importScheduler = importv2.NewScheduler(importv2.NewTaskManager())
 	defer node.cancel()
 
 	requestContext := []*commonpb.KeyValuePair{{Key: "cipher-context", Value: "opaque"}}
@@ -238,6 +242,7 @@ func TestCreateStatsTaskPluginContextErrorDoesNotRegisterTask(t *testing.T) {
 	defer cancel()
 
 	node := NewDataNode(ctx)
+	node.importScheduler = importv2.NewScheduler(importv2.NewTaskManager())
 	defer node.cancel()
 	parseMock := mockey.Mock(hookutil.GetCPluginContext).Return(nil, assert.AnError).Build()
 	defer parseMock.UnPatch()
@@ -259,6 +264,7 @@ func TestCreateIndexTaskInitializesIndexStorePathVersion(t *testing.T) {
 		ctx := context.Background()
 		paramtable.Init()
 		node := NewDataNode(ctx)
+		node.importScheduler = importv2.NewScheduler(importv2.NewTaskManager())
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
 
 		req := &workerpb.CreateJobRequest{
