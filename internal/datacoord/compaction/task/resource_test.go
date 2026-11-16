@@ -65,7 +65,7 @@ func TestCompactionTaskResource_Mix(t *testing.T) {
 	task := NewMixCompactionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_MixCompaction, InputSegments: []int64{10, 11}},
 		nil, mt, nil, index.NewTestVersionManager())
 	// Streamed input: the sum of both segments, well under one output segment.
-	assert.Equal(t, taskresource.MixCompaction(200*mib, 0), taskPrice(task.GetTaskResource()))
+	assert.Equal(t, taskresource.MixCompaction(200*mib, 0, 0), taskPrice(task.GetTaskResource()))
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: 200 * mib}, taskPrice(task.GetTaskResource()))
 	assert.Equal(t, 2, calls) // cached after the first walk
 }
@@ -123,13 +123,13 @@ func TestCompactionTaskResource_MixDeleteMaps(t *testing.T) {
 	defer paramtable.Get().Reset(paramtable.Get().DataNodeCfg.UseMergeSort.Key)
 
 	// Merge sort over sorted inputs: 4 x perSegment of maps on top of one output segment.
-	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 4*perSegment}, mix(segments(true, false), nil, inputs))
+	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*2700*mib + 4*perSegment}, mix(segments(true, false), nil, inputs))
 	// Unsorted inputs take mergeSplit: only the largest map, segment 10's.
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(false, false), nil, inputs))
 	// A namespace collection merges on IsSortedByNamespace, not IsSorted.
 	namespace := &schemapb.CollectionSchema{EnableNamespace: true}
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*perSegment}, mix(segments(true, false), namespace, inputs))
-	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 4*perSegment}, mix(segments(false, true), namespace, inputs))
+	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: maxSegment + 2*2700*mib + 4*perSegment}, mix(segments(false, true), namespace, inputs))
 
 	// More inputs than MaxSegmentMergeSort: mergeSplit.
 	paramtable.Get().Save(paramtable.Get().DataNodeCfg.MaxSegmentMergeSort.Key, "2")
@@ -151,7 +151,7 @@ func TestCompactionTaskResource_MixDeleteMaps(t *testing.T) {
 		Stats: &datapb.Statistics{InsertBinlogSize: 100 * mib, DeleteNumRows: deletes, DeltaBinlogSize: 64 * mib},
 	}})
 	// The segment size counts the deltalog bytes too (GetSegmentSize).
-	want := (100+64)*mib + taskresource.DeleteMapBytes(&meta.SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+	want := 3*(100+64)*mib + taskresource.DeleteMapBytes(&meta.SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
 		Stats: &datapb.Statistics{DeleteNumRows: deletes, DeltaBinlogSize: 64 * mib},
 	}}, schemapb.DataType_VarChar)
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: want}, mix(mt, varchar, []int64{10}))
@@ -306,7 +306,7 @@ func TestCompactionTaskResource_ClusteringAndBump(t *testing.T) {
 	bump := NewBumpSchemaVersionTask(&datapb.CompactionTask{PlanID: 1, Type: datapb.CompactionType_BumpSchemaVersionCompaction, InputSegments: []int64{10}},
 		nil, bumpMeta, nil, index.NewTestVersionManager())
 	// One segment streamed through the mix writer: priced by that segment.
-	assert.Equal(t, taskresource.MixCompaction(300*mib, 0), taskPrice(bump.GetTaskResource()))
+	assert.Equal(t, taskresource.MixCompaction(300*mib, 0, 0), taskPrice(bump.GetTaskResource()))
 	assert.Equal(t, taskcommon.Resource{CPU: 1, Memory: 300 * mib}, taskPrice(bump.GetTaskResource()))
 
 	bumpMissing := NewMockCompactionMeta(t)

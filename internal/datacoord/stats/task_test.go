@@ -599,6 +599,7 @@ func (s *statsTaskSuite) newMeta() (*meta.Meta, *StatsTaskMeta) {
 	secondaryIndex.Insert(secondaryKey, statsTask)
 
 	return &meta.Meta{
+			Collections: typeutil.NewConcurrentMap[UniqueID, *meta.CollectionInfo](),
 			Segments: &meta.SegmentsInfo{
 				Segments: map[int64]*meta.SegmentInfo{
 					s.segID: {
@@ -1899,4 +1900,36 @@ func (s *statsTaskSuite) TestPrepareJobRequest() {
 		s.Equal(endID, req.EndLogID)
 		s.Equal(int64(1000), req.NumRows)
 	})
+}
+
+func (s *statsTaskSuite) TestObsoleteTaskRetiresBeforeAdmission() {
+	for _, missing := range []bool{false, true} {
+		s.Run(fmt.Sprint(missing), func() {
+			mt, stm := s.newMeta()
+			st := newStatsTask(stm.GetStatsTask(s.taskID), 1, mt, stm, nil, nil, nil)
+			// Cache a deliberately oversized estimate while the segment is live.
+			st.resource.Get(func() (taskcommon.Resource, bool) {
+				return taskcommon.Resource{CPU: 1, Memory: 100 << 30}, true
+			})
+			s.False(st.TryCompleteOnCoordinator(context.Background()))
+			if missing {
+				delete(mt.Segments.Segments, s.segID)
+			} else {
+				mt.Segments.Segments[s.segID].State = commonpb.SegmentState_Dropped
+			}
+			price, cached := st.GetTaskResource()
+			s.False(cached)
+			s.Less(price.Memory, int64(100<<30))
+			catalog := catalogmocks.NewDataCoordCatalog(s.T())
+			stm.catalog = catalog
+			catalog.EXPECT().DropStatsTask(mock.Anything, s.taskID).Return(errors.New("metadata unavailable")).Once()
+			s.True(st.TryCompleteOnCoordinator(context.Background()))
+			s.Equal(indexpb.JobState_JobStateInit, st.GetState())
+			s.NotNil(stm.GetStatsTask(s.taskID))
+			catalog.EXPECT().DropStatsTask(mock.Anything, s.taskID).Return(nil).Once()
+			s.True(st.TryCompleteOnCoordinator(context.Background()))
+			s.Equal(indexpb.JobState_JobStateNone, st.GetState())
+			s.Nil(stm.GetStatsTask(s.taskID))
+		})
+	}
 }

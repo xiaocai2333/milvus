@@ -123,14 +123,58 @@ func TestNodePicker_ScalarSlotsDoNotOverrideResourceScore(t *testing.T) {
 	assert.Equal(t, int64(1), p.Pick(16, req))
 }
 
-func TestNodePicker_OversizedWaits(t *testing.T) {
-	p := newNodePicker(map[int64]*session.WorkerSlots{
+func TestNodePicker_OversizedWaitsForIdleWorker(t *testing.T) {
+	workers := map[int64]*session.WorkerSlots{
 		1: resourceWorker(1, 10, 8, 8*pickGiB),
 		2: resourceWorker(2, 0, 8, 16*pickGiB),
-	})
+	}
+	workers[1].AvailableMemory--
+	workers[2].AvailableMemory--
+	req := taskcommon.Resource{CPU: 8, Memory: 32 * pickGiB}
+	p := newNodePicker(workers)
 	before := p.remaining()
-	assert.Equal(t, int64(NullNodeID), p.Pick(128, taskcommon.Resource{CPU: 8, Memory: 32 * pickGiB}))
-	assert.Equal(t, before, p.remaining(), "a rejected task charges nothing")
+	assert.Equal(t, int64(NullNodeID), p.Pick(128, req))
+	assert.Equal(t, before, p.remaining())
+	// Idle, with unchanged capacity and no scalar slots: exactly one
+	// oversized task gets this worker, including against unpriced followers.
+	workers[2].AvailableMemory = workers[2].TotalMemory
+	p = newNodePicker(workers)
+	assert.Equal(t, int64(2), p.Pick(128, req))
+	for _, n := range p.nodes {
+		if n.nodeID == 2 {
+			assert.Equal(t, -16*pickGiB, n.availableMemory)
+			assert.True(t, n.exclusive)
+		}
+	}
+	workers[1].AvailableMemory = 0
+	for _, n := range p.nodes {
+		if n.nodeID == 1 {
+			n.availableMemory = 0
+			n.availableSlots = 0
+		}
+	}
+	assert.Equal(t, int64(NullNodeID), p.Pick(1, req))
+	assert.Equal(t, int64(NullNodeID), p.Pick(1, taskcommon.Resource{Memory: 1}))
+	// Isolate the selected worker: zero-slot unpriced work cannot bypass exclusivity.
+	for _, n := range p.nodes {
+		if n.nodeID == 2 {
+			p.nodes = []*resourceNode{n}
+			break
+		}
+	}
+	assert.Equal(t, int64(NullNodeID), p.Pick(0, taskcommon.Resource{}))
+	// A CPU booking with no memory booking is not idle either.
+	workers[2].AvailableCPU--
+	assert.Equal(t, int64(NullNodeID), newNodePicker(workers).Pick(1, req))
+}
+
+func TestNodePicker_WaitsForLargerWorkerRatherThanOversubscribingSmallIdleWorker(t *testing.T) {
+	workers := map[int64]*session.WorkerSlots{
+		1: resourceWorker(1, 10, 8, 8*pickGiB),
+		2: resourceWorker(2, 10, 8, 64*pickGiB),
+	}
+	workers[2].AvailableMemory = 4 * pickGiB
+	assert.Equal(t, int64(NullNodeID), newNodePicker(workers).Pick(1, taskcommon.Resource{Memory: 32 * pickGiB}))
 }
 
 func TestNodePicker_BusyWaits(t *testing.T) {
@@ -238,12 +282,12 @@ func TestNodePicker_BoundedMemoryShare(t *testing.T) {
 		assert.Equal(t, int64(NullNodeID), p.PickBounded(1, req, share), share)
 	}
 
-	// Even a bounded request must fit the worker's available memory.
-	// A 200GiB estimate at 1.5 needs 96GiB and cannot fit a 64GiB worker.
+	// A bound above the node capacity uses idle-worker exclusive admission.
 	p = newPicker()
 	huge := taskcommon.Resource{CPU: 1, Memory: 200 * pickGiB}
+	assert.Equal(t, int64(1), p.PickBounded(1, huge, 1.5))
+	assert.Equal(t, -32*pickGiB, p.nodes[0].availableMemory)
 	assert.Equal(t, int64(NullNodeID), p.PickBounded(1, huge, 1.5))
-	assert.Equal(t, 64*pickGiB, p.nodes[0].availableMemory)
 }
 
 // TestNodePicker_BoundedShareOfTheMachine: a standalone worker reports its

@@ -47,8 +47,8 @@ const (
 // slots only admit unpriced tasks and tasks placed on legacy workers.
 //
 // The fallback tier contains only legacy workers. A task that exceeds all
-// reporting workers waits; if no legacy worker fits either, the scheduler
-// ends the round so later tasks cannot consume the capacity it needs.
+// reporting workers waits for an idle worker, then runs alone. Until one is
+// idle the scheduler ends the round, preserving the waiting task's priority.
 type nodePicker struct {
 	nodes []*resourceNode
 	heap  typeutil.Heap[*nodeSlotEntry]
@@ -61,6 +61,7 @@ type resourceNode struct {
 	totalMemory     int64
 	availableMemory int64
 	availableSlots  int64
+	exclusive       bool // an oversized task owns this worker for the rest of the round
 	// machineMemory is the base of a NodeMemoryBounded share: the worker's
 	// whole machine, or totalMemory for a worker that does not report it.
 	machineMemory int64
@@ -152,7 +153,10 @@ func (p *nodePicker) pick(d demand) int64 {
 	if nodeID, ok := p.pickByResource(d); ok {
 		return nodeID
 	}
-	return pickNodeFromHeap(p.heap, d.slot)
+	if nodeID := pickNodeFromHeap(p.heap, d.slot); nodeID != NullNodeID {
+		return nodeID
+	}
+	return p.pickOversized(d)
 }
 
 // pickByResource returns ok=false when no resource-reporting worker can hold
@@ -166,6 +170,9 @@ func (p *nodePicker) pickByResource(d demand) (int64, bool) {
 		bestScore = math.Inf(-1)
 	)
 	for _, n := range p.nodes {
+		if n.exclusive {
+			continue
+		}
 		req := d.on(n)
 		var score float64
 		if req.IsZero() {
@@ -190,6 +197,33 @@ func (p *nodePicker) pickByResource(d demand) (int64, bool) {
 	}
 	best.charge(d.slot, d.on(best))
 	return best.nodeID, true
+}
+
+// pickOversized preserves progress for an estimate larger than every worker's
+// capacity. Ordinary tasks wait for a sufficiently large worker; oversized
+// tasks also wait, but only until a worker has no bookings. Never truncate the
+// estimate: charge it in full and exclude the worker from subsequent picks.
+func (p *nodePicker) pickOversized(d demand) int64 {
+	for _, n := range p.nodes {
+		if d.on(n).Memory <= n.totalMemory {
+			return NullNodeID
+		}
+	}
+	var best *resourceNode
+	for _, n := range p.nodes {
+		if n.exclusive || n.availableMemory != n.totalMemory || n.availableCPU != n.totalCPU {
+			continue
+		}
+		if best == nil || n.totalMemory > best.totalMemory || (n.totalMemory == best.totalMemory && n.nodeID < best.nodeID) {
+			best = n
+		}
+	}
+	if best == nil {
+		return NullNodeID
+	}
+	best.charge(d.slot, d.on(best))
+	best.exclusive = true
+	return best.nodeID
 }
 
 // nodeRemaining is what one resource-reporting worker has left after the

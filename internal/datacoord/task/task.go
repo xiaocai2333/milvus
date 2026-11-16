@@ -39,7 +39,7 @@ type Task interface {
 	// The bool reports whether the answer is exact. It governs caching only:
 	// an inexact answer is recomputed next round so the exact one can replace
 	// it. It must not gate placement -- an input that is gone never becomes
-	// exact. The optional coordinator hook handles index retirement separately.
+	// exact. The optional coordinator hook handles index and stats retirement separately.
 	GetTaskResource() (taskcommon.Resource, bool)
 	SetTaskTime(timeType taskcommon.TimeType, time time.Time)
 	GetTaskTime(timeType taskcommon.TimeType) time.Time

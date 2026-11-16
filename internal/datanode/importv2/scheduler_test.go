@@ -1740,3 +1740,71 @@ func (s *SchedulerSuite) TestScheduler_FailedTaskWithNoFuturesStaysFailed() {
 func TestScheduler(t *testing.T) {
 	suite.Run(t, new(SchedulerSuite))
 }
+
+// Exercise submission through a bounded pool, rather than pre-registering futures.
+// A failed/removed task must remain booked while Execute is still blocked in Submit.
+func (s *SchedulerSuite) TestScheduler_BlockedSubmissionKeepsBooking() {
+	for _, removed := range []bool{false, true} {
+		s.Run(strconv.FormatBool(removed), func() {
+			pool := conc.NewPool[any](2)
+			defer pool.Release()
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			entered := make(chan struct{}, 2)
+			failed := make(chan struct{})
+			submitting := make(chan struct{})
+			allowFailure := make(chan struct{})
+			// Reader one fails; readers two and three keep the pool full.
+			task := newFakeImportTask(3501, s.manager, func() []*conc.Future[any] {
+				var fs []*conc.Future[any]
+				fs = append(fs, pool.Submit(func() (any, error) {
+					<-allowFailure
+					s.manager.Update(3501, UpdateState(datapb.ImportTaskStateV2_Failed))
+					close(failed)
+					return nil, errors.New("reader failed")
+				}))
+				for i := 0; i < 3; i++ {
+					if i == 1 {
+						close(submitting)
+					}
+					fs = append(fs, pool.Submit(func() (any, error) {
+						select {
+						case entered <- struct{}{}:
+						default:
+						}
+						<-release
+						return nil, nil
+					}))
+				}
+				return fs
+			})
+			booked := taskcommon.Resource{CPU: 1, Memory: 512 << 20}
+			task.resource = booked
+			s.manager.Add(task)
+			s.scheduler.scheduleTasks()
+			<-submitting
+			close(allowFailure)
+			<-failed
+			<-entered
+			<-entered
+			if removed {
+				s.manager.Remove(3501)
+			}
+			s.scheduler.collectCompletedTasks()
+			s.Equal(booked, s.scheduler.Resource())
+			s.scheduler.futuresMu.Lock()
+			s.True(s.scheduler.futures[3501].submitting)
+			s.True(s.scheduler.futures[3501].detached)
+			s.scheduler.futuresMu.Unlock()
+			unblock()
+			s.scheduler.submitMu.Lock()
+			s.scheduler.submitMu.Unlock()
+			s.Eventually(func() bool { return s.scheduler.Resource().IsZero() }, 5*time.Second, 10*time.Millisecond)
+			s.scheduler.collectCompletedTasks()
+			s.Empty(s.scheduler.futures)
+			s.manager.Remove(3501)
+		})
+	}
+}

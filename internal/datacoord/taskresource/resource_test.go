@@ -25,6 +25,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/datacoord/meta"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
@@ -67,12 +68,12 @@ func TestTaskResource_Formulas(t *testing.T) {
 	// Mix compaction streams: its input, bounded by one output segment; an
 	// unknown input is priced at the bound.
 	maxSegment := paramtable.Get().DataCoordCfg.SegmentMaxSize.GetAsInt64() * testMiB
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 300 * testMiB}, MixCompaction(300*testMiB, 0))
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment}, MixCompaction(5*testGiB, 0))
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment}, MixCompaction(0, 0))
+	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 300 * testMiB}, MixCompaction(300*testMiB, 0, 0))
+	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment}, MixCompaction(5*testGiB, 0, 0))
+	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment}, MixCompaction(0, 0, 0))
 	// Delete maps are not streamed: they come on top of the streaming cap.
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment + 2*testGiB}, MixCompaction(5*testGiB, 2*testGiB))
-	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 300 * testMiB}, MixCompaction(300*testMiB, -1))
+	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: maxSegment + 2*testGiB}, MixCompaction(5*testGiB, 0, 2*testGiB))
+	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 300 * testMiB}, MixCompaction(300*testMiB, 0, -1))
 
 	// Clustering: its input, bounded by nothing else.
 	assert.Equal(t, taskcommon.Resource{CPU: 8, Memory: 10 * testGiB}, ClusteringCompaction(10*testGiB))
@@ -430,4 +431,37 @@ func TestImportNodeMemoryShare(t *testing.T) {
 	assert.InDelta(t, 0.2, ImportTaskNodeMemoryShare(), 1e-9, "10% x default factor 2")
 	paramtable.Get().Save(factorKey, "3")
 	assert.InDelta(t, 0.3, ImportTaskNodeMemoryShare(), 1e-9)
+}
+
+func TestCompactionReaderMemory(t *testing.T) {
+	segment := &meta.SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+		Stats: &datapb.Statistics{InsertBinlogSize: 1024 * testMiB},
+		Binlogs: []*datapb.FieldBinlog{
+			{FieldID: 100, Binlogs: []*datapb.Binlog{
+				{MemorySize: 16 * testMiB, LogSize: 4 * testMiB},
+				{MemorySize: 32 * testMiB, LogSize: 8 * testMiB},
+			}},
+			{FieldID: 101, Binlogs: []*datapb.Binlog{
+				{MemorySize: 64 * testMiB, LogSize: 16 * testMiB},
+			}},
+		},
+	}}
+	assert.Zero(t, CompactionReaderMemory(nil, nil))
+	// One chunk per field, rather than the sum of every chunk in the segment.
+	assert.EqualValues(t, 120*testMiB, CompactionReaderMemory(segment, nil))
+	segment.Binlogs[0].Binlogs[0].MemorySize = 0
+	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
+	segment.Binlogs[0].Binlogs[0].MemorySize = 16 * testMiB
+	segment.StorageVersion = storage.StorageV2
+	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
+	segment.StorageVersion = storage.StorageV1
+	segment.ManifestPath = "manifest"
+	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
+	segment.ManifestPath = ""
+	segment.Binlogs[0].Binlogs[0].LogSize = 0
+	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
+	segment.Binlogs[0].Binlogs = nil
+	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
+	segment.Binlogs = nil
+	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
 }

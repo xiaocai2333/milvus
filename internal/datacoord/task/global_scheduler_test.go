@@ -891,7 +891,7 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 	for _, demandGiB := range []int64{12, 80} {
 		t.Run(fmt.Sprintf("head requiring %d GiB keeps priority across rounds", demandGiB), func(t *testing.T) {
 			cluster := session.NewMockCluster(t)
-			worker := &session.WorkerSlots{NodeID: 1, TotalCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 4 * giB}
+			worker := &session.WorkerSlots{NodeID: 1, TotalCPU: 8, AvailableCPU: 8, TotalMemory: 16 * giB, AvailableMemory: 4 * giB}
 			cluster.EXPECT().QuerySlot().Return(map[int64]*session.WorkerSlots{1: worker}).Times(4)
 			scheduler := NewGlobalTaskScheduler(context.TODO(), cluster).(*globalTaskScheduler)
 			head, headDispatched, _ := newDispatchableTask(t, 1, taskcommon.Resource{CPU: 1, Memory: demandGiB * giB})
@@ -910,10 +910,9 @@ func TestGlobalScheduler_scheduleUnfitTask(t *testing.T) {
 				assert.Equal(t, int(id), scheduler.pendingTasks.TaskCount())
 				worker.AvailableMemory = 8 * giB
 			}
-			// Release enough memory (or increase capacity for an oversized task).
-			// Exactly the head's demand is available, so no follower may run yet.
-			worker.TotalMemory = max(worker.TotalMemory, demandGiB*giB)
-			worker.AvailableMemory = demandGiB * giB
+			// Free the worker without increasing its capacity. An oversized
+			// head runs alone; an ordinary head consumes all available memory.
+			worker.AvailableMemory = min(worker.TotalMemory, demandGiB*giB)
 			scheduler.schedule()
 			assert.True(t, headDispatched.Load(), "the waiting head gets the released capacity first")
 			for _, follower := range followers {

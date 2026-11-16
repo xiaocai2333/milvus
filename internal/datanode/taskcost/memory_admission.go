@@ -40,7 +40,7 @@ func (b *MemoryAdmission) Capacity() int64 {
 // TryAcquire atomically reserves a supplied memory price and returns an
 // idempotent release. It retains the existing worker progress rule: an
 // otherwise idle node can execute one oversized estimate alone. Coordinator
-// placement remains strictly memory-bounded. Unknown capacity retains legacy
+// placement admits such estimates only on idle workers too. Unknown capacity retains legacy
 // admission, but still tracks reservations if capacity becomes known later.
 func (b *MemoryAdmission) TryAcquire(memory int64) (func(), bool) {
 	memory = max(memory, 0)

@@ -153,6 +153,31 @@ func (st *statsTask) dropAndResetTaskOnWorker(ctx context.Context, cluster sessi
 	st.resetTask(ctx, reason)
 }
 
+// TryCompleteOnCoordinator retires obsolete work before memory admission.
+// A failed metadata write leaves the task Init for scheduler retry/backoff.
+func (st *statsTask) TryCompleteOnCoordinator(ctx context.Context) bool {
+	return st.retireObsolete(ctx, st.meta.GetHealthySegment(ctx, st.GetSegmentID()))
+}
+
+// Dispatch repeats the same check to cover a drop after placement.
+func (st *statsTask) retireObsolete(ctx context.Context, segment *meta.SegmentInfo) bool {
+	reason := ""
+	if segment == nil {
+		reason = "segment is not healthy"
+	} else if st.shouldDropExternalJSONStatsTask(segment) {
+		reason = "external json stats task is no longer buildable"
+	}
+	if reason == "" {
+		return false
+	}
+	if err := st.statsTaskMeta.DropStatsTask(ctx, st.GetTaskID()); err != nil {
+		mlog.Warn(ctx, "remove obsolete stats task failed, will retry later", mlog.FieldTaskID(st.GetTaskID()), mlog.Err(err))
+		return true
+	}
+	st.SetState(indexpb.JobState_JobStateNone, reason)
+	return true
+}
+
 func (st *statsTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {
 	ctx, cancel := context.WithTimeout(context.Background(), Params.DataCoordCfg.RequestTimeoutSeconds.GetAsDuration(time.Second))
 	defer cancel()
@@ -173,23 +198,7 @@ func (st *statsTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {
 
 	// Handle empty segment case
 	segment := st.meta.GetHealthySegment(ctx, st.GetSegmentID())
-	if segment == nil {
-		log.Warn(context.TODO(), "segment is not healthy, skipping stats task")
-		if err := st.statsTaskMeta.DropStatsTask(ctx, st.GetTaskID()); err != nil {
-			log.Warn(context.TODO(), "remove stats task failed, will retry later", mlog.Err(err))
-			return
-		}
-		st.SetState(indexpb.JobState_JobStateNone, "segment is not healthy")
-		return
-	}
-
-	if st.shouldDropExternalJSONStatsTask(segment) {
-		log.Warn(ctx, "external json stats task is no longer buildable, dropping stats task")
-		if err := st.statsTaskMeta.DropStatsTask(ctx, st.GetTaskID()); err != nil {
-			log.Warn(ctx, "remove stats task failed, will retry later", mlog.Err(err))
-			return
-		}
-		st.SetState(indexpb.JobState_JobStateNone, "external json stats task is no longer buildable")
+	if st.retireObsolete(ctx, segment) {
 		return
 	}
 
@@ -784,6 +793,11 @@ func updateStatsResultIfManifestMatches(ctx context.Context, segmentID, taskID i
 }
 
 func (st *statsTask) GetTaskResource() (taskcommon.Resource, bool) {
+	// Liveness can change after the estimate was cached.
+	segment := st.meta.GetHealthySegment(context.TODO(), st.GetSegmentID())
+	if segment == nil || st.shouldDropExternalJSONStatsTask(segment) {
+		return taskresource.Default(), false
+	}
 	return st.resource.Get(func() (taskcommon.Resource, bool) {
 		segment := st.meta.GetHealthySegment(context.TODO(), st.GetSegmentID())
 		if segment == nil {

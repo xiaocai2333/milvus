@@ -56,6 +56,7 @@ type scheduler struct {
 
 // submittedTask is a task whose files have been handed to the exec pool.
 type submittedTask struct {
+	submitting bool // Execute has not returned its complete set of futures yet
 	// resource is the task's booking, kept with the futures so it outlives
 	// the task: a failed or dropped task leaves the manager's
 	// Pending/InProgress states (or the manager) at once, but nothing cancels
@@ -127,11 +128,17 @@ func (s *scheduler) scheduleTasks() {
 		defer s.submitMu.Unlock()
 
 		for _, task := range tasks {
-			// Execute may block, so do not hold futuresMu while submitting.
-			fs := task.Execute()
-
+			// Book before Execute: it may block submitting files while an
+			// earlier reader fails or the manager removes the task. Neither
+			// event releases the buffers of the remaining readers.
+			st := &submittedTask{resource: task.GetResource(), submitting: true}
 			s.futuresMu.Lock()
-			s.futures[task.GetTaskID()] = &submittedTask{resource: task.GetResource(), futures: fs}
+			s.futures[task.GetTaskID()] = st
+			s.futuresMu.Unlock()
+			fs := task.Execute()
+			s.futuresMu.Lock()
+			st.futures = fs
+			st.submitting = false
 			s.futuresMu.Unlock()
 		}
 	}()
@@ -145,7 +152,7 @@ func (s *scheduler) collectCompletedTasks() {
 	defer s.futuresMu.Unlock()
 
 	for taskID, st := range s.futures {
-		done := allDone(st.futures)
+		done := !st.submitting && allDone(st.futures)
 		if st.detached {
 			if done {
 				delete(s.futures, taskID)
@@ -203,7 +210,7 @@ func (s *scheduler) Resource() taskcommon.Resource {
 	defer s.futuresMu.Unlock()
 	var used taskcommon.Resource
 	for _, st := range s.futures {
-		if !allDone(st.futures) {
+		if st.submitting || !allDone(st.futures) {
 			used = used.Add(st.resource)
 		}
 	}

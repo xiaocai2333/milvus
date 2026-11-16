@@ -83,3 +83,21 @@ func TestMemoryAdmissionOversizedReservationCannotWrapUsage(t *testing.T) {
 	require.False(t, ok)
 	release()
 }
+
+func TestMemoryAdmissionOversizedWaitsForIdle(t *testing.T) {
+	var external atomic.Int64
+	external.Store(1)
+	budget := NewMemoryAdmission(func() int64 { return 8 }, external.Load)
+	_, ok := budget.TryAcquire(80)
+	require.False(t, ok)
+	external.Store(0)
+	release, ok := budget.TryAcquire(80)
+	require.True(t, ok)
+	require.EqualValues(t, 80, budget.used)
+	_, ok = budget.TryAcquire(1)
+	require.False(t, ok)
+	release()
+	releaseSmall, ok := budget.TryAcquire(1)
+	require.True(t, ok)
+	releaseSmall()
+}

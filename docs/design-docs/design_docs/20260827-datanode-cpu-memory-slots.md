@@ -13,8 +13,10 @@ QuerySlot capability tags 4 and 5 remain reserved; resource fields use tags 6-10
 ## Goal
 
 Extend the single scalar "slot" DataCoord uses to place tasks on DataNodes into
-two dimensions, CPU and memory, so a memory-heavy task is never placed on a
-worker that cannot hold it and compute-heavy tasks are spread instead of packed.
+two dimensions, CPU and memory, so memory-heavy tasks wait for capacity and compute-heavy tasks are spread
+instead of packed. An estimate exceeding every worker's total capacity waits
+for an idle worker and runs alone; it is still booked at its full estimate.
+This progress exception does not guarantee that actual allocations fit RAM.
 
 Scope:
 
@@ -98,8 +100,9 @@ see.
 Known gap, a follow-up: clustering compaction and analyze are bounded only by
 their input, not by the machine share the worker actually caps them at
 (`memoryBufferRatio`, `maxTrainSizeRatio`). If the resulting estimate exceeds
-every worker's available memory, dispatch waits, including on empty workers.
-As with any task that does not fit, this can hold up tasks behind it.
+every worker's total memory, dispatch waits for an idle worker, then places
+one task exclusively. While waiting, it holds up tasks behind it. The worker's
+actual machine caps are unchanged; aligning these estimates remains a follow-up.
 
 | task | CPU | memory | mirrors |
 |---|---|---|---|
@@ -107,7 +110,7 @@ As with any task that does not fit, this can hold up tasks behind it.
 | scalar index | 1 | fieldSize x 2 | same |
 | stats (TextIndex / BM25 / JsonKeyIndex) | 1 | sum(size of the fields the sub job indexes) x 2; whole segment when the schema is not cached | `index/task_stats.go` loops over the `enable_match` fields / the JSON fields / the BM25 output fields only |
 | sort compaction | 1 | segmentSize x 2 | `storage.Sort` retains every input record |
-| mix compaction / bump schema version | 1 | min(sum(input segments), `dataCoord.segment.maxSize`) + delete maps | `MultiSegmentWriter` streams: never more than the input, never more than one output segment. The pk -> ts delete maps are not streamed: delete rows x 64 bytes per segment, plus the deltalog bytes for a VarChar key; summed over the inputs on the merge-sort path, which keeps every map until the merge ends, and the largest one on mergeSplit, which holds one at a time |
+| mix compaction / bump schema version | 1 | min(sum(input segments), `dataCoord.segment.maxSize`) + merge-sort reader buffers + delete maps | `MultiSegmentWriter` streams: never more than the input, never more than one output segment. The pk -> ts delete maps are not streamed: delete rows x 64 bytes per segment, plus the deltalog bytes for a VarChar key; summed over the inputs on the merge-sort path, which keeps every map until the merge ends, and the largest one on mergeSplit, which holds one at a time |
 | L0 compaction | 1 | sum(deltalog) x 2 + sum(target statslog) | `l0_compactor.go` loads every delta log, then loads the target L1/L2 bloom filters in batches through `loadBF`; summing all targets' stats logs is conservative across batches |
 | clustering compaction | 8 | sum(input segments) | buckets are flushed at `memoryBufferRatio` of the machine; that cap is not applied, so a large input is over-priced |
 | analyze | 8 | Σ clustering-key field size (the field-size rule below) x 2 | the train set is down-sampled to `maxTrainSizeRatio` of the machine; that cap is not applied. Going through the field-size rule gives sparse and array-of-vector keys an answer, where rows x dim had none |
@@ -119,6 +122,13 @@ As with any task that does not fit, this can hold up tasks behind it.
 | preimport v3 | 1 | files x base buffer | count-only, every file at once: a JSON/CSV file is scanned through one base read buffer; a parquet or numpy file reads only its metadata and a backup job only sizes objects, so those are over-priced, which keeps the price from resolving the files |
 | copy segment | 1 | 64MB | stream between buckets |
 | refresh external collection | 1 | `externalRefreshMemory` (1GB) | explores the source and reads file metadata and the current segments; depends on the source, so a fixed budget |
+
+Merge-sort opens and primes all input readers simultaneously. Its reader term
+sums each input's `CompactionReaderMemory`: for V1, the largest encoded plus
+decoded chunk of each field; when sizes are missing or for packed/manifest
+readers, twice the full estimated input size. This conservative fallback avoids
+assuming a configured prefetch window bounds decoded records. Merge-split keeps
+its existing streaming estimate. The same selection is used for schema bumps.
 
 The import per-file buffer is not capped at the task's *largest* file:
 `importv2.ImportTask.GetBufferSize` reads that cap from the task's own
@@ -172,8 +182,11 @@ discounted. A worker that does not report `machine_memory` is bounded on its
 `total_memory`. A plain pre-import and
 an L0 import do not go through the allocator and keep their estimate.
 
-The import scheduler stores each task's booking with its file futures when it
-submits them, and counts every entry whose futures have not all returned,
+The import scheduler registers each task's booking before calling Execute,
+which can block while submitting files to the bounded execution pool. A
+submitting flag keeps the booking even before the futures are published and
+prevents collection from treating an empty futures list as finished. It counts
+every entry still submitting or whose futures have not all returned,
 whatever the task's state, as the import v3 scheduler does. A task that fails
 when one file fails, or that is dropped (`DropImport` after its job failed, or
 a user abort) while its other readers still run, therefore keeps its whole
@@ -190,7 +203,7 @@ stops the answer from being cached. Two cases are priced differently:
   the floor would let a worker accept a task of unknown size and then book its
   real size once the request is built.
 - **inputs gone for good** (a segment dropped by compaction, drop-collection or
-  drop-partition; a dropped index): return the floor without caching it. Index
+  drop-partition; a dropped index): return the floor without caching it. Index and stats
   tasks check target liveness before consulting their price cache. Their
   coordinator-only preparation persists retirement before placement, including
   when there are no workers or no available worker memory. Metadata failures
@@ -243,7 +256,7 @@ Steps 2 and 3 are capped at the segment size: one field never holds more than
 its segment. The cap matters because a schema bound is `rows x` the per-row
 limit, which for a `varchar(65535)` or a JSON field (64KB per value) is orders
 of magnitude above the data. Uncapped, such a task can exceed every worker and
-block dispatch until the estimate or worker capacity changes.
+force exclusive execution instead of ordinary concurrent placement.
 
 When meta has neither positive size statistics nor binlogs, that cap itself is
 an estimate: `EstimateSegmentSize` deliberately uses rows x
@@ -333,8 +346,9 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   If memory capacity is unavailable, V3 keeps its original slot admission;
   reservations still track explicit prices for capacity recovery.
 - The existing local progress rule remains: an otherwise idle worker can run
-  one oversized estimate alone. Coordinator placement has no oversized
-  exception and never intentionally dispatches such a priced task. Scalar
+  one oversized estimate alone. Coordinator placement uses the same rule:
+  only estimates larger than every reporting worker's total qualify, and only
+  an idle worker may receive one. Scalar
   compatibility reports still include queued and admitted slot demand.
 - The external-collection refresh task runs through its own manager rather
   than one of the four executors. The manager books the estimate when it
@@ -369,15 +383,15 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   offered. It never widens the report beyond the ledger.
 - The memory total is the full cgroup limit (standalone: ×
   `standaloneSlotFactor`). No headroom ratio is reserved; the system term above
-  is what keeps the report honest. A dimensioned worker is admitted on both
-  its memory and its scalar slots (see the picker).
+  is what keeps the report honest. Priced tasks on dimensioned workers are admitted by memory, with the
+  idle-worker progress exception described below; scalar slots do not gate them.
 - New gauge `milvus_datanode_task_resource{node_id, type=cpu|memory, state=total|available}`
   (`metrics.DataNodeTaskResource`).
 
 ## DataCoord picker (`internal/datacoord/task/node_picker.go`)
 
 - A priced task on a worker reporting `total_memory > 0` uses the two
-  dimensions. Skip only when `available_memory < req.Memory`. CPU never
+  dimensions. Ordinary placement requires `available_memory >= req.Memory`. CPU never
   refuses; scalar slots neither gate nor reorder this tier.
 - Rank fitting workers by
   `0.6 x memFrac + 0.25 x cpuFrac + 0.15 x (1 - |memFrac - cpuFrac|)`,
@@ -396,9 +410,13 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
 - Workers without a resource report use the existing slot max-heap. If no
   reporting worker fits, try that compatibility tier before returning
   `NullNodeID`.
-- A task exceeding every reporting worker's total memory waits too. There is
-  no oversized dispatch exception: memory admission may not be bypassed.
-  Such a task needs its estimate or worker capacity to change before it fits.
+- A task exceeding every reporting worker's total memory waits for an idle
+  worker (`available_memory == total_memory` and no CPU booking). Prefer the
+  largest idle worker, retaining the complete estimate and excluding that
+  worker from all subsequent placements in the round, even unpriced ones.
+  A task that fits any worker's total waits for ordinary capacity instead of
+  oversubscribing a smaller idle worker. CPU is checked here only as evidence
+  of existing work, not as a limit on the oversized task's CPU request.
 
 - Index tasks expose optional coordinator-only preparation. The scheduler runs
   it before pricing and placement, sharing the same target, no-train, nullable,
@@ -409,9 +427,9 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
   order, and later tasks are not placed ahead of it. Memory released by running
   work can accumulate for the waiting task instead of being consumed by newer
   small tasks. This applies both to temporary memory shortages and estimates
-  above every worker's total capacity; the latter still require an estimate or
-  capacity correction. Clustering/analyze machine-share estimate alignment
-  remains unresolved; queue bypass is not a substitute for that correction.
+  above every worker's total capacity; the latter resume when a worker is idle.
+  Clustering/analyze machine-share estimate alignment remains a follow-up.
+  The waiting task is never skipped to dispatch smaller followers.
 - A round examines at most its initial pending count. Failure-backoff tasks
   retain their existing exception: they give way until the retry deadline.
   Deferred retries are rechecked under the task lock before re-enqueueing, so
@@ -470,7 +488,7 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
 - Ledger: Accept/Release/Snapshot, negative clamp, standalone discount
   (mockey on `hardware.GetCPUNum` / `hardware.GetMemoryCount`).
 - Picker: memory filter, CPU/slot exhaustion with spare memory, score ordering,
-  in-round charging, oversized requests waiting, unpriced slot compatibility,
+  in-round charging, oversized requests waiting for idle workers and then running exclusively, unpriced slot compatibility,
   all-old-workers falling back to the heap, and mixed clusters.
 - Executors: ledger and `usingSlots` move together on enqueue and completion.
 - Coverage target >= 90% on touched code; run with
@@ -480,5 +498,5 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
 
 The implementation commit contains the wire fields, the pricing, the ledgers,
 the picker and the import v3 booking. A follow-up synchronizes master's review
-clarifications in documentation and comments. This port adds no worker-side
-admission semaphore and does not backport master's separate index build pipeline.
+clarifications in documentation and comments. This port shares worker-side memory admission between index and import V3
+without backporting master's separate index build pipeline.
