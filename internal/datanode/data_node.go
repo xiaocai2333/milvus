@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datanode/importv2"
 	"github.com/milvus-io/milvus/internal/datanode/importv3"
 	"github.com/milvus-io/milvus/internal/datanode/index"
+	"github.com/milvus-io/milvus/internal/datanode/taskcost"
 	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/analyzer"
@@ -86,9 +87,10 @@ type DataNode struct {
 	importV3Metrics   *importv3.Metrics
 
 	// indexnode related
-	storageFactory StorageFactory
-	taskScheduler  *index.TaskScheduler
-	taskManager    *index.TaskManager
+	storageFactory  StorageFactory
+	memoryAdmission *taskcost.MemoryAdmission
+	taskScheduler   *index.TaskScheduler
+	taskManager     *index.TaskManager
 
 	externalCollectionManager *external.ExternalCollectionManager
 
@@ -134,7 +136,8 @@ func NewDataNode(ctx context.Context) *DataNode {
 		reportImportRetryTimes: 10,
 		metricsRequest:         metricsinfo.NewMetricsRequest(),
 	}
-	sc := index.NewTaskScheduler(ctx2)
+	node.memoryAdmission = node.newTaskMemoryAdmission()
+	sc := index.NewTaskScheduler(ctx2, node.memoryAdmission)
 	node.storageFactory = NewChunkMgrFactory()
 	node.taskScheduler = sc
 	node.taskManager = index.NewTaskManager(ctx2)
@@ -228,7 +231,7 @@ func (node *DataNode) Init() error {
 		node.importTaskMgr = importv2.NewTaskManager()
 		node.importScheduler = importv2.NewScheduler(node.importTaskMgr)
 		node.importV3Metrics = importv3.NewMetrics(serverID)
-		node.importV3Scheduler = importv3.NewScheduler(node.ctx, node.importV3Capacity, node.importV3Metrics)
+		node.importV3Scheduler = importv3.NewScheduler(node.ctx, node.importV3Capacity, node.importV3Metrics, node.memoryAdmission)
 		importv3.CleanImportV3Prefixes()
 
 		err := index.InitSegcore(serverID)
@@ -245,6 +248,17 @@ func (node *DataNode) Init() error {
 		log.Info(node.ctx, "init datanode done", mlog.String("Address", node.address))
 	})
 	return initError
+}
+
+// newTaskMemoryAdmission wires the same capacities and other-executor
+// bookings used by QuerySlot into shared index/stats/analyze and V3 admission.
+func (node *DataNode) newTaskMemoryAdmission() *taskcost.MemoryAdmission {
+	return taskcost.NewMemoryAdmission(func() int64 {
+		return nodeTaskCapacity().Memory
+	}, func() int64 {
+		return node.compactionExecutor.Resource().Memory + node.importScheduler.Resource().Memory +
+			node.externalCollectionManager.Resource().Memory
+	})
 }
 
 func (node *DataNode) registerMetricsRequest() {

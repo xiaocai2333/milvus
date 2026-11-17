@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/datanode/taskcost"
+
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
@@ -49,6 +51,7 @@ func (t *importV3FakeTask) TaskID() int64                   { return t.taskID }
 func (t *importV3FakeTask) RunID() int64                    { return t.runID }
 func (t *importV3FakeTask) Kind() string                    { return t.kind }
 func (t *importV3FakeTask) Slot() int64                     { return t.slot }
+func (t *importV3FakeTask) Resource() taskcommon.Resource   { return taskcommon.Resource{} }
 func (t *importV3FakeTask) Progress() importv3.TaskProgress { return t.progress }
 func (t *importV3FakeTask) Execute(context.Context) (any, error) {
 	return t.result, nil
@@ -66,7 +69,7 @@ func (importV3StorageFactory) NewChunkManager(context.Context, *indexpb.StorageC
 func newImportV3ServicesNode(t *testing.T, started bool) (*DataNode, *importv3.Scheduler) {
 	t.Helper()
 	paramtable.Init()
-	scheduler := importv3.NewScheduler(context.Background(), func() int64 { return 100 }, importv3.NewMetrics(1))
+	scheduler := importv3.NewScheduler(context.Background(), func() int64 { return 100 }, importv3.NewMetrics(1), taskcost.NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 }))
 	if started {
 		done := make(chan struct{})
 		go func() {
@@ -126,7 +129,7 @@ func TestSubmitReshardTaskValidatesRequest(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	status, err := node.submitReshardTask(canceled, validReshardRequest())
+	status, err := node.submitReshardTask(canceled, validReshardRequest(), taskcommon.Resource{})
 	require.NoError(t, err)
 	require.False(t, merr.Ok(status))
 
@@ -139,7 +142,7 @@ func TestSubmitReshardTaskValidatesRequest(t *testing.T) {
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {
-			status, err := node.submitReshardTask(ctx, req)
+			status, err := node.submitReshardTask(ctx, req, taskcommon.Resource{})
 			require.NoError(t, err)
 			require.False(t, merr.Ok(status))
 			require.Contains(t, status.GetReason(), "invalid or incomplete ReshardTask request")
@@ -151,7 +154,7 @@ func TestSubmitReshardTaskValidatesRequest(t *testing.T) {
 // request is handed to the scheduler, where it waits as Pending.
 func TestSubmitReshardTaskQueuesValidRequest(t *testing.T) {
 	node, scheduler := newImportV3ServicesNode(t, false)
-	status, err := node.submitReshardTask(context.Background(), validReshardRequest())
+	status, err := node.submitReshardTask(context.Background(), validReshardRequest(), taskcommon.Resource{})
 	require.NoError(t, err)
 	require.True(t, merr.Ok(status))
 	snapshot, ok := scheduler.Query(2, 3)
@@ -174,14 +177,14 @@ func TestSubmitImportTaskV3ValidatesRequest(t *testing.T) {
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {
-			status, err := node.submitImportTaskV3(ctx, req)
+			status, err := node.submitImportTaskV3(ctx, req, taskcommon.Resource{})
 			require.NoError(t, err)
 			require.False(t, merr.Ok(status))
 			require.Contains(t, status.GetReason(), "invalid or incomplete ImportTaskV3 request")
 		})
 	}
 
-	status, err := node.submitImportTaskV3(ctx, validImportV3Request())
+	status, err := node.submitImportTaskV3(ctx, validImportV3Request(), taskcommon.Resource{})
 	require.NoError(t, err)
 	require.True(t, merr.Ok(status))
 }

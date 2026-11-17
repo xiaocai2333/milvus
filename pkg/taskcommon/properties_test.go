@@ -155,3 +155,62 @@ func TestProperties_CostFields(t *testing.T) {
 		assert.Equal(t, int64(0), props.GetCostCPUNum())
 	})
 }
+
+func TestProperties_TaskResource(t *testing.T) {
+	t.Run("round trip", func(t *testing.T) {
+		props := NewProperties(nil)
+		props.AppendTaskID(1)
+		props.AppendTaskResource(Resource{CPU: 2, Memory: 1 << 30})
+
+		assert.Equal(t, "2", props[CPUKey])
+		assert.Equal(t, "1073741824", props[MemoryKey])
+
+		resource, err := props.GetTaskResource()
+		assert.NoError(t, err)
+		assert.Equal(t, Resource{CPU: 2, Memory: 1 << 30}, resource)
+	})
+
+	t.Run("zero round trip", func(t *testing.T) {
+		props := NewProperties(nil)
+		props.AppendTaskID(1)
+		props.AppendTaskResource(Resource{})
+
+		resource, err := props.GetTaskResource()
+		assert.NoError(t, err)
+		assert.True(t, resource.IsZero())
+	})
+
+	// A coordinator that predates the keys sends neither, and the worker must
+	// return an empty estimate for the worker to convert from legacy slots.
+	t.Run("absent keys use legacy estimate", func(t *testing.T) {
+		for _, props := range []Properties{
+			NewProperties(map[string]string{TaskIDKey: "1"}),
+			NewProperties(map[string]string{TaskIDKey: "1", CPUKey: "2"}),
+			NewProperties(map[string]string{TaskIDKey: "1", MemoryKey: "1024"}),
+		} {
+			resource, err := props.GetTaskResource()
+			assert.NoError(t, err)
+			assert.Equal(t, Resource{}, resource)
+		}
+	})
+
+	t.Run("unparsable values", func(t *testing.T) {
+		props := NewProperties(map[string]string{TaskIDKey: "1", CPUKey: "abc", MemoryKey: "1024"})
+		_, err := props.GetTaskResource()
+		assert.Error(t, err)
+
+		props = NewProperties(map[string]string{TaskIDKey: "1", CPUKey: "2", MemoryKey: "xyz"})
+		_, err = props.GetTaskResource()
+		assert.Error(t, err)
+	})
+}
+
+func TestProperties_NegativeTaskResource(t *testing.T) {
+	for _, resource := range []Resource{{CPU: -1, Memory: 1024}, {CPU: 1, Memory: -1}} {
+		props := NewProperties(nil)
+		props.AppendTaskResource(resource)
+		_, err := props.GetTaskResource()
+		assert.ErrorIs(t, err, merr.ErrServiceInternal)
+		assert.Equal(t, merr.SystemError, merr.GetErrorType(err))
+	}
+}

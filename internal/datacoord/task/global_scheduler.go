@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -32,6 +34,9 @@ import (
 )
 
 const NullNodeID = -1
+
+// blockedRoundLogInterval bounds logs for tasks that cannot fit a worker.
+const blockedRoundLogInterval = 30 * time.Second
 
 type GlobalScheduler interface {
 	Enqueue(task Task)
@@ -250,7 +255,14 @@ func newNodeSlotHeap(workerSlots map[int64]*session.WorkerSlots) typeutil.Heap[*
 // The picked node's slots are updated in place; the caller reuses the same heap
 // across all tasks in a scheduling round so later picks observe the decremented
 // slots.
+//
+// The method is kept for its callers and tests; the placement itself lives in
+// pickNodeFromHeap so nodePicker can share it as its fallback tier.
 func (s *globalTaskScheduler) pickNode(slotHeap typeutil.Heap[*nodeSlotEntry], taskSlot int64) int64 {
+	return pickNodeFromHeap(slotHeap, taskSlot)
+}
+
+func pickNodeFromHeap(slotHeap typeutil.Heap[*nodeSlotEntry], taskSlot int64) int64 {
 	if slotHeap.Len() == 0 {
 		return NullNodeID
 	}
@@ -285,12 +297,13 @@ func (s *globalTaskScheduler) schedule() {
 	nodeSlots := s.cluster.QuerySlot()
 	mlog.Info(s.ctx, "scheduling pending tasks...", mlog.Int("num", pendingNum), mlog.Any("nodeSlots", nodeSlots))
 
-	// Build the node-slot max-heap once per round and reuse it across all picks,
-	// so each task is placed on the currently least-loaded node.
-	slotHeap := newNodeSlotHeap(nodeSlots)
+	// Build the picker once per round and reuse it across all picks, so each
+	// task is placed on the currently least-loaded node.
+	picker := newNodePicker(nodeSlots)
 	futures := make([]*conc.Future[struct{}], 0)
 	var delayed []Task
-	for {
+	// Bound the scan to the initial queue size; failure-backoff tasks give way.
+	for examined := 0; examined < pendingNum; examined++ {
 		task := s.pendingTasks.Pop()
 		if task == nil {
 			break
@@ -314,9 +327,43 @@ func (s *globalTaskScheduler) schedule() {
 			s.mu.RUnlock(taskID)
 			continue
 		}
+		if local, ok := task.(CoordinatorTask); ok && task.GetTaskState() == taskcommon.Init && local.TryCompleteOnCoordinator(s.ctx) {
+			switch task.GetTaskState() {
+			case taskcommon.None, taskcommon.Finished, taskcommon.Failed:
+				s.backoffs.Remove(taskID)
+			default:
+				s.recordTaskFailure(task)
+				delayed = append(delayed, task)
+			}
+			s.mu.RUnlock(taskID)
+			continue
+		}
 		taskSlot := task.GetTaskSlot()
-		nodeID := s.pickNode(slotHeap, taskSlot)
+		// Price once per round and reuse: the placement decision and the log
+		// below must agree, and a family that walks meta on a cache miss would
+		// otherwise pay for the walk twice.
+		//
+		// A family that cannot resolve its inputs yet answers with an upper
+		// bound, not the floor, and is placed when capacity fits. Waiting for an
+		// exact price instead would strand any task whose inputs are gone for
+		// good. CoordinatorTask handles local completion before this point; other
+		// families still retire obsolete work in CreateTaskOnWorker.
+		resource, _ := task.GetTaskResource()
+		// A task the worker bounds to a share of its memory is charged that
+		// bound on each node, not its estimate (NodeMemoryBounded).
+		memoryShare := nodeMemoryShare(task)
+		nodeID := picker.PickBounded(taskSlot, resource, memoryShare)
 		if nodeID == NullNodeID {
+			// Preserve task-ID order when capacity is insufficient. Later small
+			// tasks must not consume memory that this waiting task needs.
+			mlog.RatedInfo(s.ctx, rate.Every(blockedRoundLogInterval),
+				"task does not fit any worker now, scheduling round ends at it",
+				WrapTaskLog(task,
+					mlog.Int64("taskSlot", taskSlot),
+					mlog.Stringer("resource", resource),
+					mlog.Float64("nodeMemoryShare", memoryShare),
+					mlog.Int("pendingBehind", s.pendingTasks.TaskCount()),
+					mlog.Any("resourceNodes", picker.remaining()))...)
 			s.pendingTasks.Push(task)
 			s.mu.RUnlock(taskID)
 			break
@@ -325,7 +372,8 @@ func (s *globalTaskScheduler) schedule() {
 		future := s.execPool.Submit(func() (struct{}, error) {
 			s.mu.RLock(task.GetTaskID())
 			defer s.mu.RUnlock(task.GetTaskID())
-			mlog.Info(s.ctx, "processing task...", WrapTaskLog(task)...)
+			mlog.Info(s.ctx, "processing task...",
+				WrapTaskLog(task, mlog.Stringer("resource", resource))...)
 			if task.GetTaskState() == taskcommon.Init {
 				task.CreateTaskOnWorker(nodeID, s.cluster)
 				switch task.GetTaskState() {
