@@ -15,12 +15,10 @@ import (
 
 	"github.com/milvus-io/milvus/internal/datanode/taskcost"
 
-	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
-	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -88,7 +86,7 @@ func memoryScheduler(t *testing.T, capacity int64, external func() int64) *TaskS
 	s.totalSlots = func() int64 { return 64 }
 	s.memoryAdmission = taskcost.NewMemoryAdmission(func() int64 { return capacity }, external)
 	require.NoError(t, s.Start())
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { s.Close(); s.Wait() })
 	return s
 }
 
@@ -180,6 +178,7 @@ func TestMemoryAdmissionExternalUsageAndQueuedCancellation(t *testing.T) {
 	require.NoError(t, s.TaskQueue.Enqueue(pending))
 	assertMemoryTaskWaiting(t, pending.started)
 	s.Close()
+	s.Wait()
 	require.True(t, pending.reset.Load())
 	require.Equal(t, indexpb.JobState_JobStateRetry, indexpb.JobState(pending.state.Load()))
 	require.Zero(t, s.TaskQueue.GetUsingResource().Memory)
@@ -192,10 +191,10 @@ func TestMemoryAdmissionExternalUsageAndQueuedCancellation(t *testing.T) {
 
 func TestMemoryAdmissionVectorPermitAllowsScalarBypass(t *testing.T) {
 	paramtable.Init()
-	pool := conc.NewPool[any](1)
-	defer pool.Release()
-	patch := mockey.Mock(GetVecIndexBuildPool).Return(pool).Build()
-	defer patch.UnPatch()
+	params := paramtable.Get()
+	key := params.DataNodeCfg.MaxVecIndexBuildConcurrency.Key
+	require.NoError(t, params.Save(key, "1"))
+	t.Cleanup(func() { _ = params.Reset(key) })
 	s := memoryScheduler(t, 16*admissionGiB, nil)
 	// Cleanup hooks execute in reverse: release the blocking task before Close.
 	gate, release := memoryGate(t)
@@ -214,6 +213,7 @@ func TestMemoryAdmissionVectorPermitAllowsScalarBypass(t *testing.T) {
 	release()
 	awaitMemoryTask(t, next.started)
 	s.Close()
+	s.Wait()
 }
 
 func TestMemoryAdmissionSameNameExecutionsKeepIndependentBookings(t *testing.T) {
@@ -242,6 +242,7 @@ func TestMemoryAdmissionWaitingQueueAndLegacyBookings(t *testing.T) {
 	paramtable.Init()
 	s := newTestTaskScheduler(context.Background())
 	defer s.Close()
+	s.Wait()
 	s.totalSlots = func() int64 { return 64 }
 	s.memoryAdmission = taskcost.NewMemoryAdmission(func() int64 { return 8 * admissionGiB }, func() int64 { return 0 })
 	accepted := 0
@@ -253,7 +254,7 @@ func TestMemoryAdmissionWaitingQueueAndLegacyBookings(t *testing.T) {
 	require.Equal(t, 4, accepted)
 	require.EqualValues(t, 8*admissionGiB, s.TaskQueue.GetUsingResource().Memory)
 	for task := s.TaskQueue.PopUnissuedTask(true); task != nil; task = s.TaskQueue.PopUnissuedTask(true) {
-		s.processTask(task)
+		s.processTask(s.beginTask(task))
 	}
 	legacy := memoryTask("legacy", 0)
 	legacy.resource = taskcommon.Resource{}
@@ -262,16 +263,16 @@ func TestMemoryAdmissionWaitingQueueAndLegacyBookings(t *testing.T) {
 	require.EqualValues(t, 4*admissionGiB, s.TaskQueue.GetUsingResource().Memory)
 	task := s.TaskQueue.PopUnissuedTask(true)
 	require.Same(t, legacy, task)
-	s.processTask(task)
+	s.processTask(s.beginTask(task))
 	require.Zero(t, s.TaskQueue.GetUsingResource().Memory)
 }
 
 func TestMemoryAdmissionCanceledQueuedVectorDoesNotWaitForPool(t *testing.T) {
 	paramtable.Init()
-	pool := conc.NewPool[any](1)
-	defer pool.Release()
-	patch := mockey.Mock(GetVecIndexBuildPool).Return(pool).Build()
-	defer patch.UnPatch()
+	params := paramtable.Get()
+	key := params.DataNodeCfg.MaxVecIndexBuildConcurrency.Key
+	require.NoError(t, params.Save(key, "1"))
+	t.Cleanup(func() { _ = params.Reset(key) })
 	s := memoryScheduler(t, 8*admissionGiB, nil)
 	gate, release := memoryGate(t)
 	first := memoryTask("running", 2*admissionGiB)
@@ -296,4 +297,5 @@ func TestMemoryAdmissionCanceledQueuedVectorDoesNotWaitForPool(t *testing.T) {
 	require.Equal(t, indexpb.JobState_JobStateRetry, indexpb.JobState(canceled.state.Load()))
 	release()
 	s.Close()
+	s.Wait()
 }

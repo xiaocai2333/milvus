@@ -149,10 +149,14 @@ func (it *indexBuildTask) GetTaskResource() (taskcommon.Resource, bool) {
 		indexType := meta.GetIndexType(indexParams)
 		coll := it.meta.GetCollection(it.CollectionID)
 		if coll == nil || coll.Schema == nil {
-			return taskresource.Index(taskresource.EstimateSegmentSize(segment, nil), false), false
+			bound := taskresource.Index(taskresource.EstimateSegmentSize(segment, nil), true)
+			bound.CPU = taskresource.DefaultCPU()
+			return bound, false
 		}
 		if indexType == "" || indexType == meta.InvalidIndexType {
-			return taskresource.Index(taskresource.EstimateSegmentSize(segment, coll.Schema), false), false
+			bound := taskresource.Index(taskresource.EstimateSegmentSize(segment, coll.Schema), true)
+			bound.CPU = taskresource.DefaultCPU()
+			return bound, false
 		}
 		isVectorIndex := vecindexmgr.GetVecIndexMgrInstance().IsVecIndex(indexType)
 		fieldID := it.indexMeta.GetFieldIDByIndexID(it.CollectionID, it.IndexID)

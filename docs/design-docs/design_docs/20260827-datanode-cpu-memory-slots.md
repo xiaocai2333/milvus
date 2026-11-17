@@ -4,10 +4,13 @@ Date: 2026-08-27
 Issue: #52180. Master PR #52561; the 3.0 PR #52982 is its cherry-pick.
 This replaces the DataNode-side admission design #52561 started from.
 
-This 3.0 port uses its collection cache and existing index execution pools.
-Master-only FM-index pricing, restore-L0 selection and the separate index
-build/download pipeline are absent. Local index/stats/analyze memory admission
-is connected to the same shared execution budget as import V3 on both branches.
+This test branch combines PR #52982 (`0a8175b747`) with PR #55503 (`2710bdf36f`)
+on 3.0. It retains the collection cache and connects the staged index
+download/build/upload pipeline to the shared execution budget used by import V3.
+Master-only FM-index pricing and restore-L0 selection remain absent.
+Each accepted execution keeps its immutable memory booking through native
+cleanup, including cancellation and same-name retries. Build order uses execution
+identity, and DataNode waits for the pipeline before closing segcore.
 QuerySlot capability tags 4 and 5 remain reserved; resource fields use tags 6-10.
 
 ## Goal
@@ -22,8 +25,9 @@ Scope:
 
 - DataNode books supplied estimates and reserves memory before local execution.
   Index/stats/analyze and import V3 share one atomic execution budget; CPU and
-  scalar slots do not gate that budget. Existing vector and import execution
-  pool limits remain. Unknown memory capacity retains the branch's legacy
+  scalar slots do not gate that budget. The vector concurrency setting limits
+  whole tasks from preparation through cleanup; import execution pool limits
+  remain. Unknown memory capacity retains the branch's legacy
   scheduling behavior.
 - The existing scalar slot path is not removed. It stays as the compatibility
   tier for workers or coordinators that predate this change.
@@ -106,7 +110,7 @@ actual machine caps are unchanged; aligning these estimates remains a follow-up.
 
 | task | CPU | memory | mirrors |
 |---|---|---|---|
-| vector index | 8 | fieldSize x 2 | `index/task_index.go` loads the whole field through cgo and builds beside it |
+| vector index | 8 | fieldSize x max(indexMemoryFactor, 4) | the staged pipeline retains input, build workspace and serialized output until upload and cleanup finish |
 | scalar index | 1 | fieldSize x 2 | same |
 | stats (TextIndex / BM25 / JsonKeyIndex) | 1 | sum(size of the fields the sub job indexes) x 2; whole segment when the schema is not cached | `index/task_stats.go` loops over the `enable_match` fields / the JSON fields / the BM25 output fields only |
 | sort compaction | 1 | segmentSize x 2 | `storage.Sort` retains every input record |
@@ -496,5 +500,8 @@ answer, not a miss: it is priced at the whole segment (conservative) and cached.
 
 The implementation commit contains the wire fields, the pricing, the ledgers,
 the picker and the import v3 booking. A follow-up synchronizes master's review
-clarifications in documentation and comments. This port shares worker-side memory admission between index and import V3
-without backporting master's separate index build pipeline.
+clarifications in documentation and comments. The combined test branch adds
+the separate index pipeline from #55503 to #52982's shared worker admission.
+Unknown index metadata uses the vector memory bound until its type is resolved;
+scalar indexes retain their configured factor. GPU/native build and performance
+validation require a matching build of this branch.

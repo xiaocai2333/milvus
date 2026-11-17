@@ -16,11 +16,28 @@
 
 package index
 
+import (
+	"math"
+
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
+)
+
 func calculateIndexTaskSlot(fieldSize int64, isVectorIndex bool) int64 {
-	defaultSlots := Params.DataCoordCfg.IndexTaskSlotUsage.GetAsInt64()
-	if !isVectorIndex {
-		defaultSlots = Params.DataCoordCfg.ScalarIndexTaskSlotUsage.GetAsInt64()
+	if isVectorIndex {
+		slotsPerUnit := max(Params.DataNodeCfg.WorkerSlotUnit.GetAsInt64(), 1) *
+			max(Params.DataNodeCfg.BuildParallel.GetAsInt64(), 1)
+		if paramtable.GetRole() == typeutil.StandaloneRole {
+			slotsPerUnit = max(int64(float64(slotsPerUnit)*Params.DataNodeCfg.StandaloneSlotRatio.GetAsFloat()), 1)
+		}
+		bytesPerSlot := max(int64(8<<30)/slotsPerUnit, 1)
+		peakBytes := int64(math.MaxInt64)
+		if fieldSize <= math.MaxInt64/4 {
+			peakBytes = max(fieldSize, 0) * 4
+		}
+		return max(peakBytes/bytesPerSlot+min(peakBytes%bytesPerSlot, 1), 1)
 	}
+	defaultSlots := Params.DataCoordCfg.ScalarIndexTaskSlotUsage.GetAsInt64()
 	if fieldSize > 512*1024*1024 {
 		taskSlot := max(fieldSize/512/1024/1024, 1) * defaultSlots
 		return max(taskSlot, 1)

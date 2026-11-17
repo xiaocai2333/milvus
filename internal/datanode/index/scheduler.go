@@ -20,6 +20,7 @@ import (
 	"container/list"
 	"context"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -272,6 +273,9 @@ type TaskScheduler struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wake            chan struct{}
+	downloadTasks   chan *taskExecution
+	buildWakeup     chan struct{}
+	pendingTasks    []Task
 	resourceMu      sync.Mutex
 	heldSlots       map[Task]int64
 	heldMemory      map[Task]int64
@@ -290,6 +294,8 @@ func NewTaskScheduler(ctx context.Context, budget *taskcost.MemoryAdmission) *Ta
 		ctx:             ctx1,
 		cancel:          cancel,
 		wake:            make(chan struct{}, 1),
+		downloadTasks:   make(chan *taskExecution, 1024),
+		buildWakeup:     make(chan struct{}, 1),
 		heldSlots:       make(map[Task]int64),
 		heldMemory:      make(map[Task]int64),
 		heldReleases:    make(map[Task]func()),
@@ -327,6 +333,10 @@ func (sched *TaskScheduler) acquireResources(t Task, memory int64) bool {
 		return false
 	}
 
+	sched.removeCanceledTasks()
+	if t.IsVectorIndex() && !slices.Contains(sched.pendingTasks, t) {
+		sched.pendingTasks = append(sched.pendingTasks, t)
+	}
 	release, ok := sched.memoryAdmission.TryAcquire(memory)
 	if !ok {
 		return false
@@ -368,6 +378,32 @@ func (sched *TaskScheduler) taskSlots(t Task) int64 {
 	return sched.heldSlots[t]
 }
 
+// removeCanceledTasks requires resourceMu. Canceled tasks must not block
+// admission while their task owners are still waiting to run cleanup.
+func (sched *TaskScheduler) removeCanceledTasks() {
+	sched.pendingTasks = slices.DeleteFunc(sched.pendingTasks, func(t Task) bool {
+		return t.Ctx().Err() != nil
+	})
+}
+
+// isBuildTurn preserves vector order across download completion and admission retries.
+func (sched *TaskScheduler) isBuildTurn(t Task) bool {
+	if !t.IsVectorIndex() {
+		return true
+	}
+	sched.resourceMu.Lock()
+	defer sched.resourceMu.Unlock()
+	sched.removeCanceledTasks()
+	return len(sched.pendingTasks) == 0 || sched.pendingTasks[0] == t
+}
+
+// finishAdmission removes a task only when its build is admitted or it terminates.
+func (sched *TaskScheduler) finishAdmission(task Task) {
+	sched.resourceMu.Lock()
+	defer sched.resourceMu.Unlock()
+	sched.pendingTasks = slices.DeleteFunc(sched.pendingTasks, func(t Task) bool { return t == task })
+}
+
 func getStateFromError(err error) indexpb.JobState {
 	if errors.Is(err, errCancel) {
 		return indexpb.JobState_JobStateRetry
@@ -397,139 +433,179 @@ func getStateFromError(err error) indexpb.JobState {
 	return indexpb.JobState_JobStateRetry
 }
 
-// finishTask releases native owners before making execution memory reusable.
-// Registry readers must stop before Reset invalidates the task's state fields.
-func (sched *TaskScheduler) finishTask(t Task) {
+type taskExecution struct {
+	task        Task
+	indexTask   *indexBuildTask
+	buildEndMs  int64
+	buildTimeMs int64
+	stopCancel  func() bool
+	onFinish    func()
+}
+
+func (sched *TaskScheduler) beginTask(t Task) *taskExecution {
+	sched.TaskQueue.AddActiveTask(t)
+	exec := &taskExecution{task: t}
+	if ibt, ok := t.(*indexBuildTask); ok {
+		exec.indexTask = ibt
+	}
+	return exec
+}
+
+func (sched *TaskScheduler) runStep(t Task, fn func(context.Context) error) error {
+	select {
+	case <-sched.ctx.Done():
+		return errCancel
+	case <-t.Ctx().Done():
+		return errCancel
+	default:
+		return fn(t.Ctx())
+	}
+}
+
+// executeTask measures construction only; queueing, download and upload are
+// excluded from the cost paired with the build's CPU count.
+func (sched *TaskScheduler) executeTask(exec *taskExecution) error {
+	return sched.runStep(exec.task, func(ctx context.Context) error {
+		started := time.Now()
+		if ibt := exec.indexTask; ibt != nil {
+			costCPUNum := taskcost.EstimateIndexBuildCPUNum(ibt.IsVectorIndex())
+			ibt.manager.StoreIndexTaskExecutionStart(ibt.req.GetClusterID(), ibt.req.GetBuildID(), started.UnixMilli(), costCPUNum)
+		}
+		err := exec.task.Execute(ctx)
+		exec.buildTimeMs = taskcost.ElapsedMs(started)
+		exec.buildEndMs = taskcost.NowMs()
+		return err
+	})
+}
+
+func (sched *TaskScheduler) finishTask(exec *taskExecution, err error) {
+	if exec.onFinish != nil {
+		defer exec.onFinish()
+	}
+	t := exec.task
+	if exec.stopCancel != nil {
+		exec.stopCancel()
+	}
+	state, reason := indexpb.JobState_JobStateFinished, ""
+	if err != nil {
+		state, reason = getStateFromError(err), err.Error()
+		mlog.Warn(t.Ctx(), "process task failed", mlog.String("task", t.Name()), mlog.Err(err))
+	}
+	if exec.indexTask != nil {
+		if exec.buildEndMs == 0 {
+			exec.buildEndMs = taskcost.NowMs()
+		}
+		exec.indexTask.SetStateWithCost(state, reason, exec.buildEndMs, exec.buildTimeMs)
+	} else {
+		t.SetState(state, reason)
+	}
 	sched.TaskQueue.PopActiveTask(t)
 	t.Reset()
 	debug.FreeOSMemory()
+	sched.finishAdmission(t)
 	sched.releaseResources(t)
 	sched.TaskQueue.ReleaseResource(t)
 }
 
-func (sched *TaskScheduler) processTask(t Task) {
-	wrap := func(fn func(ctx context.Context) error) error {
-		select {
-		case <-sched.ctx.Done():
-			return errCancel
-		case <-t.Ctx().Done():
-			return errCancel
-		default:
-			return fn(t.Ctx())
-		}
+func (sched *TaskScheduler) processTask(exec *taskExecution) {
+	t := exec.task
+	var err error
+	defer func() { sched.finishTask(exec, err) }()
+	if err = sched.runStep(t, t.PreExecute); err != nil {
+		return
 	}
-
-	sched.TaskQueue.AddActiveTask(t)
-	defer sched.finishTask(t)
-	var (
-		indexTask  *indexBuildTask
-		costCPUNum int64
-		execStart  time.Time
-	)
-	if ibt, ok := t.(*indexBuildTask); ok {
-		indexTask = ibt
-		costCPUNum = taskcost.EstimateIndexBuildCPUNum(indexTask.IsVectorIndex())
-		// execStart carries a monotonic clock reading; CostTimeMs derived from
-		// it is immune to wall-clock steps. ExecStartMs/ExecEndMs stay wall-clock
-		// timestamps for external exposure.
-		execStart = time.Now()
-		indexTask.manager.StoreIndexTaskExecutionStart(indexTask.req.GetClusterID(), indexTask.req.GetBuildID(), taskcost.NowMs(), costCPUNum)
-		mlog.Debug(t.Ctx(), "process task", mlog.String("task", t.Name()), mlog.Int64("costCPUNum", costCPUNum))
-	} else {
-		mlog.Debug(t.Ctx(), "process task", mlog.String("task", t.Name()))
+	if err = sched.executeTask(exec); err != nil {
+		return
 	}
-
-	pipelines := []func(context.Context) error{t.PreExecute, t.Execute, t.PostExecute}
-	for _, fn := range pipelines {
-		if err := wrap(fn); err != nil {
-			if indexTask != nil {
-				costTimeMs := taskcost.ElapsedMs(execStart)
-				// End bookkeeping and final state must land in one critical
-				// section, so a concurrent QueryTask never sees a final cost
-				// paired with an in-progress state.
-				indexTask.SetStateWithCost(getStateFromError(err), err.Error(), taskcost.NowMs(), costTimeMs)
-				mlog.Warn(t.Ctx(), "process task failed", mlog.Err(err), mlog.Int64("costTimeMs", costTimeMs), mlog.Int64("costCPUNum", costCPUNum))
-			} else {
-				t.SetState(getStateFromError(err), err.Error())
-				mlog.Warn(t.Ctx(), "process task failed", mlog.Err(err))
-			}
-			return
-		}
-	}
-	if indexTask != nil {
-		costTimeMs := taskcost.ElapsedMs(execStart)
-		indexTask.SetStateWithCost(indexpb.JobState_JobStateFinished, "", taskcost.NowMs(), costTimeMs)
-		mlog.Debug(t.Ctx(), "process task completed", mlog.String("task", t.Name()), mlog.Int64("costTimeMs", costTimeMs), mlog.Int64("costCPUNum", costCPUNum))
-	} else {
-		t.SetState(indexpb.JobState_JobStateFinished, "")
-		mlog.Debug(t.Ctx(), "process task completed", mlog.String("task", t.Name()))
-	}
+	err = sched.runStep(t, t.PostExecute)
 }
 
 func (sched *TaskScheduler) indexBuildLoop() {
 	mlog.Debug(sched.ctx, "TaskScheduler start build loop ...")
 	defer sched.wg.Done()
+	defer close(sched.downloadTasks)
 	defer func() {
-		// Cancellation bypasses admission so every accepted queued task is
-		// retired and returns its booking even if it never started.
 		for t := sched.TaskQueue.PopUnissuedTask(true); t != nil; t = sched.TaskQueue.PopUnissuedTask(true) {
-			sched.processTask(t)
+			sched.finishTask(sched.beginTask(t), errCancel)
 		}
 	}()
+	var runningVectors atomic.Int64
+	finished := make(chan struct{}, 1)
+	concurrency := max(1, paramtable.Get().DataNodeCfg.MaxVecIndexBuildConcurrency.GetAsInt())
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	var runningVectors atomic.Int64
 	for {
+		if sched.ctx.Err() != nil {
+			return
+		}
+		if limit := paramtable.Get().DataNodeCfg.MaxVecIndexBuildConcurrency.GetAsInt(); limit > 0 {
+			concurrency = limit
+		}
 		for sched.ctx.Err() == nil {
-			limit := GetVecIndexBuildPool().Cap()
-			task := sched.TaskQueue.PopUnissuedTask(runningVectors.Load() < int64(limit))
-			if task == nil {
+			t := sched.TaskQueue.PopUnissuedTask(runningVectors.Load() < int64(concurrency))
+			if t == nil {
 				break
 			}
-			if sched.ctx.Err() != nil || task.Ctx().Err() != nil {
-				// A canceled queued vector owns no native work. Retire it
-				// immediately instead of waiting for a full vector pool.
-				sched.processTask(task)
+			exec := sched.beginTask(t)
+			if t.Ctx().Err() != nil {
+				sched.finishTask(exec, errCancel)
 				continue
 			}
-			vector := task.IsVectorIndex()
-			if vector {
+			if t.IsVectorIndex() {
+				// One permit covers preparation through upload and cleanup,
+				// regardless of how the task's internal stages are scheduled.
 				runningVectors.Inc()
+				exec.onFinish = func() {
+					runningVectors.Dec()
+					select {
+					case finished <- struct{}{}:
+					default:
+					}
+				}
+			}
+			if _, ok := t.(PreparedTask); ok {
+				select {
+				case sched.downloadTasks <- exec:
+				case <-sched.ctx.Done():
+					sched.finishTask(exec, errCancel)
+				}
+				continue
 			}
 			sched.taskWg.Add(1)
+			sched.finishAdmission(t)
 			go func() {
 				defer sched.taskWg.Done()
-				if !vector {
-					sched.processTask(task)
-					return
-				}
-				defer func() { runningVectors.Dec(); sched.notify() }()
-				GetVecIndexBuildPool().Submit(func() (any, error) {
-					sched.processTask(task)
-					return nil, nil
-				}).Await()
+				sched.processTask(exec)
 			}()
 		}
 		select {
 		case <-sched.ctx.Done():
 			return
 		case <-sched.TaskQueue.utChan():
+		case <-finished:
 		case <-sched.wake:
 		case <-ticker.C:
 		}
 	}
 }
 
-// Start starts the index, stats and analyze scheduler.
+// Start stats the task scheduler of indexing tasks.
 func (sched *TaskScheduler) Start() error {
+	sched.taskWg.Add(1)
+	go sched.pipelineLoop()
 	sched.wg.Add(1)
 	go sched.indexBuildLoop()
 	return nil
 }
 
-// Close waits for cancellation, native execution and cleanup to finish.
+// Close stops dispatching new tasks. Running tasks retain their resources until
+// they return; use Wait before destroying resources they may still access.
 func (sched *TaskScheduler) Close() {
 	sched.cancel()
 	sched.wg.Wait()
+}
+
+// Wait joins all tasks after Close, including native calls that cannot be interrupted.
+func (sched *TaskScheduler) Wait() {
 	sched.taskWg.Wait()
 }

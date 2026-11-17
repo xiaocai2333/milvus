@@ -53,7 +53,7 @@ func TestTaskResource_Formulas(t *testing.T) {
 	defaultCPU := paramtable.Get().DataCoordCfg.TaskResourceDefaultCPU.GetAsInt64()
 	minMem := paramtable.Get().DataCoordCfg.TaskResourceMinTaskMemory.GetAsSize()
 
-	assert.Equal(t, taskcommon.Resource{CPU: 8, Memory: 2 * testGiB}, Index(testGiB, true))
+	assert.Equal(t, taskcommon.Resource{CPU: 8, Memory: 4 * testGiB}, Index(testGiB, true))
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 2 * testGiB}, Index(testGiB, false))
 	assert.Equal(t, taskcommon.Resource{CPU: defaultCPU, Memory: 2 * testGiB}, Stats(testGiB))
 	// Sort compaction is the stats formula over the whole segment, same factor.
@@ -172,7 +172,7 @@ func TestTaskResource_ConfigOverride(t *testing.T) {
 	defer pt.Reset(paramtable.Get().DataCoordCfg.TaskResourceVectorIndexCPU.Key)
 	defer pt.Reset(paramtable.Get().DataCoordCfg.TaskResourceIndexMemoryFactor.Key)
 
-	assert.Equal(t, taskcommon.Resource{CPU: 4, Memory: 3 * testGiB}, Index(testGiB, true))
+	assert.Equal(t, taskcommon.Resource{CPU: 4, Memory: 4 * testGiB}, Index(testGiB, true))
 }
 
 // TestTaskResource_ConfigFloors pins the "never zero" invariant against a
@@ -458,4 +458,25 @@ func TestCompactionReaderMemory(t *testing.T) {
 	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
 	segment.Binlogs = nil
 	assert.EqualValues(t, 2048*testMiB, CompactionReaderMemory(segment, nil))
+}
+
+func TestPipelineIndexMemoryPrice(t *testing.T) {
+	paramtable.Init()
+	params := paramtable.Get()
+	key := params.DataCoordCfg.TaskResourceIndexMemoryFactor.Key
+	t.Cleanup(func() { _ = params.Reset(key) })
+	for _, tc := range []struct {
+		factor         string
+		vector, scalar int64
+	}{
+		{"2", 4 * testGiB, 2 * testGiB},
+		{"4", 4 * testGiB, 4 * testGiB},
+		{"6", 6 * testGiB, 6 * testGiB},
+	} {
+		t.Run(tc.factor, func(t *testing.T) {
+			require.NoError(t, params.Save(key, tc.factor))
+			require.Equal(t, tc.vector, Index(testGiB, true).Memory)
+			require.Equal(t, tc.scalar, Index(testGiB, false).Memory)
+		})
+	}
 }

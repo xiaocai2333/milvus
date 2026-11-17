@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -375,7 +376,6 @@ func TestIndexTaskQueue_Resource(t *testing.T) {
 	assert.Error(t, queue.addUnissuedTask(rejected))
 	assert.Equal(t, taskcommon.Resource{}, queue.GetUsingResource())
 	queue.unissuedTasks.Init()
-
 }
 
 // A dropped task whose native build ignores cancellation keeps running while
@@ -446,6 +446,7 @@ func TestIndexTaskScheduler(t *testing.T) {
 	}
 	_taskwg.Wait()
 	scheduler.Close()
+	scheduler.Wait()
 	scheduler.wg.Wait()
 
 	for _, task := range tasks[:len(tasks)-1] {
@@ -470,6 +471,7 @@ func TestIndexTaskScheduler(t *testing.T) {
 	scheduler.Start()
 	_taskwg.Wait()
 	scheduler.Close()
+	scheduler.Wait()
 	scheduler.wg.Wait()
 	for _, task := range tasks {
 		assert.Equal(t, task.GetState(), indexpb.JobState_JobStateFinished)
@@ -500,6 +502,11 @@ func newSchedulerIndexBuildTask(t *testing.T, manager *TaskManager, buildID int6
 func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 	paramtable.Init()
 
+	loadMock := mockey.Mock((*indexBuildTask).LoadData).Return(nil).Build()
+	defer loadMock.UnPatch()
+	reserveMock := mockey.Mock((*indexBuildTask).TryReserveBuild).Return(true, nil).Build()
+	defer reserveMock.UnPatch()
+
 	t.Run("success records execution cost", func(t *testing.T) {
 		manager := NewTaskManager(context.Background())
 		task := newSchedulerIndexBuildTask(t, manager, 1001)
@@ -511,8 +518,13 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		postMock := mockey.Mock((*indexBuildTask).PostExecute).Return(nil).Build()
 		defer postMock.UnPatch()
 
-		scheduler := newTestTaskScheduler(context.Background())
-		scheduler.processTask(task)
+		scheduler := newPipelineScheduler(t)
+		assert.NoError(t, scheduler.TaskQueue.Enqueue(task))
+		assert.Eventually(t, func() bool {
+			return task.GetState() != indexpb.JobState(commonpb.IndexState_InProgress)
+		}, 5*time.Second, time.Millisecond)
+		scheduler.Close()
+		scheduler.Wait()
 
 		info := manager.GetIndexTaskInfo("test-cluster", 1001)
 		assert.NotNil(t, info)
@@ -531,17 +543,22 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		preMock := mockey.Mock((*indexBuildTask).PreExecute).Return(expectedErr).Build()
 		defer preMock.UnPatch()
 
-		scheduler := newTestTaskScheduler(context.Background())
-		scheduler.processTask(task)
+		scheduler := newPipelineScheduler(t)
+		assert.NoError(t, scheduler.TaskQueue.Enqueue(task))
+		assert.Eventually(t, func() bool {
+			return task.GetState() != indexpb.JobState(commonpb.IndexState_InProgress)
+		}, 5*time.Second, time.Millisecond)
+		scheduler.Close()
+		scheduler.Wait()
 
 		info := manager.GetIndexTaskInfo("test-cluster", 1002)
 		assert.NotNil(t, info)
 		assert.Equal(t, commonpb.IndexState_Retry, info.State)
 		assert.Equal(t, expectedErr.Error(), info.FailReason)
-		assert.Greater(t, info.ExecStartMs, int64(0))
+		assert.Zero(t, info.ExecStartMs)
 		assert.GreaterOrEqual(t, info.ExecEndMs, info.ExecStartMs)
-		assert.GreaterOrEqual(t, info.CostTimeMs, int64(0))
-		assert.Equal(t, int64(1), info.CostCPUNum)
+		assert.Zero(t, info.CostTimeMs)
+		assert.Zero(t, info.CostCPUNum)
 	})
 
 	t.Run("vector index records build pool cpu num", func(t *testing.T) {
@@ -557,8 +574,13 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		postMock := mockey.Mock((*indexBuildTask).PostExecute).Return(nil).Build()
 		defer postMock.UnPatch()
 
-		scheduler := newTestTaskScheduler(context.Background())
-		scheduler.processTask(task)
+		scheduler := newPipelineScheduler(t)
+		assert.NoError(t, scheduler.TaskQueue.Enqueue(task))
+		assert.Eventually(t, func() bool {
+			return task.GetState() != indexpb.JobState(commonpb.IndexState_InProgress)
+		}, 5*time.Second, time.Millisecond)
+		scheduler.Close()
+		scheduler.Wait()
 
 		info := manager.GetIndexTaskInfo("test-cluster", 1003)
 		assert.NotNil(t, info)
@@ -568,6 +590,80 @@ func TestIndexTaskSchedulerRecordsIndexTaskCost(t *testing.T) {
 		assert.GreaterOrEqual(t, info.CostTimeMs, int64(0))
 		assert.Equal(t, int64(hardware.GetCPUNum()), info.CostCPUNum)
 	})
+}
+
+func TestIndexTaskSchedulerCostExcludesPipelineWaits(t *testing.T) {
+	paramtable.Init()
+	manager := NewTaskManager(context.Background())
+	task := newSchedulerIndexBuildTask(t, manager, 1004)
+	var admitted atomic.Bool
+	var loadGate, buildGate, uploadGate <-chan struct{}
+	loading, building, uploading := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	reserveTried := make(chan struct{})
+	var triedOnce sync.Once
+	var uploadStart time.Time
+	pre := mockey.Mock((*indexBuildTask).PreExecute).Return(nil).Build()
+	t.Cleanup(func() { pre.UnPatch() })
+	load := mockey.Mock((*indexBuildTask).LoadData).To(func(*indexBuildTask, context.Context) error {
+		close(loading)
+		<-loadGate
+		return nil
+	}).Build()
+	t.Cleanup(func() { load.UnPatch() })
+	reserve := mockey.Mock((*indexBuildTask).TryReserveBuild).To(func(*indexBuildTask) (bool, error) {
+		triedOnce.Do(func() { close(reserveTried) })
+		return admitted.Load(), nil
+	}).Build()
+	t.Cleanup(func() { reserve.UnPatch() })
+	execute := mockey.Mock((*indexBuildTask).Execute).To(func(*indexBuildTask, context.Context) error {
+		close(building)
+		<-buildGate
+		return nil
+	}).Build()
+	t.Cleanup(func() { execute.UnPatch() })
+	post := mockey.Mock((*indexBuildTask).PostExecute).To(func(*indexBuildTask, context.Context) error {
+		uploadStart = time.Now()
+		close(uploading)
+		<-uploadGate
+		return nil
+	}).Build()
+	t.Cleanup(func() { post.UnPatch() })
+	// Fix the measured build duration so assertions do not depend on wall-clock sleeps.
+	elapsed := mockey.Mock(taskcost.ElapsedMs).Return(int64(17)).Build()
+	t.Cleanup(func() { elapsed.UnPatch() })
+	sched := newPipelineScheduler(t)
+	var releaseLoad, releaseBuild, releaseUpload func()
+	loadGate, releaseLoad = pipelineGate(t)
+	buildGate, releaseBuild = pipelineGate(t)
+	uploadGate, releaseUpload = pipelineGate(t)
+	require.NoError(t, sched.TaskQueue.Enqueue(task))
+	awaitPipeline(t, loading)
+	info := manager.GetIndexTaskInfo("test-cluster", 1004)
+	require.Zero(t, info.ExecStartMs)
+	require.Zero(t, info.CostCPUNum)
+	releaseLoad()
+	awaitPipeline(t, reserveTried)
+	info = manager.GetIndexTaskInfo("test-cluster", 1004)
+	require.Zero(t, info.ExecStartMs)
+	require.Zero(t, info.CostTimeMs)
+	admittedAt := time.Now().UnixMilli()
+	admitted.Store(true)
+	sched.buildWakeup <- struct{}{}
+	awaitPipeline(t, building)
+	info = manager.GetIndexTaskInfo("test-cluster", 1004)
+	require.GreaterOrEqual(t, info.ExecStartMs, admittedAt)
+	require.EqualValues(t, 1, info.CostCPUNum)
+	releaseBuild()
+	awaitPipeline(t, uploading)
+	require.Equal(t, 1, elapsed.Times())
+	require.Zero(t, manager.GetIndexTaskInfo("test-cluster", 1004).ExecEndMs)
+	releaseUpload()
+	require.Eventually(t, func() bool { return task.GetState() == indexpb.JobState_JobStateFinished }, 5*time.Second, time.Millisecond)
+	info = manager.GetIndexTaskInfo("test-cluster", 1004)
+	require.EqualValues(t, 17, info.CostTimeMs)
+	require.GreaterOrEqual(t, info.ExecEndMs, info.ExecStartMs)
+	require.LessOrEqual(t, info.ExecEndMs, uploadStart.UnixMilli())
+	require.Equal(t, 1, elapsed.Times())
 }
 
 func TestIndexTaskGetResource(t *testing.T) {
@@ -594,4 +690,99 @@ func TestIndexTaskGetResource(t *testing.T) {
 
 func newTestTaskScheduler(ctx context.Context) *TaskScheduler {
 	return NewTaskScheduler(ctx, taskcost.NewMemoryAdmission(func() int64 { return 0 }, func() int64 { return 0 }))
+}
+
+func TestIndexTaskQueueBudget(t *testing.T) {
+	t.Run("weighted queue budget transfers at dispatch", func(t *testing.T) {
+		sched := newPipelineTestScheduler()
+		t.Cleanup(sched.Close)
+		sched.totalSlots = func() int64 { return 128 }
+		first := &pipelineTestTask{id: "first", slots: 96, ctx: context.Background()}
+		second := &pipelineTestTask{id: "second", slots: 32, ctx: context.Background()}
+		require.NoError(t, sched.TaskQueue.Enqueue(first))
+		require.NoError(t, sched.TaskQueue.Enqueue(second))
+		require.ErrorIs(t, sched.TaskQueue.Enqueue(&pipelineTestTask{
+			id: "rejected", slots: 1, ctx: context.Background(),
+		}), merr.ErrServiceResourceInsufficient)
+		used, queued := sched.TaskQueue.GetSlotUsage()
+		require.Zero(t, used)
+		require.EqualValues(t, 128, queued)
+		require.Nil(t, sched.TaskQueue.PopUnissuedTask(false))
+		require.Same(t, first, sched.TaskQueue.PopUnissuedTask(true))
+		used, queued = sched.TaskQueue.GetSlotUsage()
+		require.EqualValues(t, 96, used)
+		require.EqualValues(t, 32, queued)
+		sched.finishAdmission(first)
+		sched.releaseResources(first)
+		sched.TaskQueue.ReleaseResource(first)
+		require.Same(t, second, sched.TaskQueue.PopUnissuedTask(true))
+		sched.finishAdmission(second)
+		sched.releaseResources(second)
+		sched.TaskQueue.ReleaseResource(second)
+		used, queued = sched.TaskQueue.GetSlotUsage()
+		require.Zero(t, used)
+		require.Zero(t, queued)
+	})
+
+	t.Run("one oversized task can enter an empty queue", func(t *testing.T) {
+		sched := newPipelineTestScheduler()
+		t.Cleanup(sched.Close)
+		sched.totalSlots = func() int64 { return 128 }
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		large := &pipelineTestTask{id: "large", slots: 256, ctx: ctx}
+		require.NoError(t, sched.TaskQueue.Enqueue(large))
+		require.ErrorIs(t, sched.TaskQueue.Enqueue(&pipelineTestTask{
+			id: "later", ctx: context.Background(),
+		}), merr.ErrServiceResourceInsufficient)
+		cancel()
+		require.Same(t, large, sched.TaskQueue.PopUnissuedTask(false))
+		used, queued := sched.TaskQueue.GetSlotUsage()
+		require.Zero(t, used)
+		require.Zero(t, queued)
+	})
+
+	t.Run("concurrent receivers share one queue budget", func(t *testing.T) {
+		sched := newPipelineTestScheduler()
+		t.Cleanup(sched.Close)
+		sched.totalSlots = func() int64 { return 128 }
+		var accepted atomic.Int32
+		var wg sync.WaitGroup
+		for id := range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := sched.TaskQueue.Enqueue(&pipelineTestTask{
+					id: fmt.Sprint(id), slots: 64, ctx: context.Background(),
+				})
+				if err == nil {
+					accepted.Add(1)
+				} else {
+					assert.ErrorIs(t, err, merr.ErrServiceResourceInsufficient)
+				}
+			}()
+		}
+		wg.Wait()
+		require.EqualValues(t, 2, accepted.Load())
+		used, queued := sched.TaskQueue.GetSlotUsage()
+		require.Zero(t, used)
+		require.EqualValues(t, 128, queued)
+	})
+}
+
+func TestIndexTaskQueueReleasesResourcesAfterTaskIdentityChanges(t *testing.T) {
+	scheduler := newPipelineTestScheduler()
+	scheduler.totalSlots = func() int64 { return 128 }
+	task := &pipelineTestTask{id: "original", ctx: context.Background()}
+	require.NoError(t, scheduler.TaskQueue.Enqueue(task))
+	require.Same(t, task, scheduler.TaskQueue.PopUnissuedTask(true))
+	scheduler.TaskQueue.AddActiveTask(task)
+	task.id = "reset"
+	require.Same(t, task, scheduler.TaskQueue.PopActiveTask(task))
+	scheduler.finishAdmission(task)
+	scheduler.releaseResources(task)
+	scheduler.TaskQueue.ReleaseResource(task)
+	require.Zero(t, scheduler.TaskQueue.GetUsingSlot())
+	require.Zero(t, scheduler.TaskQueue.GetUsingResource().Memory)
+	require.Empty(t, scheduler.pendingTasks)
 }

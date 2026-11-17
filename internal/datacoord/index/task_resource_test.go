@@ -107,7 +107,8 @@ func TestTaskResource_IndexSchemaCacheMiss(t *testing.T) {
 	priced := taskresource.Index(taskresource.BigFixtureRows*128*4, true)
 	// The index type is unknown too while the schema is missing, so the bound
 	// takes the scalar CPU request. Only memory decides whether a worker fits.
-	bound := taskresource.Index(taskresource.BigFixtureSegmentSize, false)
+	bound := taskresource.Index(taskresource.BigFixtureSegmentSize, true)
+	bound.CPU = taskresource.DefaultCPU()
 	assert.NotEqual(t, taskresource.Default(), bound, "the bug this test guards must be observable")
 
 	it := bigFixtureIndexTask(mt, im)
@@ -137,7 +138,8 @@ func TestTaskResource_IndexEmptyIndexParams(t *testing.T) {
 	assert.NotEqual(t, taskresource.Default(), misPriced, "the bug this test guards must be observable")
 	// The schema is known here, but the index type is not, so the price is the
 	// whole segment at the scalar CPU request until the params are read back.
-	bound := taskresource.Index(taskresource.BigFixtureSegmentSize, false)
+	bound := taskresource.Index(taskresource.BigFixtureSegmentSize, true)
+	bound.CPU = taskresource.DefaultCPU()
 
 	it := bigFixtureIndexTask(mt, im)
 	assert.Equal(t, bound, taskresource.Price(it.GetTaskResource()))

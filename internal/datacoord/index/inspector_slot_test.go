@@ -477,3 +477,27 @@ func TestIndexInspector_CreateIndexesForSegment_PassesResolvedCollection(t *test
 	assert.NoError(t, inspector.createIndexesForSegment(ctx, segment))
 	assert.Equal(t, calculateIndexTaskSlot((int64(128*4)+nullablePadPerRow)*numRows, true), enqueuedSlot)
 }
+
+func TestVectorIndexSlotsCoverRetainedBuildMemory(t *testing.T) {
+	paramtable.Init()
+	pt := paramtable.Get()
+	oldRole := paramtable.GetRole()
+	paramtable.SetRole(typeutil.DataNodeRole)
+	defer paramtable.SetRole(oldRole)
+	for key, value := range map[string]string{
+		pt.DataNodeCfg.WorkerSlotUnit.Key: "16",
+		pt.DataNodeCfg.BuildParallel.Key:  "1",
+	} {
+		assert.NoError(t, pt.Save(key, value))
+		defer pt.Reset(key)
+	}
+	for _, tc := range []struct{ bytes, slots int64 }{
+		{0, 1},
+		{128 << 20, 1},
+		{(128 << 20) + 1, 2},
+		{1 << 30, 8},
+		{3 << 30, 24},
+	} {
+		assert.Equal(t, tc.slots, calculateIndexTaskSlot(tc.bytes, true))
+	}
+}

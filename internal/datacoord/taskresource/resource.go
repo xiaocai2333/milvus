@@ -93,12 +93,16 @@ func Default() taskcommon.Resource {
 // memory, so it is not priced lower than an in-memory build.
 func Index(fieldSize int64, isVectorIndex bool) taskcommon.Resource {
 	cpu := DefaultCPU()
+	factor := paramtable.Get().DataCoordCfg.TaskResourceIndexMemoryFactor.GetAsFloat()
 	if isVectorIndex {
 		cpu = max(paramtable.Get().DataCoordCfg.TaskResourceVectorIndexCPU.GetAsInt64(), 1)
+		// The staged pipeline retains input, build workspace and serialized
+		// output until upload and cleanup finish. Match its scalar slot price.
+		factor = max(factor, 4)
 	}
 	return taskcommon.Resource{
 		CPU:    cpu,
-		Memory: ClampMemory(scaled(fieldSize, paramtable.Get().DataCoordCfg.TaskResourceIndexMemoryFactor.GetAsFloat())),
+		Memory: ClampMemory(scaled(fieldSize, factor)),
 	}
 }
 

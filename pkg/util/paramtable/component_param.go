@@ -7853,7 +7853,7 @@ re-ingesting. A job that timed out before applying carries 0 and left the collec
 	p.IndexTaskSlotUsage = ParamItem{
 		Key:          "dataCoord.slot.indexTaskSlotUsage",
 		Version:      "2.5.8",
-		Doc:          "slot usage of index task per 512mb",
+		Doc:          "Deprecated: unused. Vector task slots are estimated from input, build workspace and output memory.",
 		DefaultValue: "64",
 		PanicIfEmpty: false,
 		Export:       true,
@@ -7937,7 +7937,7 @@ re-ingesting. A job that timed out before applying carries 0 and left the collec
 		Key:          "dataCoord.taskResource.indexMemoryFactor",
 		Version:      "3.0.1",
 		DefaultValue: "2",
-		Doc:          "memory of an index build task = indexed field size * this factor",
+		Doc:          "memory of an index build task = indexed field size * this factor; staged vector builds use at least 4",
 		Export:       false,
 	}
 	p.TaskResourceIndexMemoryFactor.Init(base.mgr)
